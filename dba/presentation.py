@@ -115,6 +115,13 @@ def render_human(command: str, value: Any) -> str:
                  _line("Account", data.get("account")), "", "Feature          Status",
                  "-" * 30]
         lines.extend(f"{row['feature']:<17}{row['status']}" for row in data.get("features", []))
+        for row in data.get("features", []):
+            if row.get("missing_required"):
+                lines.append(_line(f"{row['feature']} missing", ", ".join(row["missing_required"])))
+            if row.get("missing_optional"):
+                lines.append(_line(f"{row['feature']} optional", ", ".join(row["missing_optional"])))
+            if row.get("impact") and row.get("status") in {"PARTIAL", "MISSING", "UNKNOWN"}:
+                lines.append(_line(f"{row['feature']} impact", row["impact"]))
         if data.get("generated_sql"):
             lines.extend(["", "Generated SQL", data["generated_sql"],
                           "Toolkit did NOT execute this script."])
@@ -426,6 +433,8 @@ def render_replication_summary(report: Any, report_path: str, verbose: bool = Fa
     permission = data.get("details", {}).get("permission_readiness", {})
     if permission:
         lines.extend(["", "Permission Readiness",
+                      _line("Account Security", (permission.get("account_security") or {}).get("classification")),
+                      _line("Feature", "replication"),
                       _line("Status", permission.get("status"))])
         if permission.get("missing_required"):
             lines.append(_line("Missing Required", ", ".join(permission["missing_required"])))

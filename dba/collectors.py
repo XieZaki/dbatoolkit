@@ -19,6 +19,7 @@ class CollectorResult:
     success: bool
     error_type: str | None = None
     error_message: str | None = None
+    database_error: dict[str, Any] | None = None
 
 
 class Collector(ABC):

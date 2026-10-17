@@ -23,6 +23,7 @@ from dba.mysql_collectors import (
 )
 from dba.mysql_slow import build_slow_report
 from dba.mysql_slow_reporter import render_console, render_markdown
+from dba.permissions import PermissionStatus
 from dba.registry import SqlScriptRegistry
 from dba.settings import MySQLSettings
 
@@ -35,14 +36,18 @@ PREFLIGHT = {"server_version": "8.0.44", "monitor_user": "toolkit_monitor@%",
 
 
 class FakeCursor:
-    def __init__(self, connection: "FakeConnection") -> None:
+    def __init__(self, connection: "FakeConnection", cursor_class: Any = None) -> None:
         self.connection = connection
+        self.cursor_class = cursor_class
+        self.script_name: str | None = None
         self.description: list[tuple[str]] | None = None
         self.rows: list[dict[str, Any]] = []
+        self.offset = 0
         self.closed = False
 
     def execute(self, sql: str) -> None:
         name = self.connection.scripts[sql]
+        self.script_name = name
         self.connection.executed.append(name)
         if name in self.connection.failures:
             raise self.connection.failures[name]
@@ -50,10 +55,13 @@ class FakeCursor:
         self.description = [(key,) for key in self.rows[0]] if self.rows else [("id",)]
 
     def fetchmany(self, size: int) -> list[tuple[Any, ...]]:
-        return [tuple(row.values()) for row in self.rows[:size]]
+        selected = self.rows[self.offset:self.offset + size]
+        self.offset += len(selected)
+        return [tuple(row.values()) for row in selected]
 
     def close(self) -> None:
         self.closed = True
+        self.connection.lifecycle.append("cursor.close")
 
 
 class FakeConnection:
@@ -74,10 +82,13 @@ class FakeConnection:
         self.closed = False
         self.autocommit = True
         self.rollbacks = 0
+        self.lifecycle: list[str] = []
+        self.cursor_classes: list[Any] = []
 
-    def cursor(self) -> FakeCursor:
-        result = FakeCursor(self)
+    def cursor(self, cursor_class: Any = None) -> FakeCursor:
+        result = FakeCursor(self, cursor_class)
         self.cursors.append(result)
+        self.cursor_classes.append(cursor_class)
         return result
 
     def get_autocommit(self) -> bool:
@@ -87,6 +98,7 @@ class FakeConnection:
         self.rollbacks += 1
 
     def close(self) -> None:
+        self.lifecycle.append("connection.close")
         self.closed = True
 
 
@@ -423,7 +435,7 @@ def test_server_numeric_duration_preserves_integer_comparison() -> None:
     assert LongRunningCollector(target).collect(INSTANCE).rows[0]["duration_ms"] == 3134
 
 
-def test_streaming_cursor_aborts_connection_at_row_cap() -> None:
+def test_buffered_cursor_truncation_does_not_abort_connection() -> None:
     driver = FakeDriver()
     driver.cursors = SimpleNamespace(SSCursor=FakeCursor)
     target, _ = adapter(driver)
@@ -431,7 +443,96 @@ def test_streaming_cursor_aborts_connection_at_row_cap() -> None:
     driver.connection.results["server_info"] = [{"version": "x"}, {"version": "y"}]
     result = target.execute_readonly(target.registry.get("server_info", DatabaseType.MYSQL))
     assert result.truncated and result.row_count == 2
-    assert driver.connection.closed and driver.options["cursorclass"] is FakeCursor
+    assert not driver.connection.closed
+    assert driver.connection.cursor_classes[-1] is None
+
+
+def test_metadata_and_replication_queries_use_buffered_cursor_and_read_all_rows() -> None:
+    driver = FakeDriver()
+    driver.cursors = SimpleNamespace(SSCursor=FakeCursor)
+    driver.connection.results["monitor_grants"] = [
+        {"grant": "GRANT SELECT ON *.* TO `toolkit_monitor`@`%`"},
+        {"grant": "GRANT REPLICATION CLIENT ON *.* TO `toolkit_monitor`@`%`"},
+    ]
+    target, _ = adapter(driver)
+    target.connect()
+    assert any("REPLICATION CLIENT" in item for item in target.permission_observations)
+    assert target.preflight_checks["permission_replication"]
+    cursor_classes = {cursor.script_name: cursor.cursor_class
+                      for cursor in driver.connection.cursors}
+    for name in ("preflight", "monitor_grants", "server_info"):
+        assert cursor_classes[name] is None
+    grants = target._run(target.registry.get("monitor_grants", DatabaseType.MYSQL))
+    status = target.execute_readonly(target.registry.get("replication_status", DatabaseType.MYSQL))
+    assert grants.row_count == 2
+    assert status.success and status.row_count == 0
+    assert driver.connection.cursor_classes[-2:] == [None, None]
+    assert all(cursor.closed for cursor in driver.connection.cursors)
+
+
+def test_missing_replication_permission_has_structured_preflight_guidance() -> None:
+    target, _ = adapter()
+    target.connect()
+    target._ready = False
+    with pytest.raises(ToolkitError) as exc_info:
+        target.execute_readonly(target.registry.get("replication_status", DatabaseType.MYSQL))
+    error = exc_info.value
+    assert error.error_type == "MissingPermission"
+    assert error.permission_readiness is not None
+    assert error.permission_readiness["feature"] == "replication"
+    assert error.permission_readiness["status"] == PermissionStatus.MISSING
+    assert error.permission_readiness["missing_required"] == ("REPLICATION CLIENT",)
+    assert "GRANT REPLICATION CLIENT ON *.*" in str(error.permission_readiness["suggested_grant"])
+    assert error.permission_readiness["toolkit_executed"] is False
+
+
+def test_streaming_cursor_is_closed_before_connection_on_truncation() -> None:
+    driver = FakeDriver()
+    driver.cursors = SimpleNamespace(SSCursor=FakeCursor)
+    target, _ = adapter(driver)
+    target.connect()
+    driver.connection.results["active_sessions"] = [session(pid) for pid in range(2001)]
+    result = target.execute_readonly(target.registry.get("active_sessions", DatabaseType.MYSQL))
+    assert result.truncated and result.row_count == 2000
+    assert driver.connection.cursor_classes[-1] is FakeCursor
+    assert driver.connection.cursors[-1].closed
+    assert driver.connection.lifecycle[-2:] == ["cursor.close", "connection.close"]
+    assert driver.connection.closed
+
+
+def test_permission_query_failure_closes_cursor_before_connection() -> None:
+    driver = FakeDriver()
+    target, _ = adapter(driver)
+    target.connect()
+    driver.connection.failures["replication_status"] = RuntimeError(
+        1142, f"SELECT command denied {PASSWORD}"
+    )
+    result = target.execute_readonly(target.registry.get("replication_status", DatabaseType.MYSQL))
+    assert not result.success and result.error_type == "QueryDenied"
+    assert result.database_error is not None
+    assert result.database_error["vendor_code"] == 1142
+    assert result.database_error["message"] == "SELECT command denied <REDACTED>"
+    assert PASSWORD not in repr(result.database_error)
+    cursor = driver.connection.cursors[-1]
+    assert cursor.closed and driver.connection.closed
+    assert driver.connection.lifecycle[-2:] == ["cursor.close", "connection.close"]
+
+
+def test_replica_status_zero_or_multiple_channel_rows_are_consumed_without_streaming() -> None:
+    driver = FakeDriver()
+    driver.cursors = SimpleNamespace(SSCursor=FakeCursor)
+    target, _ = adapter(driver)
+    target.connect()
+    script = target.registry.get("replication_status", DatabaseType.MYSQL)
+    driver.connection.results["replication_status"] = []
+    empty = target.execute_readonly(script)
+    assert empty.success and empty.row_count == 0 and not empty.truncated
+    driver.connection.results["replication_status"] = [
+        {"Channel_Name": "one"}, {"Channel_Name": "two"},
+    ]
+    multiple = target.execute_readonly(script)
+    assert multiple.success and multiple.row_count == 2
+    assert driver.connection.cursor_classes[-2:] == [None, None]
 
 
 def test_sleep_transaction_multilevel_roots_references_and_markdown() -> None:
@@ -515,3 +616,46 @@ def test_mysql_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main([*common, "diagnose", "my", "slow", "--format", "json",
                  "--report", str(report)], provider=provider, driver=FakeDriver()) == 0
     assert json.loads(capsys.readouterr().out)["success"] and report.exists()
+
+
+def test_replication_cli_explains_missing_replication_client_without_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    inventory.write_text(yaml.safe_dump({"databases": [{
+        "id": "my", "name": "MySQL", "db_type": "mysql", "host": "test.invalid",
+        "port": 3306, "database": "test", "credential_alias": "monitor",
+        "environment": "development",
+    }]}), encoding="utf-8")
+    common = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql")]
+    provider = MemoryCredentialProvider()
+
+    permission_driver = FakeDriver()
+    permission_driver.connection.results["monitor_grants"] = [{
+        "Grants": "GRANT SELECT ON *.* TO `toolkit_monitor`@`%`"
+    }]
+    assert main([*common, "permissions", "my", "--feature", "replication"],
+                provider=provider, driver=permission_driver) == 0
+    permission_output = capsys.readouterr()
+    assert "replication" in permission_output.out
+    assert "MISSING" in permission_output.out
+    assert "REPLICATION CLIENT" in permission_output.out
+    assert not permission_output.err
+
+    diagnostic_driver = FakeDriver()
+    diagnostic_driver.connection.results["monitor_grants"] = [{
+        "Grants": "GRANT SELECT ON *.* TO `toolkit_monitor`@`%`"
+    }]
+    diagnostic_driver.connection.failures["replication_status"] = Exception(
+        1142, "SHOW command denied to user 'toolkit_monitor'"
+    )
+    report = tmp_path / "replication.html"
+    assert main([*common, "diagnose", "my", "replication", "--report", str(report)],
+                provider=provider, driver=diagnostic_driver) == 1
+    diagnostic_output = capsys.readouterr()
+    assert "MISSING_PERMISSION" in diagnostic_output.out
+    assert "SHOW command denied" in diagnostic_output.out
+    assert "REPLICATION CLIENT" in diagnostic_output.out
+    assert "Toolkit Executed  NO" in diagnostic_output.out
+    assert not diagnostic_output.err
+    assert report.exists()

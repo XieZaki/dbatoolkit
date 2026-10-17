@@ -123,7 +123,8 @@ def _sample_ok(evidence: ReplicationEvidence, *names: str) -> bool:
 def _sample_payload(evidence: ReplicationEvidence) -> list[dict[str, Any]]:
     return [{"collector": row.collector_name, "success": row.success,
              "row_count": row.row_count, "truncated": row.truncated,
-             "error_type": row.error_type, "error_message": row.error_message}
+             "error_type": row.error_type, "error_message": row.error_message,
+             "vendor_error": row.database_error}
             for row in evidence.samples]
 
 
@@ -527,8 +528,15 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
     readiness = assess_permissions(requirements_for(instance.db_type, "replication", evidence.version),
                                    getattr(adapter, "permission_observations", None))
     if readiness["status"] == PermissionStatus.MISSING:
+        failed_status = next((sample for sample in evidence.samples
+                              if sample.collector_name in {"replication_status",
+                                                           "replication_status_legacy"}
+                              and not sample.success), None)
+        vendor_error = (failed_status.database_error.get("message")
+                        if failed_status and failed_status.database_error else None)
         state["issues"].append(_issue("MISSING_PERMISSION", "WARNING",
                                       "Required replication monitoring permissions are missing.",
+                                      vendor_message=vendor_error,
                                       evidence={"missing_required": readiness["missing_required"]}))
     if not required_ok:
         state["issues"].append(_issue("REQUIRED_EVIDENCE_MISSING", "WARNING",
@@ -587,6 +595,7 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
     requirements = requirements_for(instance.db_type, "replication", evidence.version)
     missing = readiness["missing_required"]
     permission = {"status": readiness["status"].value,
+                  "account_security": getattr(adapter, "privilege_classification", None),
                   "missing_required": missing,
                   "missing_optional": readiness["missing_optional"],
                   "available": readiness["available"],

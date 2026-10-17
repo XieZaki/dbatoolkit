@@ -22,7 +22,7 @@ from dba.errors import ToolkitError
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
 from dba.mysql_privileges import classify_mysql_grants
-from dba.permissions import assess_permissions, requirements_for
+from dba.permissions import assess_permissions, privilege_reasons, render_sql, requirements_for
 from dba.registry import SqlScript, SqlScriptRegistry
 from dba.settings import MySQLSettings
 
@@ -36,7 +36,7 @@ class Cursor(Protocol):
 
 
 class Connection(Protocol):
-    def cursor(self) -> Cursor: ...
+    def cursor(self, cursor: Any | None = None) -> Cursor: ...
     def get_autocommit(self) -> bool: ...
     def rollback(self) -> None: ...
     def close(self) -> None: ...
@@ -54,7 +54,7 @@ def load_driver() -> Driver:
 
 
 def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:
-    detail = normalize_mysql_error(exc, (secret,)) if phase == "Connection" else None
+    detail = normalize_mysql_error(exc, (secret,))
     code = exc.args[0] if exc.args and type(exc.args[0]) is int else None
     if isinstance(exc, (TimeoutError, socket.timeout)) or code in {1205, 3024}:
         return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.", database_error=detail)
@@ -75,6 +75,11 @@ class MySQLAdapter(Adapter):
     REQUIRED = ("preflight", "server_info", "database_status", "active_sessions",
                 "active_requests", "active_requests_no_waits", "active_requests_basic",
                 "transactions", "blocking", "monitor_grants")
+    STREAMING_SCRIPTS = frozenset({
+        "active_sessions", "active_requests", "active_requests_no_waits",
+        "active_requests_basic", "transactions", "blocking", "database_status",
+        "disk_binlogs", "disk_schemas", "disk_replica",
+    })
 
     def __init__(self, instance: DatabaseInstance, provider: CredentialProvider,
                  registry: SqlScriptRegistry, settings: MySQLSettings | None = None,
@@ -96,7 +101,7 @@ class MySQLAdapter(Adapter):
         self._version = ""
         self._statement_script = "active_requests"
         self._read_timeout = self.settings.query_timeout
-        self._streaming = False
+        self._streaming_cursor: Any | None = None
         self.preflight_checks: dict[str, bool] = {}
         self.permission_observations: set[str] = set()
         self.privilege_classification: dict[str, Any] = {"classification": "UNKNOWN"}
@@ -136,10 +141,7 @@ class MySQLAdapter(Adapter):
             except Exception:
                 raise ToolkitError("CredentialRejected", "Monitoring credential unavailable or prohibited.") from None
             self._password = credential.password
-            cursor_class = getattr(getattr(driver, "cursors", None), "SSCursor", None)
-            if cursor_class is not None:
-                self._streaming = True
-            connection_options: dict[str, Any] = {"cursorclass": cursor_class} if cursor_class else {}
+            self._streaming_cursor = getattr(getattr(driver, "cursors", None), "SSCursor", None)
             self._connection = driver.connect(
                 host=self.instance.host, port=self.instance.port,
                 database=self.instance.database, user=credential.username,
@@ -152,7 +154,6 @@ class MySQLAdapter(Adapter):
                 ssl_verify_identity=(
                     self.settings.ssl_verify_identity if self.settings.ssl_enabled else False
                 ),
-                **connection_options,
             )
             if not self._connection.get_autocommit():
                 raise ToolkitError("AutocommitRequired", "Driver did not enable autocommit.")
@@ -243,6 +244,13 @@ class MySQLAdapter(Adapter):
                 self.permission_observations,
             )
             self.preflight_checks[f"permission_{feature}"] = readiness["status"].value == "READY"
+        replication_readiness = assess_permissions(
+            requirements_for(DatabaseType.MYSQL, "replication", self._version),
+            self.permission_observations,
+        )
+        self.preflight_checks["permission_replication"] = (
+            replication_readiness["status"].value == "READY"
+        )
         if row.get("statements_consumer") != 1:
             self._statement_script = "active_requests_basic"
         elif row.get("waits_consumer") != 1:
@@ -261,7 +269,7 @@ class MySQLAdapter(Adapter):
         self._ready = False
         self._password = ""
         self._version = ""
-        self._streaming = False
+        self._streaming_cursor = None
         ok = True
         if connection is not None:
             try:
@@ -305,14 +313,40 @@ class MySQLAdapter(Adapter):
 
     def execute_readonly(self, script: SqlScript) -> CollectorResult:
         if not self._ready:
-            raise ToolkitError("PreflightRequired", "A preflight-approved MySQL monitor is required.")
+            readiness = self._known_replication_readiness()
+            if readiness is not None and readiness["status"] == "MISSING":
+                raise ToolkitError(
+                    "MissingPermission",
+                    "MySQL replication metadata requires a missing monitoring privilege.",
+                    permission_readiness=readiness,
+                )
+            raise ToolkitError("PreflightRequired", "MySQL connection preflight did not complete.")
         return self._run(script)
+
+    def _known_replication_readiness(self) -> dict[str, Any] | None:
+        if not self._version or not self.current_user:
+            return None
+        requirements = requirements_for(DatabaseType.MYSQL, "replication", self._version)
+        assessment = assess_permissions(requirements, self.permission_observations)
+        missing = assessment["missing_required"]
+        return {
+            "feature": "replication",
+            **assessment,
+            "missing_reasons": privilege_reasons(requirements, missing),
+            "impact": requirements.impact,
+            "account_security": self.privilege_classification,
+            "suggested_grant": render_sql(DatabaseType.MYSQL, ("replication",),
+                                           self.current_user) if missing else None,
+            "toolkit_executed": False,
+            "dba_approval_required": bool(missing),
+        }
 
     def _run(self, script: SqlScript) -> CollectorResult:
         started_at = datetime.now(timezone.utc)
         started = time.monotonic()
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
+        database_error_payload: dict[str, Any] | None = None
         truncated = False
         error: ToolkitError | None = None
         authorized = False
@@ -323,7 +357,11 @@ class MySQLAdapter(Adapter):
             script_name = script.metadata.name
             if self._connection is None:
                 raise ToolkitError("NotConnected", "Connection is closed.")
-            cursor = self._connection.cursor()
+            streaming = script.metadata.name in self.STREAMING_SCRIPTS
+            if streaming and self._streaming_cursor is not None:
+                cursor = self._connection.cursor(self._streaming_cursor)
+            else:
+                cursor = self._connection.cursor()
             cursor.execute(script.text)
             if cursor.description is None:
                 raise ToolkitError("InvalidResult", "Read-only script returned no rowset.")
@@ -338,23 +376,31 @@ class MySQLAdapter(Adapter):
                      if not authorized else _driver_error(exc, "Query"))
         except Exception as exc:
             self._last_database_error = normalize_mysql_error(exc, (self._password,))
-            error = _driver_error(exc, "Query")
+            error = _driver_error(exc, "Query", self._password)
+            database_error = error.database_error
+            if database_error is not None:
+                to_dict = getattr(database_error, "to_dict", None)
+                if callable(to_dict):
+                    payload = to_dict()
+                    if isinstance(payload, dict):
+                        database_error_payload = payload
         except BaseException:
-            self._close()
+            error = ToolkitError("Interrupted", "Query was interrupted; connection will be closed.")
             raise
         finally:
-            if truncated and self._streaming:
-                # SSCursor.close() drains all unread rows. Abort the connection first.
-                self._close()
             if cursor is not None:
                 try:
                     cursor.close()
                 except Exception:
-                    if not truncated:
-                        error = error or ToolkitError("CleanupFailed", "Query cursor cleanup failed.")
+                    error = error or ToolkitError("CleanupFailed", "Query cursor cleanup failed.")
+            # Always close the active cursor before its connection. PyMySQL's
+            # public SSCursor.close() finishes an unbuffered result; closing the
+            # connection first leaves its destructor trying to read a dead socket.
             if error is not None:
                 rows = ()
                 truncated = False
+                self._close()
+            elif truncated and script.metadata.name in self.STREAMING_SCRIPTS:
                 self._close()
             details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated}
             if authorized:
@@ -366,7 +412,8 @@ class MySQLAdapter(Adapter):
         return CollectorResult(self.instance.id, script_name, started_at,
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,
                                rows, len(rows), truncated, error is None,
-                               error.error_type if error else None, str(error) if error else None)
+                               error.error_type if error else None, str(error) if error else None,
+                               database_error_payload)
 
     def get_server_version(self) -> str:
         if not self._ready:
