@@ -431,7 +431,9 @@ def render_replication_summary(report: Any, report_path: str, verbose: bool = Fa
         lines.append(f"  {item.get('kind', 'lag')}: {item.get('value')} {item.get('unit')} "
                      f"[{item.get('severity', 'UNKNOWN')}] — {item.get('source', 'source unknown')}")
     if not lags:
-        lines.append("  No lag metric was returned.")
+        lines.append("  Not applicable because replication is not configured."
+                     if summary.get("status") == "NOT_CONFIGURED"
+                     else "  No lag metric was returned.")
     lines.extend(["", "Issues"])
     for issue in issues[:5 if not verbose else 15]:
         lines.append(f"  {issue.get('severity', 'UNKNOWN')} {issue.get('code', 'UNKNOWN')}: "

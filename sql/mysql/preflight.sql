@@ -1,5 +1,5 @@
 SELECT VERSION() AS server_version, CURRENT_USER() AS monitor_user,
-    CURRENT_ROLE() AS active_roles, @@performance_schema AS performance_schema_enabled,
+    @@performance_schema AS performance_schema_enabled,
     CONNECTION_ID() AS connection_id,
     EXISTS (SELECT 1 FROM information_schema.user_privileges
             WHERE grantee = CONCAT(QUOTE(SUBSTRING_INDEX(CURRENT_USER(), '@', 1)),

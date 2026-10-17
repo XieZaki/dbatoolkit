@@ -50,8 +50,10 @@ from dba.permissions import (
     feature_supported,
     privilege_reasons,
     render_privileges_sql,
+    render_profile_sql,
     render_sql,
     requirements_for,
+    requirements_for_profile,
 )
 from dba.permissions import REGISTRY as PERMISSION_REGISTRY
 from dba.postgresql import PostgreSQLAdapter
@@ -67,6 +69,7 @@ from dba.presentation import (
 )
 from dba.registry import SqlScriptRegistry
 from dba.replication import diagnose_replication
+from dba.replication_collectors import validate_replication_profiles
 from dba.reporting import HtmlReportRenderer, build_report_model, render_bounded
 from dba.runtime import RuntimeStatus, database_runtime_status, doctor, runtime_info
 from dba.settings import MySQLSettings, OracleSettings, PostgreSQLSettings, SQLServerSettings
@@ -76,8 +79,11 @@ from dba.sqlserver_collectors import COLLECTORS
 from dba.versioning import (
     DEFAULT_VERSION_DETECTOR,
     PROFILE_RESOLVER,
+    ProfileResolutionError,
+    SupportState,
     VersionStatus,
     build_version_profile,
+    resolve_profile_for_adapter,
     version_status,
 )
 
@@ -631,10 +637,15 @@ def main(
                 ).get("selected_native_driver")
             _emit(args, "show", redact({**asdict(shown), "effective_connection": effective}))
         elif args.command == "validate":
-            scripts = SqlScriptRegistry(args.sql_root).validate()
+            registry = SqlScriptRegistry(args.sql_root)
+            scripts = registry.validate()
             profile_errors = PROFILE_RESOLVER.validate()
             if profile_errors:
                 raise ValidationError("Version profile registry invalid: " + "; ".join(profile_errors))
+            replication_errors = validate_replication_profiles(registry, PROFILE_RESOLVER.bindings)
+            if replication_errors:
+                raise ValidationError("Replication profile registry invalid: "
+                                       + "; ".join(replication_errors))
             warnings = inventory.version_family_warnings()
             validation_result = {"success": True, "instance_count": len(inventory.instances),
                                 "sql_script_count": len(scripts), "warnings": warnings}
@@ -658,7 +669,8 @@ def main(
                     database_id=instance.id,
                 )
             )
-            if args.command == "permissions" and (args.generate_grant or args.generate_revoke):
+            if (args.command == "permissions" and (args.generate_grant or args.generate_revoke)
+                    and args.feature is not None and args.feature != "replication"):
                 permission_credential = active_provider.get_credential(instance.credential_alias)
                 definitions = PERMISSION_REGISTRY.get(instance.db_type, {})
                 requested = [args.feature] if args.feature else list(ALL_FEATURES)
@@ -748,6 +760,15 @@ def main(
                     definitions = PERMISSION_REGISTRY.get(instance.db_type, {})
                     requested = ([args.feature] if args.feature else list(ALL_FEATURES))
                     server_version = adapter.get_server_version()
+                    replication_profile = None
+                    replication_detection = None
+                    if "replication" in requested:
+                        try:
+                            replication_profile, replication_detection = resolve_profile_for_adapter(
+                                adapter, "replication"
+                            )
+                        except ProfileResolutionError:
+                            replication_profile = None
                     supported = [feature for feature in requested if feature in definitions
                                  and feature_supported(instance.db_type, feature, server_version)]
                     if not requested:
@@ -755,6 +776,66 @@ def main(
                     observed = set(getattr(adapter, "permission_observations", set()))
                     rows = []
                     for feature in requested:
+                        if feature == "replication":
+                            profile = replication_profile
+                            if profile is None or profile.version_status == VersionStatus.MISMATCH:
+                                unknown_row: dict[str, Any] = {
+                                    "feature": feature, "status": PermissionStatus.UNKNOWN.value,
+                                    "support_state": SupportState.UNKNOWN.value,
+                                    "impact": "No unambiguous verified replication permission profile is available.",
+                                }
+                                if replication_detection and replication_detection.error_type:
+                                    unknown_row["version_detection_error"] = {
+                                        "error_type": replication_detection.error_type,
+                                        "message": replication_detection.error_message,
+                                        "database_error": replication_detection.database_error,
+                                    }
+                                rows.append(unknown_row)
+                                continue
+                            if profile.support_state == SupportState.UNSUPPORTED:
+                                rows.append({"feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
+                                             "support_state": profile.support_state.value,
+                                             "version_profile": asdict(profile)})
+                                continue
+                            if profile.support_state != SupportState.SUPPORTED or not profile.permission_profile_id:
+                                rows.append({"feature": feature, "status": PermissionStatus.UNKNOWN.value,
+                                             "support_state": profile.support_state.value,
+                                             "version_profile": asdict(profile),
+                                             "impact": "No reviewed permission profile is available for this route."})
+                                continue
+                            requirement = requirements_for_profile(profile.permission_profile_id)
+                            if profile.version_status in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN}:
+                                replication_assessment: Any = {
+                                    "status": PermissionStatus.UNKNOWN,
+                                    "missing_required": (), "missing_optional": (),
+                                    "available": (),
+                                }
+                            else:
+                                replication_assessment = assess_permissions(requirement, observed)
+                            row = {"feature": feature, **replication_assessment,
+                                   "support_state": profile.support_state.value,
+                                   "version_profile": asdict(profile),
+                                   "required_privileges": requirement.required,
+                                   "missing_reasons": privilege_reasons(
+                                       requirement, replication_assessment["missing_required"]
+                                   )}
+                            if (profile.version_status == VersionStatus.UNVERIFIED
+                                    and replication_detection and replication_detection.error_type):
+                                row["version_detection_error"] = {
+                                    "error_type": replication_detection.error_type,
+                                    "message": replication_detection.error_message,
+                                    "database_error": replication_detection.database_error,
+                                }
+                            if replication_assessment["status"] != PermissionStatus.READY:
+                                row["impact"] = requirement.impact
+                                row["reference_grant"] = render_profile_sql(
+                                    profile.permission_profile_id, instance.db_type,
+                                    getattr(adapter, "current_user", None)
+                                    or (permission_credential.username if permission_credential else "monitor"),
+                                    instance.database, server_version,
+                                )
+                            rows.append(row)
+                            continue
                         if feature not in supported:
                             rows.append({"feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
                                          "missing_required": (), "impact": "Feature is not implemented for this database type."})
@@ -771,9 +852,37 @@ def main(
                     generated: str | None = None
                     if args.generate_grant or args.generate_revoke:
                         assert permission_credential is not None
-                        generated = render_sql(instance.db_type, supported, permission_credential.username,
-                                               instance.database, server_version,
-                                               revoke=args.generate_revoke)
+                        if args.feature == "replication" and replication_profile is not None \
+                                and replication_profile.permission_profile_id:
+                            generated = render_profile_sql(
+                                replication_profile.permission_profile_id, instance.db_type,
+                                permission_credential.username, instance.database, server_version,
+                                revoke=args.generate_revoke,
+                            )
+                        elif args.feature is None:
+                            if (replication_profile is None
+                                    or replication_profile.version_status == VersionStatus.MISMATCH
+                                    or not replication_profile.permission_profile_id):
+                                generated = None
+                            else:
+                                privileges: list[str] = []
+                                for feature in supported:
+                                    requirement = (
+                                        requirements_for_profile(replication_profile.permission_profile_id)
+                                        if feature == "replication" else
+                                        requirements_for(instance.db_type, feature, server_version)
+                                    )
+                                    for privilege in requirement.required:
+                                        if privilege not in privileges:
+                                            privileges.append(privilege)
+                                generated = render_privileges_sql(
+                                    instance.db_type, privileges, permission_credential.username,
+                                    instance.database, server_version, revoke=args.generate_revoke,
+                                )
+                        else:
+                            generated = render_sql(instance.db_type, supported, permission_credential.username,
+                                                   instance.database, server_version,
+                                                   revoke=args.generate_revoke)
                     output = {"database_id": instance.id,
                               "success": True,
                               "account": getattr(adapter, "current_user", None)

@@ -5,3 +5,13 @@ timeout_seconds: 10
 max_rows: 500
 reviewed: true
 description: Reviewed SQL Server 2012+ Availability Group replica and database state snapshot.
+feature: replication
+version_families:
+  - "2012"
+  - "2014"
+  - "2016"
+  - "2017"
+  - "2019"
+  - "2022"
+runtime_variants:
+  - "default"

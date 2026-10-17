@@ -1,0 +1,7 @@
+name: preflight_roles
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: Reviewed MySQL 8 role activation inspection.

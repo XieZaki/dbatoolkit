@@ -4,14 +4,14 @@ V0.9.0 adds `dba diagnose <database_id> replication` for the SQL Server, Postgre
 
 ## Coverage
 
-- **MySQL 8.0 and 8.4:** local server identity/read-only settings and zero or more replication channels. MySQL 8.0.22+ uses the fixed `SHOW REPLICA STATUS` Registry script; earlier MySQL 8.0 uses `SHOW SLAVE STATUS`. The report includes receiver/applier states, source host/port, source-reported seconds behind, configured delay, relay log space, GTID sets, and vendor I/O or SQL errors. `Seconds_Behind_Source` is interpreted with thread state and is not a standalone health signal.
-- **PostgreSQL 13+:** `pg_is_in_recovery()` identifies primary or standby. A primary reports all rows in `pg_stat_replication` and `pg_replication_slots`; a standby reports `pg_stat_wal_receiver`, receive/replay LSN distance, and replay timestamp when available. Slot WAL retention is shown as observed bytes. An inactive physical slot is a risk candidate, not a command to drop it.
+- **MySQL 5.7, 8.0 and 8.4:** profile routing selects fixed `SHOW SLAVE STATUS` for 5.7 and MySQL 8.0 before 8.0.22; it selects fixed `SHOW REPLICA STATUS` for 8.0.22+ and 8.4. The report includes receiver/applier states, source host/port, source-reported seconds behind, configured delay, relay log space, GTID sets, and vendor I/O or SQL errors. Legacy and modern field aliases are selected from the same resolved profile. Zero returned channels with a complete query is `NOT_CONFIGURED` and complete evidence.
+- **PostgreSQL 13–18:** one reviewed profile is explicitly bound to each family. `pg_is_in_recovery()` identifies primary or standby. A primary reports all rows in `pg_stat_replication` and `pg_replication_slots`; a standby reports `pg_stat_wal_receiver`, receive/replay LSN distance, and replay timestamp when available. Slot WAL retention is shown as observed bytes. An inactive physical slot is a risk candidate, not a command to drop it. A primary with no peers/slots is `NOT_CONFIGURED` and healthy when all evidence queries complete; `max_wal_senders` alone does not imply an expected standby.
 - **SQL Server 2012+:** Availability Group, replica, and database replica DMV evidence, including role, connection and synchronization state, log-send/redo queues and rates, and last commit time when returned. Queue sizes stay in KB. Catch-up time is an estimate only when a positive rate is returned. SQL Server 2008 R2 has no Availability Groups and reports this feature as unsupported. Instances without an AG report `NOT_CONFIGURED` when the reviewed AG query succeeds and returns no rows.
-- **Oracle 12c+:** `V$DATABASE` role and protection state, Data Guard transport/apply metrics, managed recovery and remote archive destination evidence. Oracle 12.2+ uses `V$DATAGUARD_PROCESS`; earlier supported releases use `V$MANAGED_STANDBY`. Primary databases with no configured remote archive destination report `NOT_CONFIGURED`. Oracle errors from archive destinations remain vendor evidence.
+- **Oracle 11gR2 and later:** Oracle 11gR2 (`11.2.x`) and 12.1 use `V$MANAGED_STANDBY`; 12.2+ uses `V$DATAGUARD_PROCESS`. The selected profile binds exact SQL objects, complete object-level grants, and parser aliases. The 11gR2 route does not use `V$DATAGUARD_PROCESS`. Primary databases with no configured remote archive destination report `NOT_CONFIGURED`. Oracle errors from archive destinations remain vendor evidence. Oracle 11gR2 has unit/Fake Adapter coverage only and is not E2E verified.
 
 ## Status and lag
 
-Overall health is `HEALTHY`, `DEGRADED`, `CRITICAL`, or `UNKNOWN`. A confirmed absence of replication configuration is presented as `NOT_CONFIGURED` with informational severity, not as a failure. Query failure, missing required evidence, or an unsupported server version is never interpreted as “no replication.” Optional view or permission gaps reduce data completeness to `PARTIAL`; missing required role/status evidence yields `INCOMPLETE` or `UNKNOWN`.
+Overall health is `HEALTHY`, `DEGRADED`, `CRITICAL`, or `UNKNOWN`. A confirmed absence of replication configuration is presented as `NOT_CONFIGURED` with informational severity, not as a failure. Query failure, missing required evidence, or an unsupported server version is never interpreted as “no replication.” Each route's complete SQL bundle is required evidence; a failed or truncated query yields `INCOMPLETE` or `UNKNOWN`. Permission readiness uses the same selected profile. A PostgreSQL standalone primary with no slots/peers, or MySQL returning no channels, is `NOT_CONFIGURED` with `COMPLETE` evidence when all applicable queries succeed.
 
 Time lag uses a centralized conservative policy: under 30 seconds is informational, 30 seconds to under 5 minutes is a warning, 5 to under 30 minutes is high, and 30 minutes or more is critical. This is only one signal alongside connection state, receiver/applier state, synchronization health, and backlog. Thresholds are policy defaults, not universal health guarantees.
 
@@ -29,11 +29,12 @@ Minimum required monitoring permissions are:
 
 | Database | Required | Optional evidence |
 |---|---|---|
-| SQL Server 2012–2019 | `VIEW SERVER STATE` | `VIEW SERVER PERFORMANCE STATE` where supported |
-| SQL Server 2022+ | `VIEW SERVER PERFORMANCE STATE` | None defined |
+| SQL Server 2012–2019 | `VIEW SERVER STATE` | None defined |
+| SQL Server 2022 | `VIEW SERVER PERFORMANCE STATE` | None defined |
 | PostgreSQL | `pg_monitor`, `CONNECT` | None defined |
 | MySQL | `REPLICATION CLIENT` | None defined |
-| Oracle | `CREATE SESSION`, `SELECT ON SYS.V_$DATABASE` | Data Guard metrics, process, and archive destination views |
+| Oracle 11gR2/12.1 | `CREATE SESSION`, `V_$VERSION`, `V_$DATABASE`, `V_$DATAGUARD_STATS`, `V_$MANAGED_STANDBY`, `V_$ARCHIVE_DEST_STATUS` | None defined |
+| Oracle 12.2+ | `CREATE SESSION`, `V_$VERSION`, `V_$DATABASE`, `V_$DATAGUARD_STATS`, `V_$DATAGUARD_PROCESS`, `V_$ARCHIVE_DEST_STATUS` | None defined |
 
 The permission command uses the shared Registry. It only generates minimum grant/revoke text for DBA review; Toolkit never executes GRANT or REVOKE. No database needs a sysadmin, SUPERUSER, SUPER, SYSDBA, or catalog-wide role for this feature.
 

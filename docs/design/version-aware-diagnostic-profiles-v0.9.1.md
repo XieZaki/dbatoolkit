@@ -7,10 +7,10 @@
 **Scope:** SQL Server, PostgreSQL, MySQL and Oracle; slow, disk-growth, replication and SQL Server plan diagnosis.
 **This document is architecture, not a statement that every listed version is implemented or verified.**
 
-**Implementation status:** Phase A foundation is in progress. Inventory family
-validation, reviewed version detectors, normalization, verification status and
-the immutable single resolver are being implemented. Feature SQL routing,
-permission profiles and parser migration remain later phases.
+**Implementation status:** Phase A foundation is implemented. Phase B routes
+replication SQL bundles, version-specific permission profiles, parser
+contracts, and support state through the immutable resolver. Slow, disk-growth,
+backup, and plan remain on their existing paths.
 
 ## 1. Goals and non-goals
 
@@ -130,7 +130,7 @@ Declared family 8.0 + detected 8.0.36
 
 The threshold follows the MySQL 8.0.22 terminology change. It is a runtime variant, not a new Inventory family. If a full version cannot be parsed to the precision needed for a boundary, the feature route is UNKNOWN and execution is blocked.
 
-**Existing safety-policy reconciliation required before Phase B:** current Registry files and the SQL safety allowlist contain exact `SHOW REPLICA STATUS` / `SHOW SLAVE STATUS` scripts, while `docs/PROJECT_RULES.md` currently names only `SHOW BINARY LOGS` as the MySQL non-SELECT Registry exception. Do not broaden the allowlist or add another statement form as part of version routing. Before changing the replication route, reconcile that policy text with the already reviewed fixed statements and ensure the static checker, Registry metadata, permission scan and tests agree. Phase A does not execute or alter these scripts.
+**Phase B safety-policy reconciliation:** `SHOW REPLICA STATUS` and `SHOW SLAVE STATUS` are approved only as exact fixed Registry scripts alongside the existing `SHOW BINARY LOGS` and `SHOW GRANTS` forms. The static checker remains a closed exact-string allowlist; arbitrary `SHOW` statements are rejected. Replication scripts carry feature, family and variant applicability metadata and are selected only by the atomic profile resolver.
 
 ## 7. SQL Server family and feature routing
 

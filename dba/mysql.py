@@ -1,4 +1,4 @@
-"""MySQL 8.0+ Registry-backed, bounded read-only connection."""
+"""MySQL 5.7+ Registry-backed, bounded read-only connection."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:
 class MySQLAdapter(Adapter):
     """One serial monitoring connection; never accepts user-authored SQL."""
 
-    REQUIRED = ("preflight", "server_info", "database_status", "active_sessions",
+    REQUIRED = ("preflight", "preflight_roles", "server_info", "database_status", "active_sessions",
                 "active_requests", "active_requests_no_waits", "active_requests_basic",
                 "transactions", "blocking", "monitor_grants")
     STREAMING_SCRIPTS = frozenset({
@@ -184,12 +184,21 @@ class MySQLAdapter(Adapter):
         row = result.rows[0]
         version = row.get("server_version")
         if not isinstance(version, str):
-            raise ToolkitError("UnsupportedVersion", "MySQL 8.0 or newer is required; other engines need reviewed SQL.")
+            raise ToolkitError("UnsupportedVersion", "MySQL 5.7 or newer requires a reviewed version profile.")
         match = re.match(r"^(\d+)\.(\d+)\.", version)
-        if (match is None or (int(match[1]), int(match[2])) < (8, 0)
+        if (match is None or (int(match[1]), int(match[2])) < (5, 7)
                 or "mariadb" in version.casefold()):
-            raise ToolkitError("UnsupportedVersion", "MySQL 8.0 or newer is required; other engines need reviewed SQL.")
+            raise ToolkitError("UnsupportedVersion", "MySQL 5.7 or newer requires a reviewed version profile.")
         self._version = version
+        active_roles = "NONE"
+        if tuple(int(part) for part in match.groups()) >= (8, 0):
+            role_result = self._run(self.registry.get("preflight_roles", DatabaseType.MYSQL))
+            if not role_result.success or role_result.truncated or len(role_result.rows) != 1:
+                raise ToolkitError("PreflightFailed", "MySQL active role state could not be inspected safely.")
+            role_value = role_result.rows[0].get("active_roles")
+            if not isinstance(role_value, str):
+                raise ToolkitError("PreflightFailed", "MySQL active role state is unavailable.")
+            active_roles = role_value
         if row.get("performance_schema_enabled") != 1:
             raise ToolkitError("PreflightDenied", "Missing enabled Performance Schema.")
         if type(row.get("connection_id")) is not int or row["connection_id"] <= 0:
@@ -205,7 +214,7 @@ class MySQLAdapter(Adapter):
                                database_error=self._last_database_error)
         grants = [str(next(iter(grant.values()))) for grant in grants_result.rows if grant]
         self.privilege_classification, observed = classify_mysql_grants(
-            grants, current_user, str(row.get("active_roles") or "NONE")
+            grants, current_user, active_roles
         )
         if self.privilege_classification["classification"] == "PRIVILEGED":
             high_risk = self.privilege_classification["high_risk_privileges"]

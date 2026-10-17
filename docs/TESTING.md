@@ -73,4 +73,14 @@ System tests are opt-in and skip in the standard command unless both safety gate
 
 Version capability behavior is exercised with faked server versions: SQL Server old-version unsupported behavior, PostgreSQL capability paths, and MySQL/Oracle version-sensitive results. This does not establish real compatibility for every listed server release. Unit and integration suites inject permission failures, vendor errors, timeouts, empty/NULL results, row truncation, cleanup failures, malformed responses, and incomplete evidence where covered by the relevant adapter tests.
 
-Concurrency and performance coverage is limited to deterministic session reuse / report collision cases and bounded synthetic result sizes; it is not a load benchmark. Windows is the primary host. Linux path, permissions, and IPC behavior are partially mocked on Windows and require a real Linux deployment check. No live SQL Server 2008 R2, PostgreSQL 13, MySQL 8.0, or Oracle 12c compatibility matrix is claimed. System coverage only describes instances selected and run during a particular test report.
+Concurrency and performance coverage is limited to deterministic session reuse / report collision cases and bounded synthetic result sizes; it is not a load benchmark. Windows is the primary host. Linux path, permissions, and IPC behavior are partially mocked on Windows and require a real Linux deployment check. No live SQL Server 2008 R2, PostgreSQL 13, MySQL 8.0, or Oracle compatibility matrix is claimed. System coverage only describes instances selected and run during a particular test report.
+
+V0.9.1 Phase B adds profile-routing regression and Fake Adapter integration
+coverage for MySQL 5.7 and the 8.0.21/8.0.22 boundary, PostgreSQL 13–18,
+SQL Server 2008 R2 unsupported and 2022 permission routing, and Oracle 11.2,
+12.1, 12.2+ Data Guard SQL/grant/parser selection. These are not live version
+compatibility claims. Oracle 11gR2 is explicitly NOT E2E VERIFIED. Replication
+tests assert a PostgreSQL standalone primary is healthy/not configured when
+all required evidence is available, and that MySQL zero-channel results remain
+complete. No feature SQL executes for unsupported, auto-detected-only,
+unverified, unknown, or mismatched routes.

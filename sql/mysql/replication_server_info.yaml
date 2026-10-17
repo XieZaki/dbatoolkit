@@ -5,3 +5,12 @@ timeout_seconds: 5
 max_rows: 1
 reviewed: true
 description: Reviewed read-only MySQL local replication and role settings.
+feature: replication
+version_families:
+  - "5.7"
+  - "8.0"
+  - "8.4"
+runtime_variants:
+  - "default"
+  - "pre_8022"
+  - "8022_plus"

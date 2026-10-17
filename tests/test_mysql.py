@@ -69,6 +69,7 @@ class FakeConnection:
         self.scripts = scripts
         self.results: dict[str, list[dict[str, Any]]] = {
             "preflight": [dict(PREFLIGHT)],
+            "preflight_roles": [{"active_roles": "NONE"}],
             "version_detect": [{"raw_version": "8.0.44"}],
             "monitor_grants": [
                 {"Grants for toolkit_monitor@%":
@@ -156,6 +157,26 @@ def test_adapter_preflight_credentials_timeout_registry_and_cleanup() -> None:
         assert not rejected.success and rejected.error_type == "RegistryRejected"
         assert len(driver.connection.executed) == before
     assert driver.connection.closed and all(item.closed for item in driver.connection.cursors)
+
+
+def test_mysql57_preflight_does_not_execute_mysql80_role_function() -> None:
+    target, driver = adapter()
+    driver.connection.results["preflight"] = [{**PREFLIGHT, "server_version": "5.7.44-log"}]
+    driver.connection.results["monitor_grants"] = [
+        {"grant": "GRANT REPLICATION CLIENT ON *.* TO `toolkit_monitor`@`%`"},
+    ]
+    with target:
+        assert target.get_server_version() == "5.7.44-log"
+        assert "preflight_roles" not in driver.connection.executed
+        assert target.preflight_checks["permission_replication"]
+
+
+def test_mysql80_preflight_fails_closed_when_active_roles_cannot_be_read() -> None:
+    target, driver = adapter()
+    driver.connection.failures["preflight_roles"] = Exception(1142, "denied")
+    with pytest.raises(ToolkitError, match="active role state"):
+        target.connect()
+    assert driver.connection.closed
 
 
 @pytest.mark.parametrize("code,classification", [
@@ -258,8 +279,7 @@ def test_check_cli_displays_mysql_vendor_error_in_human_and_json(
 
 
 @pytest.mark.parametrize("field,value,error", [
-    ("server_version", "5.7.44", "MySQL 8.0"),
-    ("server_version", "10.11.0-MariaDB", "MySQL 8.0"),
+    ("server_version", "10.11.0-MariaDB", "MySQL 5.7"),
     ("performance_schema_enabled", 0, "Performance Schema"),
 ])
 def test_preflight_fail_closed(field: str, value: Any, error: str) -> None:
@@ -633,12 +653,13 @@ def test_replication_cli_explains_missing_replication_client_without_traceback(
     inventory.write_text(yaml.safe_dump({"databases": [{
         "id": "my", "name": "MySQL", "db_type": "mysql", "host": "test.invalid",
         "port": 3306, "database": "test", "credential_alias": "monitor",
-        "environment": "development",
+        "environment": "development", "version_family": "8.4",
     }]}), encoding="utf-8")
     common = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql")]
     provider = MemoryCredentialProvider()
 
     permission_driver = FakeDriver()
+    permission_driver.connection.results["version_detect"] = [{"raw_version": "8.4.1"}]
     permission_driver.connection.results["monitor_grants"] = [{
         "Grants": "GRANT SELECT ON *.* TO `toolkit_monitor`@`%`"
     }]
@@ -651,6 +672,7 @@ def test_replication_cli_explains_missing_replication_client_without_traceback(
     assert not permission_output.err
 
     diagnostic_driver = FakeDriver()
+    diagnostic_driver.connection.results["version_detect"] = [{"raw_version": "8.4.1"}]
     diagnostic_driver.connection.results["monitor_grants"] = [{
         "Grants": "GRANT SELECT ON *.* TO `toolkit_monitor`@`%`"
     }]

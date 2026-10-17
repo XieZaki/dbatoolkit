@@ -12,7 +12,7 @@ V0.8.3.2 将详细诊断报告统一为自包含离线 HTML；终端保持事故
 V0.8.3.3 将 Human HTML 收敛为有预算的 DBA 分析报告：恢复动作前置、事故相关会话与请求分表、显式报告省略数量；计划 XML 单独保存为受 `.gitignore` 保护的 `.sqlplan`。新增 Windows/Linux upgrade 流程和只扫描 Git-tracked 文件的敏感数据检查。本版本不会自动 push 或创建 release tag。
 V0.8.3.5 在 V0.8.3.4 的加密 Credential Store 上增加当前 OS 用户短期 Credential Session。使用 `dba credentials unlock` 后，在默认 30 分钟绝对 TTL 内可复用解密凭据；`status` 查看、`lock` 立即清除 Agent 内存。Windows 使用当前 SID ACL 的 Named Pipe，Linux 使用有 peer UID 验证的私有 Unix Socket。秘密不写磁盘、环境变量或日志。安全设计与限制见 [Credential Security](docs/CREDENTIAL_SECURITY.md)。
 
-V0.9.1 Phase A 增加可选的严格 `version_family` Inventory 字段、四库只读版本检测、版本一致性状态和不可变诊断 Profile Resolver 基础。旧 Inventory 仍可加载，`dba validate` 会提示补充版本族；现有诊断 SQL 仍沿用 legacy 路径。用法见 [Version Profiles](docs/VERSION_PROFILES.md)。
+V0.9.1 Phase A 增加 `version_family`、四库只读版本检测和不可变 Profile Resolver；Phase B 将 replication 的 SQL bundle、权限和 parser aliases 绑定到一个版本路由，并增加 Oracle 11gR2 Data Guard profile。其他诊断场景继续沿用 legacy 路径。支持矩阵与证据边界见 [Version Profiles](docs/VERSION_PROFILES.md)。
 
 Python `>=3.11,<3.14`，当前主要验证版本为 3.12。从项目根目录执行：
 

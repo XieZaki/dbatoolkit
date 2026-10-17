@@ -26,10 +26,10 @@ Generation reads the Inventory and Credential Provider only; it does not connect
 
 | Database | slow | plan | disk-growth | Notes |
 |---|---|---|---|---|
-| SQL Server | `VIEW SERVER STATE` through 2019; `VIEW SERVER PERFORMANCE STATE` on 2022+, plus `VIEW ANY DATABASE` | SQL Server only; current and cached plan DMV access follows the server version visibility capability | server state/database visibility; optional `SELECT ON msdb.dbo.backupset` and performance-state evidence | No `sysadmin`, `CONTROL SERVER`, or `ALTER SERVER STATE`. Current version branches must be reviewed against target SQL Server and SQL scripts. |
+| SQL Server | `VIEW SERVER STATE` through 2019; `VIEW SERVER PERFORMANCE STATE` on 2022+, plus `VIEW ANY DATABASE` | SQL Server only; current and cached plan DMV access follows the server version visibility capability | server state/database visibility; optional `SELECT ON msdb.dbo.backupset` and performance-state evidence | Replication: 2008 R2 AG unsupported; 2012–2019 requires `VIEW SERVER STATE`; 2022 requires `VIEW SERVER PERFORMANCE STATE`; 2025 remains UNKNOWN. No `sysadmin`, `CONTROL SERVER`, or `ALTER SERVER STATE`. |
 | PostgreSQL | `pg_monitor`, `CONNECT` on the target database | Unsupported | `pg_monitor`, `CONNECT` | No `SUPERUSER` or `pg_signal_backend`; cancellation/termination ReferenceCommands remain text only. |
-| MySQL | `PROCESS`, `SELECT performance_schema` (a global read-only SELECT also covers these objects) | Unsupported | `PROCESS`, `REPLICATION CLIENT`, `SELECT performance_schema` | No `SUPER`, `SYSTEM_USER`, root, or grant option. Global `SELECT ON *.*` is broad read visibility and is not recommended as the least-privilege grant, but does not by itself make the account privileged. Generated grants use a visibly marked `<approved_monitor_client_host>` placeholder unless the connected account's exact `CURRENT_USER()` is available. |
-| Oracle | `CREATE SESSION`; object `SELECT` on required `SYS.V_$` views | Unsupported | `CREATE SESSION`; object `SELECT` on required `SYS.DBA_` views; optional FRA/archive/redo `SYS.V_$` views | No `DBA`, `SELECT_CATALOG_ROLE`, or `SYSDBA`. Synonyms are rendered as underlying `SYS.V_$...` objects. |
+| MySQL | `PROCESS`, `SELECT performance_schema` (a global read-only SELECT also covers these objects) | Unsupported | `PROCESS`, `REPLICATION CLIENT`, `SELECT performance_schema` | Replication uses only `REPLICATION CLIENT`; MySQL 5.7 and 8.0 <8.0.22 use fixed `SHOW SLAVE STATUS`, while 8.0.22+ and 8.4 use fixed `SHOW REPLICA STATUS`. No `SUPER`, `SYSTEM_USER`, root, or grant option. |
+| Oracle | `CREATE SESSION`; object `SELECT` on required `SYS.V_$` views | Unsupported | `CREATE SESSION`; object `SELECT` on required `SYS.DBA_` views; optional FRA/archive/redo `SYS.V_$` views | Replication grants include `SYS.V_$VERSION` and selected Data Guard objects. 11gR2/12.1 use `SYS.V_$MANAGED_STANDBY`; 12.2+ uses `SYS.V_$DATAGUARD_PROCESS`. No `DBA`, `SELECT_CATALOG_ROLE`, or `SYSDBA`. |
 
 The generated statements contain only the registry's required privilege set. Optional grants are intentionally omitted so a DBA can decide whether the additional evidence is needed. Some SQL Server disk-growth and Oracle disk-growth object permissions are not probed by connection Preflight yet; their status stays `UNKNOWN` rather than being inferred from a successful login. MySQL's replication privilege is checked from effective-grant metadata. `pg_monitor` is the supported PostgreSQL monitor role; individual PostgreSQL probes remain the runtime evidence.
 
@@ -49,4 +49,18 @@ Account Security classifies the account's risk; Permission Readiness evaluates t
 MySQL classification keeps each explicit grant's privilege set, scope, grant option, role source and `CURRENT_USER()` principal. `ALL PRIVILEGES`, the reviewed high-risk administrative privileges, and any `WITH GRANT OPTION` are classified `PRIVILEGED`. `PROCESS` and `REPLICATION CLIENT` are permitted monitor grants. Write-capable privileges are separately rejected as unsafe for the read-only account policy. Active or granted roles and newly introduced, unclassified dynamic privileges produce `UNKNOWN`; they are not mislabeled as a specific high privilege, and the adapter fails closed until the uncertainty is reviewed. `SHOW GRANTS` is a fixed reviewed Registry script. If it fails, sanitized vendor code/message is returned as evidence.
 
 `dba check` and `dba permissions` use the same Permission Registry assessment fields: status, missing required/optional capabilities, available capabilities, and impact only when readiness is not `READY`. A slow diagnosis with missing required permissions stops before running its analyzer and returns the missing capability reason plus a reference grant generated for the exact MySQL `CURRENT_USER()` user/host. The renderer escapes SQL identifiers/literals; a reference script is text only and states Toolkit did not execute it and DBA approval is required. The framework never runs `GRANT`, `REVOKE`, or account-management statements.
+
+## Version-aware replication grants
+
+Replication permissions are bound atomically with SQL and parser contracts.
+Use `dba permissions <id> --feature replication`; when readiness is not READY,
+the result includes the complete selected profile grant rather than an
+incremental grant. PostgreSQL 13–18 uses `pg_monitor` and target-database
+`CONNECT`. SQL Server 2012–2019 uses `VIEW SERVER STATE`; 2022 uses
+`VIEW SERVER PERFORMANCE STATE`; 2008 R2 AG is unsupported and 2025 remains
+UNKNOWN. MySQL uses only `REPLICATION CLIENT`. Oracle's 11gR2 requirements are
+`CREATE SESSION`, `V_$VERSION`, `V_$DATABASE`, `V_$DATAGUARD_STATS`,
+`V_$MANAGED_STANDBY`, and `V_$ARCHIVE_DEST_STATUS`; 12.2+ binds the process
+grant to `V_$DATAGUARD_PROCESS`. All generated statements remain manual-review
+text and are never executed.
 

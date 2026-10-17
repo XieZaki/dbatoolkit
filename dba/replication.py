@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,10 +12,15 @@ from dba.permissions import (
     PermissionStatus,
     assess_permissions,
     privilege_reasons,
-    render_sql,
-    requirements_for,
+    render_profile_sql,
+    requirements_for_profile,
 )
-from dba.replication_collectors import ReplicationEvidence, collect_replication_evidence
+from dba.replication_collectors import (
+    REPLICATION_PARSER_CONTRACTS,
+    ReplicationEvidence,
+    collect_replication_evidence,
+)
+from dba.versioning import ResolvedDiagnosticProfile, resolve_profile_for_adapter
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,12 @@ def _value(row: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _profile_value(evidence: ReplicationEvidence, row: dict[str, Any], field_name: str) -> Any:
+    contract = REPLICATION_PARSER_CONTRACTS[evidence.profile.parser_contract_id or ""]
+    aliases = dict(contract.aliases).get(field_name, (field_name,))
+    return _value(row, *aliases)
+
+
 def _rows(evidence: ReplicationEvidence, name: str) -> tuple[dict[str, Any], ...]:
     sample = next((item for item in evidence.samples if item.collector_name == name), None)
     return sample.rows if sample and sample.success else ()
@@ -200,27 +211,27 @@ def _mysql(evidence: ReplicationEvidence, policy: ReplicationPolicy) -> dict[str
                 "not_configured": False}
     for index, row in enumerate(channels, 1):
         channel = str(_value(row, "Channel_Name") or f"channel-{index}")
-        io = str(_value(row, "Replica_IO_Running", "Slave_IO_Running") or "UNKNOWN")
-        sql = str(_value(row, "Replica_SQL_Running", "Slave_SQL_Running") or "UNKNOWN")
+        io = str(_profile_value(evidence, row, "io_running") or "UNKNOWN")
+        sql = str(_profile_value(evidence, row, "sql_running") or "UNKNOWN")
         io_ok, sql_ok = _bool(io), _bool(sql)
-        source = _value(row, "Source_Host", "Master_Host")
+        source = _profile_value(evidence, row, "source_host")
         transport = "RUNNING" if io_ok else "DISCONNECTED" if io.casefold() == "connecting" else "STOPPED" if io_ok is False else "UNKNOWN"
         apply = "RUNNING" if sql_ok else "STOPPED" if sql_ok is False else "UNKNOWN"
         members.append(ReplicationMember(str(source or channel), False, "REPLICA", "REPLICA",
                                          "RUNNING" if io_ok and sql_ok else "DEGRADED",
                                          f"IO={io}; SQL={sql}", transport, apply,
-                                         {"channel": channel, "source_port": _value(row, "Source_Port", "Master_Port")}))
+                                         {"channel": channel, "source_port": _profile_value(evidence, row, "source_port")}))
         if io_ok is False:
-            error = _value(row, "Last_IO_Error")
+            error = _profile_value(evidence, row, "last_io_error")
             code = "SOURCE_CONNECTION_ERROR" if error else "IO_THREAD_STOPPED"
             issues.append(_issue(code, "HIGH", "Replication receiver thread is not running.",
                                  vendor_message=error, evidence={"channel": channel, "io_state": io}))
         if sql_ok is False:
-            error = _value(row, "Last_SQL_Error")
+            error = _profile_value(evidence, row, "last_sql_error")
             issues.append(_issue("SQL_APPLY_ERROR" if error else "SQL_THREAD_STOPPED", "CRITICAL",
                                  "Replication applier thread is not running.", vendor_message=error,
                                  evidence={"channel": channel, "sql_state": sql}))
-        seconds = _integer(_value(row, "Seconds_Behind_Source", "Seconds_Behind_Master"))
+        seconds = _integer(_profile_value(evidence, row, "seconds_behind"))
         configured_delay = _integer(_value(row, "SQL_Delay")) or 0
         if seconds is not None:
             severity = _lag_severity(seconds, policy)
@@ -275,12 +286,11 @@ def _postgresql(evidence: ReplicationEvidence, policy: ReplicationPolicy) -> dic
     peers = list(_rows(evidence, "replication_members"))
     receiver = next(iter(_rows(evidence, "replication_receiver")), {})
     slots = list(_rows(evidence, "replication_slots"))
-    wal_level = str(_value(node, "wal_level") or "unknown").lower()
-    max_senders = _integer(_value(node, "max_wal_senders"))
     not_configured = bool(standby is False and not peers and not slots
                           and _sample_ok(evidence, "replication_members")
                           and _sample_ok(evidence, "replication_slots")
-                          and (wal_level == "minimal" or max_senders == 0))
+                          and _sample_ok(evidence, "replication_receiver")
+                          and _sample_ok(evidence, "replication_archiver"))
     if standby:
         if receiver:
             status = str(_value(receiver, "status") or "UNKNOWN")
@@ -327,11 +337,7 @@ def _postgresql(evidence: ReplicationEvidence, policy: ReplicationPolicy) -> dic
                 if value is not None:
                     lag.append(ReplicationLag(kind, str(value), "interval", "INFO", column,
                                               "Server-reported interval; NULL means no sample."))
-        if not peers and not not_configured:
-            inactive = [row for row in slots if _bool(_value(row, "active")) is False]
-            issues.append(_issue("NO_CONNECTED_STANDBY", "WARNING",
-                                 "WAL sender capacity is enabled but no standby is connected; configuration cannot be confirmed from this snapshot.",
-                                 evidence={"inactive_slot_count": len(inactive)}))
+        # WAL sender capacity alone does not establish that a standby is expected.
     for slot in slots:
         name = str(_value(slot, "slot_name") or "unknown")
         active = _bool(_value(slot, "active"))
@@ -449,10 +455,10 @@ def _oracle(evidence: ReplicationEvidence, policy: ReplicationPolicy) -> dict[st
     process_query_ok = _sample_ok(evidence, "replication_processes", "replication_processes_modern")
 
     def process_name(row: dict[str, Any]) -> str:
-        return str(_value(row, "process", "name") or "").upper()
+        return str(_profile_value(evidence, row, "process_name") or "").upper()
 
     def process_status(row: dict[str, Any]) -> str:
-        return str(_value(row, "status", "action") or "UNKNOWN")
+        return str(_profile_value(evidence, row, "process_status") or "UNKNOWN")
 
     mrp = [row for row in processes if process_name(row).startswith("MRP")]
     rfs = [row for row in processes if process_name(row) == "RFS"]
@@ -496,17 +502,21 @@ def _oracle(evidence: ReplicationEvidence, policy: ReplicationPolicy) -> dict[st
             "not_configured": not_configured}
 
 
-def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLICATION_POLICY) -> ReplicationReport:
+def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLICATION_POLICY,
+                          profile: ResolvedDiagnosticProfile | None = None) -> ReplicationReport:
     """Observe one target instance. Never connects to peers or invokes admin actions."""
     instance: DatabaseInstance = adapter.instance
-    evidence = collect_replication_evidence(adapter)
+    resolved = profile or resolve_profile_for_adapter(adapter, "replication")[0]
+    evidence = collect_replication_evidence(adapter, resolved)
     if not evidence.supported:
         summary = ReplicationSummary(datetime.now(timezone.utc).isoformat(), instance.id,
                                      instance.db_type.value, "UNKNOWN", None,
                                      "UNSUPPORTED", "UNSUPPORTED", "UNKNOWN", "UNKNOWN",
                                      "UNKNOWN", "UNKNOWN", evidence.unsupported_reason)
         return ReplicationReport(instance, datetime.now(timezone.utc), "replication", (), summary=summary,
-                                 details={"incomplete": True, "samples": [], "quality": [evidence.unsupported_reason or "Version unsupported"]})
+                                 details={"incomplete": True, "samples": [],
+                                          "version_profile": asdict(resolved),
+                                          "quality": [evidence.unsupported_reason or "Version unsupported"]})
 
     if evidence.database_type == DatabaseType.MYSQL:
         state = _mysql(evidence, policy)
@@ -516,17 +526,12 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
         state = _sqlserver(evidence)
     else:
         state = _oracle(evidence, policy)
-    required_names = {
-        DatabaseType.MYSQL: {"replication_status", "replication_status_legacy"},
-        DatabaseType.POSTGRESQL: {"replication_node"},
-        DatabaseType.SQLSERVER: {"replication_ag"},
-        DatabaseType.ORACLE: {"replication_database"},
-    }[evidence.database_type]
-    required_samples = [sample for sample in evidence.samples if sample.collector_name in required_names]
+    required_samples = [sample for sample in evidence.samples
+                        if sample.collector_name in evidence.required_collectors]
     required_ok = bool(required_samples) and all(sample.success and not sample.truncated for sample in required_samples)
     all_ok = all(sample.success and not sample.truncated for sample in evidence.samples)
-    readiness = assess_permissions(requirements_for(instance.db_type, "replication", evidence.version),
-                                   getattr(adapter, "permission_observations", None))
+    requirements = requirements_for_profile(resolved.permission_profile_id or "")
+    readiness = assess_permissions(requirements, getattr(adapter, "permission_observations", None))
     if readiness["status"] == PermissionStatus.MISSING:
         failed_status = next((sample for sample in evidence.samples
                               if sample.collector_name in {"replication_status",
@@ -592,7 +597,6 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
     }
     actions = tuple(ReplicationAction(action_text.get(issue.code, issue.message)) for issue in issues
                     if issue.severity in {"WARNING", "HIGH", "CRITICAL"})
-    requirements = requirements_for(instance.db_type, "replication", evidence.version)
     missing = readiness["missing_required"]
     permission = {"status": readiness["status"].value,
                   "account_security": getattr(adapter, "privilege_classification", None),
@@ -601,9 +605,10 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
                   "available": readiness["available"],
                   "missing_reasons": privilege_reasons(requirements, missing),
                   "impact": requirements.impact,
-                  "suggested_grant": render_sql(instance.db_type, ("replication",),
-                                                  getattr(adapter, "current_user", "") or "monitor",
-                                                  instance.database, evidence.version) if missing else None,
+                  "suggested_grant": render_profile_sql(
+                      resolved.permission_profile_id or "", instance.db_type,
+                      getattr(adapter, "current_user", "") or "monitor",
+                      instance.database, evidence.version) if missing else None,
                   "toolkit_executed": False,
                   "dba_approval_required": bool(missing)}
     details = {"incomplete": completeness == "INCOMPLETE",
@@ -612,7 +617,8 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
                "permission_readiness": permission,
                "vendor_evidence": {sample.collector_name: list(sample.rows[:policy.max_members])
                                    for sample in evidence.samples if sample.success},
-               "quality": ([] if all_ok else ["Optional replication evidence is unavailable or truncated."]),
+               "version_profile": asdict(resolved),
+               "quality": ([] if all_ok else ["Replication evidence is unavailable or truncated."]),
                "toolkit_executed": "NO"}
     return ReplicationReport(instance, datetime.now(timezone.utc), "replication", findings,
                              summary, tuple(members), tuple(lags), state["backlog"], tuple(issues),

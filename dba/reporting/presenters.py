@@ -691,7 +691,10 @@ def _replication_sections(report: DiagnosticReport, policy: HumanReportPolicy) -
                                  ("Unit", ("unit",)), ("Severity", ("severity",)),
                                  ("Source", ("source",)), ("Interpretation", ("note",))))
     sections.append(ReportSection("replication-lag", "Transport, Apply / Replay and Lag",
-                                  summary=_omitted(len(lags), len(visible_lags), "lag metrics"),
+                                  summary=("Not applicable because replication is not configured."
+                                           if getattr(getattr(report, "summary", None), "status", None)
+                                           == "NOT_CONFIGURED" and not lags
+                                           else _omitted(len(lags), len(visible_lags), "lag metrics")),
                                   tables=(lag_table,) if lag_table else ()))
     backlog_rows = [{"item": key, "observed": _human(value)} for key, value in list(backlog.items())[:policy.max_replication_rows]]
     backlog_table = _table(backlog_rows, (("Backlog", ("item",)), ("Observed", ("observed",))))

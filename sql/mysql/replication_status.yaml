@@ -5,3 +5,10 @@ timeout_seconds: 10
 max_rows: 100
 reviewed: true
 description: Reviewed read-only MySQL replication channel status listing.
+feature: replication
+version_families:
+  - "8.0"
+  - "8.4"
+runtime_variants:
+  - "8022_plus"
+  - "default"

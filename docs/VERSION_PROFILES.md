@@ -1,10 +1,9 @@
-# Version Profiles (V0.9.1 Phase A)
+# Version Profiles (V0.9.1 Phase B)
 
-Phase A adds the version declaration and verification foundation. Existing
-Collector and Analyzer SQL routing remains on the current legacy paths until a
-later migration phase binds SQL, permission requirements and parser contracts
-atomically. `UNKNOWN` support in a legacy binding means “not migrated”; it does
-not claim that a feature is ready for that server family.
+Phase A added version declaration and detection. Phase B migrates replication
+only: SQL bundles, complete permission requirements, parser aliases and support
+state are selected together by the immutable `DiagnosticProfileResolver`.
+Slow, disk-growth and plan remain on their existing paths.
 
 ## Inventory declaration
 
@@ -24,7 +23,7 @@ databases:
 
 Canonical families are SQL Server `2008r2`, `2012`, `2014`, `2016`, `2017`,
 `2019`, `2022`, `2025`; MySQL `5.7`, `8.0`, `8.4`; PostgreSQL `13` through
-`18`; and Oracle `12c`, `18c`, `19c`, `21c`, `23ai`, `26ai`.
+`18`; and Oracle `11gr2`, `12c`, `18c`, `19c`, `21c`, `23ai`, `26ai`.
 
 The field is optional during migration. `dba validate` stays offline, accepts
 older Inventory entries and warns when a family is absent. It rejects numeric
@@ -64,12 +63,12 @@ dba check sql-prod-example --json
 raw version, normalized family and verification status alongside the existing
 account and permission summary. It does not persist detected versions.
 
-The central `DiagnosticProfileResolver` returns a frozen profile containing
-the SQL, permission and parser IDs from one binding. Phase A binds only explicit
-legacy placeholders and a small set of foundation routes. Their support state
-is `UNKNOWN`; these records validate the model and variant selection, but do
-not change execution routing. SQL Server 2008 R2 replication is explicitly
-`UNSUPPORTED` for the Availability Group feature.
+The central `DiagnosticProfileResolver` returns a frozen profile containing the
+SQL bundle, permission profile, parser contract and support state from one
+binding. Replication requires declared and detected families to match before
+any feature SQL runs. `AUTO_DETECTED`, `UNVERIFIED`, `MISMATCH`, and unknown
+variants fail closed for diagnosis. Permission output may show a declared
+reference profile as unverified; it does not claim readiness.
 
 ## Extending profiles
 
@@ -79,3 +78,37 @@ support together; update the corresponding Preflight and tests. `dba validate`
 checks canonical family references, duplicate routes, component references,
 variant constraints and forbidden administrator privileges in binding
 metadata. It does not infer privileges from arbitrary SQL or documentation.
+
+## Replication support matrix
+
+| Database family | Support | Selected profile | Evidence in this phase |
+|---|---|---|---|
+| SQL Server 2008 R2 | UNSUPPORTED | No AG SQL | Unit/regression tested; no AG statement is executed |
+| SQL Server 2012, 2014, 2016, 2017, 2019 | SUPPORTED | Shared pre-2022 AG SQL/parser; `VIEW SERVER STATE` | Static and Fake Adapter integration tested; not E2E verified in Phase B |
+| SQL Server 2022 | SUPPORTED | Explicit 2022 AG profile; `VIEW SERVER PERFORMANCE STATE` | Static and Fake Adapter integration tested; not E2E verified in Phase B |
+| SQL Server 2025 | UNKNOWN | No inherited SQL route | Fail-closed unit tested |
+| MySQL 5.7 | SUPPORTED | `SHOW SLAVE STATUS` | Static and Fake Adapter integration tested; not E2E verified in Phase B |
+| MySQL 8.0 < 8.0.22 | SUPPORTED | `SHOW SLAVE STATUS`, legacy aliases | Boundary and Fake Adapter tested; not E2E verified in Phase B |
+| MySQL 8.0 >= 8.0.22 / 8.4 | SUPPORTED | `SHOW REPLICA STATUS`, modern aliases | Boundary and Fake Adapter tested; not E2E verified in Phase B |
+| PostgreSQL 13–18 | SUPPORTED | Shared explicit `pg13_18_replication` profile | Resolver family and Fake Adapter tested; not E2E verified in Phase B |
+| Oracle 11gR2 | SUPPORTED | `V_$MANAGED_STANDBY` legacy Data Guard profile | SQL/grant/parser Fake Adapter integration tested; NOT E2E VERIFIED |
+| Oracle 12c 12.1 | SUPPORTED | Legacy `V_$MANAGED_STANDBY` profile | Static and Fake Adapter tested; NOT E2E VERIFIED |
+| Oracle 12c 12.2+ and 18c/19c/21c/23ai/26ai | SUPPORTED | Modern `V_$DATAGUARD_PROCESS` profile | Static and Fake Adapter tested; not E2E verified in Phase B |
+
+`SUPPORTED` describes a reviewed implementation and is separate from evidence
+level. Phase B adds unit and Fake Adapter integration coverage; it does not
+claim live compatibility for the full family matrix. Oracle 11gR2 specifically
+has no live E2E verification. PostgreSQL `PRIMARY` with no peers or slots is
+`NOT_CONFIGURED` and `HEALTHY` when all applicable queries complete; sender
+capacity alone does not imply that a standby is expected. A MySQL status query
+returning zero channels is likewise complete `NOT_CONFIGURED` evidence.
+
+MySQL's non-SELECT allowlist is exact and closed: `SHOW BINARY LOGS`,
+`SHOW GRANTS`, `SHOW SLAVE STATUS`, and `SHOW REPLICA STATUS`. It does not allow
+arbitrary `SHOW` statements. Replication requires `REPLICATION CLIENT` only.
+
+Oracle 11gR2 detection maps `11.2.x` to canonical `11gr2`; `11.1` and malformed
+versions remain UNKNOWN. The legacy route uses `V_$DATABASE`,
+`V_$DATAGUARD_STATS`, `V_$MANAGED_STANDBY`, and `V_$ARCHIVE_DEST_STATUS`, plus
+the version detector's `V_$VERSION` grant. It does not reference
+`V_$DATAGUARD_PROCESS`.

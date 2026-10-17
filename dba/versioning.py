@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from dba.collectors import CollectorResult
 from dba.core import DatabaseType
 from dba.errors import ToolkitError
-from dba.permissions import VERSION_DETECTION_PRIVILEGES
+from dba.permissions import VERSION_DETECTION_PRIVILEGES, requirements_for_profile
 
 if TYPE_CHECKING:
     from dba.registry import SqlScript, SqlScriptRegistry
@@ -25,7 +25,7 @@ CANONICAL_VERSION_FAMILIES: dict[DatabaseType, tuple[str, ...]] = {
     DatabaseType.SQLSERVER: ("2008r2", "2012", "2014", "2016", "2017", "2019", "2022", "2025"),
     DatabaseType.MYSQL: ("5.7", "8.0", "8.4"),
     DatabaseType.POSTGRESQL: ("13", "14", "15", "16", "17", "18"),
-    DatabaseType.ORACLE: ("12c", "18c", "19c", "21c", "23ai", "26ai"),
+    DatabaseType.ORACLE: ("11gr2", "12c", "18c", "19c", "21c", "23ai", "26ai"),
 }
 class VersionStatus(StrEnum):
     VERIFIED = "VERIFIED"
@@ -169,7 +169,9 @@ def normalize_version(
         release_match = re.search(r"\brelease\s+(\d+)\.(\d+)", folded)
         numeric_match = release_match or re.search(r"\b(\d+)\.(\d+)(?:\.\d+)*", folded)
         numeric = (int(numeric_match[1]), int(numeric_match[2])) if numeric_match else None
-        if "26ai" in folded or ("26ai" not in folded and numeric == (23, 26)):
+        if numeric and numeric[0] == 11 and numeric[1] == 2:
+            family = "11gr2"
+        elif "26ai" in folded or ("26ai" not in folded and numeric == (23, 26)):
             family = "26ai"
         elif "23ai" in folded or "23c" in folded or numeric == (23, 0):
             family = "23ai"
@@ -177,6 +179,7 @@ def normalize_version(
             major, minor = numeric
             if major == 12 and minor in {1, 2}:
                 family = "12c"
+                variant = "12_1" if minor == 1 else "12_2_plus"
             elif major in {18, 19, 21}:
                 family = f"{major}c"
 
@@ -318,6 +321,52 @@ PROFILE_BINDINGS: tuple[ProfileBinding, ...] = (
     _legacy_binding(DatabaseType.ORACLE, "21c", "slow"),
     _legacy_binding(DatabaseType.ORACLE, "23ai", "slow"),
     _legacy_binding(DatabaseType.ORACLE, "26ai", "slow"),
+) + tuple(
+    ProfileBinding(DatabaseType.MYSQL, family, "replication", SupportState.SUPPORTED,
+                   sql_id, permission_id, parser_id, profile_family, variant,
+                   required_privileges)
+    for family, variant, sql_id, permission_id, parser_id, profile_family, required_privileges in (
+        ("5.7", "default", "mysql57_replication", "mysql57_replication",
+         "mysql57_replication", "mysql57_replication", ("REPLICATION CLIENT",)),
+        ("8.0", "pre_8022", "mysql80_pre_8022_replication", "mysql80_pre_8022_replication",
+         "mysql80_pre_8022_replication", "mysql80_pre_8022_replication", ("REPLICATION CLIENT",)),
+        ("8.0", "8022_plus", "mysql80_8022_plus_replication", "mysql80_8022_plus_replication",
+         "mysql80_8022_plus_replication", "mysql80_8022_plus_replication", ("REPLICATION CLIENT",)),
+        ("8.4", "default", "mysql84_replication", "mysql84_replication",
+         "mysql84_replication", "mysql84_replication", ("REPLICATION CLIENT",)),
+    )
+) + tuple(
+    ProfileBinding(DatabaseType.POSTGRESQL, family, "replication", SupportState.SUPPORTED,
+                   "pg13_18_replication", "pg13_18_replication", "pg13_18_replication",
+                   "pg13_18_replication", "default", ("pg_monitor", "CONNECT"))
+    for family in ("13", "14", "15", "16", "17", "18")
+) + tuple(
+    ProfileBinding(DatabaseType.SQLSERVER, family, "replication", SupportState.SUPPORTED,
+                   "sqlserver_ag_pre2022" if family != "2022" else "sqlserver_ag_2022",
+                   "sqlserver_ag_pre2022" if family != "2022" else "sqlserver_ag_2022",
+                   "sqlserver_ag_shared", "sqlserver_ag_pre2022" if family != "2022"
+                   else "sqlserver_ag_2022", "default",
+                   ("VIEW SERVER STATE",) if family != "2022" else
+                   ("VIEW SERVER PERFORMANCE STATE",))
+    for family in ("2012", "2014", "2016", "2017", "2019", "2022")
+) + (
+    ProfileBinding(DatabaseType.SQLSERVER, "2025", "replication", SupportState.UNKNOWN,
+                   "", "", "", "unverified", "default"),
+) + tuple(
+    ProfileBinding(DatabaseType.ORACLE, family, "replication", SupportState.SUPPORTED,
+                   sql_id, permission_id, parser_id, profile_family, variant,
+                   required_privileges)
+    for family, variant, sql_id, permission_id, parser_id, profile_family, required_privileges in (
+        ("11gr2", "default", "oracle11gr2_replication", "oracle11gr2_replication",
+         "oracle11gr2_replication", "oracle11gr2_replication", ("CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$MANAGED_STANDBY", "SELECT SYS.V_$ARCHIVE_DEST_STATUS")),
+        ("12c", "12_1", "oracle12c_121_replication", "oracle12c_121_replication",
+         "oracle12c_121_replication", "oracle12c_121_replication", ("CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$MANAGED_STANDBY", "SELECT SYS.V_$ARCHIVE_DEST_STATUS")),
+        ("12c", "12_2_plus", "oracle12c_122_replication", "oracle12c_122_replication",
+         "oracle12c_122_replication", "oracle12c_122_replication", ("CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$DATAGUARD_PROCESS", "SELECT SYS.V_$ARCHIVE_DEST_STATUS")),
+        *( (family, "default", "oracle_modern_replication", "oracle_modern_replication",
+            "oracle_modern_replication", "oracle_modern_replication", ("CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$DATAGUARD_PROCESS", "SELECT SYS.V_$ARCHIVE_DEST_STATUS"))
+           for family in ("18c", "19c", "21c", "23ai", "26ai") ),
+    )
 )
 
 
@@ -346,7 +395,11 @@ class DiagnosticProfileResolver:
                 errors.append(f"unknown version family: {binding.db_type.value}/{binding.version_family}")
             if not isinstance(binding.support_state, SupportState):
                 errors.append(f"missing or invalid support state: {key}")
-            if binding.support_state != SupportState.UNSUPPORTED:
+            has_reference = any((binding.sql_profile_id, binding.permission_profile_id,
+                                 binding.parser_contract_id))
+            if binding.support_state != SupportState.UNSUPPORTED and (
+                binding.support_state != SupportState.UNKNOWN or has_reference
+            ):
                 referenced = (binding.sql_profile_id, binding.permission_profile_id,
                               binding.parser_contract_id)
                 prefix = (f"legacy:{binding.db_type.value}:{binding.version_family}:"
@@ -354,14 +407,29 @@ class DiagnosticProfileResolver:
                 expected = (f"{prefix}:sql", f"{prefix}:permission", f"{prefix}:parser")
                 if any(not item for item in referenced):
                     errors.append(f"dangling profile reference: {key}")
+                elif binding.feature == "replication":
+                    if any(item.startswith("legacy:") for item in referenced):
+                        errors.append(f"cross-route or unknown profile reference: {key}")
                 elif referenced != expected:
                     errors.append(f"cross-route or unknown profile reference: {key}")
+                if binding.feature == "replication":
+                    try:
+                        permission = requirements_for_profile(binding.permission_profile_id)
+                    except ValueError:
+                        errors.append(f"missing permission profile: {key}")
+                    else:
+                        if tuple(permission.required) != binding.required_privileges:
+                            errors.append(f"route permission contract mismatch: {key}")
             risky = forbidden.intersection(p.upper() for p in binding.required_privileges)
             if risky:
                 errors.append(f"forbidden privilege in profile metadata: {key}")
             if binding.db_type == DatabaseType.MYSQL and binding.version_family == "8.0":
                 if binding.runtime_variant not in {"pre_8022", "8022_plus"}:
                     errors.append(f"invalid MySQL 8.0 variant: {key}")
+            elif binding.db_type == DatabaseType.ORACLE and binding.version_family == "12c" \
+                    and binding.feature == "replication":
+                if binding.runtime_variant not in {"12_1", "12_2_plus"}:
+                    errors.append(f"invalid Oracle 12c variant: {key}")
             elif binding.runtime_variant != "default":
                 errors.append(f"invalid variant for route: {key}")
         return tuple(errors)
@@ -386,8 +454,7 @@ class DiagnosticProfileResolver:
         status = version_status(declared_version_family, detected_version)
         family = detected_family if status == VersionStatus.AUTO_DETECTED else declared_version_family
         variant = detected_version.variant_key if detected_version else None
-        if family is None or status in {VersionStatus.UNKNOWN, VersionStatus.UNVERIFIED,
-                                        VersionStatus.MISMATCH}:
+        if family is None or status in {VersionStatus.UNKNOWN, VersionStatus.MISMATCH}:
             return ResolvedDiagnosticProfile(
                 database_type, feature, declared_version_family,
                 detected_version.raw_version if detected_version else None, detected_family,
@@ -397,7 +464,11 @@ class DiagnosticProfileResolver:
         route = next((item for item in self.bindings if
                       item.db_type == database_type and item.version_family == family
                       and item.feature == feature and item.runtime_variant == lookup_variant), None)
-        if route is None and lookup_variant != "default":
+        family_routes = [item for item in self.bindings if
+                         item.db_type == database_type and item.version_family == family
+                         and item.feature == feature]
+        has_variant_routes = any(item.runtime_variant != "default" for item in family_routes)
+        if route is None and lookup_variant != "default" and not has_variant_routes:
             route = next((item for item in self.bindings if
                           item.db_type == database_type and item.version_family == family
                           and item.feature == feature and item.runtime_variant == "default"), None)
@@ -415,3 +486,12 @@ class DiagnosticProfileResolver:
 
 
 PROFILE_RESOLVER = DiagnosticProfileResolver()
+
+
+def resolve_profile_for_adapter(adapter: Any, feature: str) -> tuple[ResolvedDiagnosticProfile, VersionDetection]:
+    """Detect the connected target version and resolve one complete static profile."""
+    detection = DEFAULT_VERSION_DETECTOR.detect(adapter.instance.db_type, adapter.registry, adapter)
+    profile = PROFILE_RESOLVER.resolve(
+        adapter.instance.db_type, adapter.instance.version_family, detection.detected, feature,
+    )
+    return profile, detection

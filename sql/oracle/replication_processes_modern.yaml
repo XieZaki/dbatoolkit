@@ -5,3 +5,14 @@ timeout_seconds: 10
 max_rows: 100
 reviewed: true
 description: Reviewed Oracle 12.2+ Data Guard process and action snapshot.
+feature: replication
+version_families:
+  - "12c"
+  - "18c"
+  - "19c"
+  - "21c"
+  - "23ai"
+  - "26ai"
+runtime_variants:
+  - "12_2_plus"
+  - "default"

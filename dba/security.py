@@ -15,13 +15,14 @@ FORBIDDEN = frozenset(
 def check_sql(sql: str) -> None:
     """Conservative extra layer, never a substitute for database permissions.
 
-    The exact SHOW BINARY LOGS and SHOW GRANTS statements are fixed read-only metadata
-    listings and the only approved non-SELECT forms.
+    Exact SHOW BINARY LOGS, SHOW GRANTS, SHOW REPLICA STATUS and SHOW SLAVE STATUS
+    statements are the only approved non-SELECT forms. The replication forms are
+    permitted only through their individually reviewed Registry scripts.
     Keywords in literals/comments are also rejected intentionally. Arbitrary SQL
     functions can have side effects: mandatory human review and monitoring grants
     remain necessary before any future execution.
     """
-    # The sole non-SELECT exception is a fixed, reviewed MySQL metadata listing.
+    # Non-SELECT forms are a closed allowlist of fixed MySQL metadata statements.
     # Reject any suffix, comment, second statement or alternate SHOW form.
     if sql.strip().upper() in {
         "SHOW BINARY LOGS", "SHOW GRANTS", "SHOW REPLICA STATUS", "SHOW SLAVE STATUS"

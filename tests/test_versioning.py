@@ -53,8 +53,11 @@ ROOT = Path(__file__).resolve().parents[1]
     (DatabaseType.POSTGRESQL, "13.12 (Debian)", "13", None),
     (DatabaseType.POSTGRESQL, "18.0", "18", None),
     (DatabaseType.POSTGRESQL, "19.0", None, None),
-    (DatabaseType.ORACLE, "Oracle Database 12c Release 12.1.0.2.0", "12c", None),
-    (DatabaseType.ORACLE, "Oracle Database 12c Release 12.2.0.1.0", "12c", None),
+    (DatabaseType.ORACLE, "Oracle Database 12c Release 12.1.0.2.0", "12c", "12_1"),
+    (DatabaseType.ORACLE, "Oracle Database 12c Release 12.2.0.1.0", "12c", "12_2_plus"),
+    (DatabaseType.ORACLE, "Oracle Database 11g Release 11.2.0.4.0", "11gr2", None),
+    (DatabaseType.ORACLE, "Oracle Database 11g Release 11.2.0.3.0", "11gr2", None),
+    (DatabaseType.ORACLE, "Oracle Database 11g Release 11.1.0.7.0", None, None),
     (DatabaseType.ORACLE, "Oracle Database 19c Release 19.0.0.0.0", "19c", None),
     (DatabaseType.ORACLE, "Oracle Database 23ai Release 23.0.0.0.0", "23ai", None),
     (DatabaseType.ORACLE, "Oracle Database 26ai Release 23.26.0.0.0", "26ai", None),
@@ -182,7 +185,7 @@ def test_resolved_profile_is_immutable_and_binding_registry_is_valid() -> None:
         profile.feature = "disk-growth"  # type: ignore[misc]
     assert PROFILE_RESOLVER.validate() == ()
     assert CANONICAL_VERSION_FAMILIES[DatabaseType.ORACLE] == (
-        "12c", "18c", "19c", "21c", "23ai", "26ai"
+        "11gr2", "12c", "18c", "19c", "21c", "23ai", "26ai"
     )
 
 

@@ -16,12 +16,25 @@ from dba.permissions import (
     PermissionStatus,
     assess_permissions,
     render_sql,
+    requirements_for_profile,
     scan_registry_objects,
 )
+from dba.presentation import render_replication_summary
 from dba.registry import SqlScriptRegistry
 from dba.replication import diagnose_replication
+from dba.replication_collectors import (
+    REPLICATION_PARSER_CONTRACTS,
+    REPLICATION_SQL_PROFILES,
+    validate_replication_profiles,
+)
 from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.security import check_sql
+from dba.versioning import (
+    PROFILE_RESOLVER,
+    DetectedDatabaseVersion,
+    VersionStatus,
+    normalize_version,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,17 +46,21 @@ def _result(name: str, rows: tuple[dict[str, Any], ...], *, success: bool = True
                            success, None if success else "QueryDenied", error)
 
 
-class _FakeRegistry:
-    def get(self, name: str, _database_type: DatabaseType) -> SimpleNamespace:
-        return SimpleNamespace(metadata=SimpleNamespace(name=name))
-
-
 class _FakeAdapter:
     def __init__(self, db_type: DatabaseType, version: str, rows: dict[str, CollectorResult],
                  permissions: set[str] | None = None) -> None:
+        version_num = None
+        if db_type == DatabaseType.POSTGRESQL:
+            if version.isdigit() and len(version) >= 6:
+                version_num = int(version)
+            else:
+                parts = version.split(".")
+                version_num = int(parts[0]) * 10000 + int(parts[1] if len(parts) > 1 else 0) * 100
+        detected = normalize_version(db_type, version, server_version_num=version_num)
         self.instance = DatabaseInstance("replica", "Replica Test", db_type, "db.example.invalid",
-                                         1, "monitor", database="master")
-        self.registry = _FakeRegistry()
+                                         1, "monitor", database="master",
+                                         version_family=detected.normalized_family)
+        self.registry = SqlScriptRegistry(ROOT / "sql")
         self.version = version
         self.rows = rows
         self.permission_observations = permissions or set()
@@ -56,6 +73,15 @@ class _FakeAdapter:
     def execute_readonly(self, script: SimpleNamespace) -> CollectorResult:
         name = script.metadata.name
         self.calls.append(name)
+        if name == "version_detect":
+            row: dict[str, Any] = {"raw_version": self.version}
+            if self.instance.db_type == DatabaseType.POSTGRESQL:
+                parts = self.version.split(".")
+                row["server_version_num"] = (
+                    int(self.version) if self.version.isdigit() and len(self.version) >= 6
+                    else int(parts[0]) * 10000 + int(parts[1] if len(parts) > 1 else 0) * 100
+                )
+            return _result(name, (row,))
         return self.rows.get(name, _result(name, ()))
 
 
@@ -68,12 +94,13 @@ def _pg_permissions() -> set[str]:
 
 
 def _oracle_permissions() -> set[str]:
-    return {"CREATE SESSION", "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$DATAGUARD_STATS",
-            "SELECT SYS.V_$MANAGED_STANDBY", "SELECT SYS.V_$ARCHIVE_DEST_STATUS"}
+    return {"CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE",
+            "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$MANAGED_STANDBY",
+            "SELECT SYS.V_$DATAGUARD_PROCESS", "SELECT SYS.V_$ARCHIVE_DEST_STATUS"}
 
 
 def _sqlserver_permissions() -> set[str]:
-    return {"VIEW SERVER STATE"}
+    return {"VIEW SERVER STATE", "VIEW SERVER PERFORMANCE STATE"}
 
 
 @pytest.mark.parametrize("db_type", [DatabaseType.SQLSERVER, DatabaseType.POSTGRESQL,
@@ -111,7 +138,7 @@ def test_mysql_multichannel_threads_lag_errors_gtid_and_backlog() -> None:
     assert any(item.kind == "time" and item.value == 4 for item in report.lag)
     assert report.summary.overall == "CRITICAL"
     assert report.details["permission_readiness"]["status"] == PermissionStatus.READY
-    assert adapter.calls == ["replication_server_info", "replication_status"]
+    assert adapter.calls == ["version_detect", "replication_server_info", "replication_status"]
 
 
 @pytest.mark.regression
@@ -119,8 +146,8 @@ def test_mysql_null_lag_and_configured_delay_are_not_false_healthy_lag() -> None
     adapter = _FakeAdapter(DatabaseType.MYSQL, "8.0.21", {
         "replication_server_info": _result("replication_server_info", ({"read_only": 1},)),
         "replication_status_legacy": _result("replication_status_legacy", ({
-            "Replica_IO_Running": "Yes", "Replica_SQL_Running": "Yes",
-            "Seconds_Behind_Source": None, "SQL_Delay": 60, "Relay_Log_Space": 100,
+            "Slave_IO_Running": "Yes", "Slave_SQL_Running": "Yes",
+            "Seconds_Behind_Master": None, "SQL_Delay": 60, "Relay_Log_Space": 100,
         },)),
     }, _mysql_permissions())
     report = diagnose_replication(adapter)
@@ -184,6 +211,9 @@ def test_postgresql_unconfigured_is_not_critical() -> None:
     assert report.summary.status == "NOT_CONFIGURED"
     assert report.summary.overall == "HEALTHY"
     assert not any(issue.severity in {"HIGH", "CRITICAL"} for issue in report.issues)
+    assert "Not applicable because replication is not configured." in render_replication_summary(
+        report, report_path="report.html"
+    )
 
 
 @pytest.mark.regression
@@ -204,7 +234,7 @@ def test_sqlserver_ag_role_and_queue_units_and_old_version_unsupported() -> None
     old = _FakeAdapter(DatabaseType.SQLSERVER, "10.50.6000", {}, _sqlserver_permissions())
     old_report = diagnose_replication(old)
     assert old_report.summary.status == "UNSUPPORTED"
-    assert not old.calls
+    assert old.calls == ["version_detect"]
 
 
 @pytest.mark.regression
@@ -286,6 +316,144 @@ def test_replication_registry_sql_is_reviewed_read_only_and_no_mutation() -> Non
         assert script.metadata.max_rows == 2
     with pytest.raises(Exception):
         check_sql("START REPLICA")
+    with pytest.raises(Exception):
+        check_sql("SHOW DATABASES")
+
+
+def test_replication_routes_bind_sql_permissions_parser_and_support_atomically() -> None:
+    routes = [item for item in PROFILE_RESOLVER.bindings if item.feature == "replication"]
+    assert validate_replication_profiles(SqlScriptRegistry(ROOT / "sql"), tuple(routes)) == ()
+    for route in routes:
+        if route.support_state.value == "SUPPORTED":
+            assert route.sql_profile_id in REPLICATION_SQL_PROFILES
+            assert route.parser_contract_id in REPLICATION_PARSER_CONTRACTS
+            assert route.permission_profile_id == route.sql_profile_id or (
+                route.db_type == DatabaseType.SQLSERVER
+                and route.permission_profile_id in {"sqlserver_ag_pre2022", "sqlserver_ag_2022"}
+            )
+
+
+@pytest.mark.parametrize(("raw", "variant", "script"), [
+    ("8.0.21", "pre_8022", "replication_status_legacy"),
+    ("8.0.22", "8022_plus", "replication_status"),
+    ("8.0.36", "8022_plus", "replication_status"),
+])
+def test_mysql_80_replication_boundary_selects_exact_profile(raw: str, variant: str, script: str) -> None:
+    detected = normalize_version(DatabaseType.MYSQL, raw)
+    profile = PROFILE_RESOLVER.resolve(DatabaseType.MYSQL, "8.0", detected, "replication")
+    assert profile.version_status == VersionStatus.VERIFIED
+    assert profile.runtime_variant == variant
+    assert script in REPLICATION_SQL_PROFILES[profile.sql_profile_id or ""]
+    assert profile.permission_profile_id == profile.sql_profile_id
+    assert profile.parser_contract_id == profile.sql_profile_id
+
+
+def test_no_legacy_sql_fallback_after_resolved_modern_query_failure() -> None:
+    adapter = _FakeAdapter(DatabaseType.MYSQL, "8.0.22", {
+        "replication_server_info": _result("replication_server_info", ({"read_only": 0},)),
+        "replication_status": _result("replication_status", (), success=False,
+                                       error="replica status denied"),
+        "replication_status_legacy": _result("replication_status_legacy", ({
+            "Slave_IO_Running": "Yes", "Slave_SQL_Running": "Yes"},)),
+    }, _mysql_permissions())
+    report = diagnose_replication(adapter)
+    assert "replication_status" in adapter.calls
+    assert "replication_status_legacy" not in adapter.calls
+    assert report.summary.data_completeness == "INCOMPLETE"
+
+
+@pytest.mark.parametrize(("raw", "variant", "sql_profile"), [
+    ("Oracle Database 12c Release 12.1.0.2.0", "12_1", "oracle12c_121_replication"),
+    ("Oracle Database 12c Release 12.2.0.1.0", "12_2_plus", "oracle12c_122_replication"),
+])
+def test_oracle_12c_minor_version_selects_atomic_data_guard_route(
+    raw: str, variant: str, sql_profile: str,
+) -> None:
+    detected = normalize_version(DatabaseType.ORACLE, raw)
+    profile = PROFILE_RESOLVER.resolve(DatabaseType.ORACLE, "12c", detected, "replication")
+    assert profile.runtime_variant == variant
+    assert profile.sql_profile_id == profile.permission_profile_id == sql_profile
+    assert profile.parser_contract_id == sql_profile
+    assert ("replication_processes" if variant == "12_1" else "replication_processes_modern") \
+        in REPLICATION_SQL_PROFILES[sql_profile]
+
+
+def test_postgresql_13_16_18_reuse_only_same_reviewed_replication_profile() -> None:
+    for version, family in (("13.15", "13"), ("16.4", "16"), ("18.0", "18")):
+        detected = normalize_version(DatabaseType.POSTGRESQL, version)
+        profile = PROFILE_RESOLVER.resolve(DatabaseType.POSTGRESQL, family, detected, "replication")
+        assert profile.sql_profile_id == "pg13_18_replication"
+        assert profile.permission_profile_id == profile.parser_contract_id == "pg13_18_replication"
+
+
+def test_mysql_57_replication_uses_legacy_aliases_and_complete_empty_snapshot() -> None:
+    adapter = _FakeAdapter(DatabaseType.MYSQL, "5.7.44-log", {
+        "replication_server_info": _result("replication_server_info", ({"read_only": 0},)),
+        "replication_status_legacy": _result("replication_status_legacy", ()),
+    }, _mysql_permissions())
+    report = diagnose_replication(adapter)
+    assert "replication_status_legacy" in adapter.calls
+    assert "replication_status" not in adapter.calls
+    assert report.summary.status == "NOT_CONFIGURED"
+    assert report.summary.data_completeness == "COMPLETE"
+    assert "show slave status" in REGISTRY[DatabaseType.MYSQL]["replication"].objects
+    assert dict(REPLICATION_PARSER_CONTRACTS["mysql57_replication"].aliases)["io_running"] == (
+        "Slave_IO_Running",
+    )
+
+
+def test_oracle_11gr2_uses_legacy_data_guard_bundle_and_grants() -> None:
+    adapter = _FakeAdapter(DatabaseType.ORACLE, "Oracle Database 11g Release 11.2.0.4.0", {
+        "replication_database": _result("replication_database", ({"database_role": "PRIMARY"},)),
+        "replication_metrics": _result("replication_metrics", ()),
+        "replication_processes": _result("replication_processes", ()),
+        "replication_destinations": _result("replication_destinations", ()),
+    }, {"CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE",
+        "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$MANAGED_STANDBY",
+        "SELECT SYS.V_$ARCHIVE_DEST_STATUS"})
+    report = diagnose_replication(adapter)
+    assert "replication_processes" in adapter.calls
+    assert "replication_processes_modern" not in adapter.calls
+    assert report.summary.status == "NOT_CONFIGURED"
+    requirement = requirements_for_profile(report.details["version_profile"]["permission_profile_id"])
+    assert "SELECT SYS.V_$MANAGED_STANDBY" in requirement.required
+    assert "SELECT SYS.V_$DATAGUARD_PROCESS" not in requirement.required
+    assert "SELECT SYS.V_$VERSION" in requirement.required
+
+
+def test_version_mismatch_blocks_replication_before_feature_sql() -> None:
+    adapter = _FakeAdapter(DatabaseType.MYSQL, "8.4.1", {}, _mysql_permissions())
+    adapter.instance = adapter.instance.__class__(
+        adapter.instance.id, adapter.instance.name, adapter.instance.db_type,
+        adapter.instance.host, adapter.instance.port, adapter.instance.credential_alias,
+        database=adapter.instance.database, version_family="8.0",
+    )
+    with pytest.raises(Exception, match="verified version family"):
+        diagnose_replication(adapter)
+    assert adapter.calls == ["version_detect"]
+
+
+def test_unconfigured_postgresql_primary_is_healthy_with_sender_capacity() -> None:
+    adapter = _FakeAdapter(DatabaseType.POSTGRESQL, "16.4", {
+        "replication_node": _result("replication_node", ({"in_recovery": False,
+            "wal_level": "replica", "max_wal_senders": 10},)),
+        "replication_members": _result("replication_members", ()),
+        "replication_receiver": _result("replication_receiver", ()),
+        "replication_slots": _result("replication_slots", ()),
+        "replication_archiver": _result("replication_archiver", ()),
+    }, _pg_permissions())
+    report = diagnose_replication(adapter)
+    assert report.summary.status == "NOT_CONFIGURED"
+    assert report.summary.overall == "HEALTHY"
+    assert report.summary.data_completeness == "COMPLETE"
+
+
+def test_unknown_sqlserver_2025_replication_route_fails_closed() -> None:
+    profile = PROFILE_RESOLVER.resolve(
+        DatabaseType.SQLSERVER, "2025", DetectedDatabaseVersion("17.0.1", "2025"), "replication"
+    )
+    assert profile.support_state.value == "UNKNOWN"
+    assert profile.sql_profile_id is None
 
 
 def test_mysql_replica_status_registry_uses_only_fixed_commands() -> None:

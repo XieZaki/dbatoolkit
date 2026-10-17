@@ -15,6 +15,9 @@ class SqlMetadata:
     max_rows: int
     reviewed: bool
     description: str
+    feature: str | None = None
+    version_families: tuple[str, ...] = ()
+    runtime_variants: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -46,7 +49,8 @@ class SqlScriptRegistry:
             "reviewed",
             "description",
         }
-        if not isinstance(data, dict) or set(data) != expected:
+        optional = {"feature", "version_families", "runtime_variants"}
+        if not isinstance(data, dict) or not expected <= set(data) or set(data) - expected - optional:
             raise ValidationError("SQL metadata fields are invalid")
         for key in ("name", "description", "database_type", "risk"):
             if not isinstance(data[key], str) or not data[key].strip():
@@ -56,6 +60,16 @@ class SqlScriptRegistry:
                 raise ValidationError("SQL limits must be positive integers")
         if data["risk"] != "READ_ONLY" or type(data["reviewed"]) is not bool:
             raise ValidationError("Only READ_ONLY risk and boolean reviewed are supported")
+        for key in ("feature",):
+            if key in data and (not isinstance(data[key], str) or not data[key].strip()):
+                raise ValidationError("SQL feature metadata must be a nonempty string")
+        for key in ("version_families", "runtime_variants"):
+            if key in data and (not isinstance(data[key], list)
+                                or any(not isinstance(item, str) or not item for item in data[key])
+                                or len(set(data[key])) != len(data[key])):
+                raise ValidationError("SQL applicability metadata must be unique string lists")
+        data = {**data, "version_families": tuple(data.get("version_families", ())),
+                "runtime_variants": tuple(data.get("runtime_variants", ()))}
         if self.formal and not data["reviewed"]:
             raise ValidationError("Formal SQL must be reviewed")
         try:

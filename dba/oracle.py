@@ -174,9 +174,9 @@ class OracleAdapter(Adapter):
             raise ToolkitError("PreflightFailed", "Oracle monitor identity or version unavailable.")
         row = result.rows[0]
         version = row.get("server_version")
-        match = re.match(r"^(\d+)\.", version) if isinstance(version, str) else None
-        if match is None or int(match[1]) < 12:
-            raise ToolkitError("UnsupportedVersion", "Oracle 12c or newer is required for reviewed SQL.")
+        match = re.match(r"^(\d+)\.(\d+)", version) if isinstance(version, str) else None
+        if match is None or (int(match[1]), int(match[2])) < (11, 2):
+            raise ToolkitError("UnsupportedVersion", "Oracle 11gR2 or newer requires a reviewed version profile.")
         if str(row.get("monitor_user", "")).casefold() in {"sys", "system"}:
             raise ToolkitError("PrivilegedAccount", "Dedicated Oracle monitoring account required.")
         self._version = cast(str, version)

@@ -198,11 +198,15 @@ def feature_supported(database_type: DatabaseType, feature: str, version: str | 
     major = int(match.group().split(".", maxsplit=1)[0])
     if database_type == DatabaseType.POSTGRESQL and major >= 10000:
         major //= 10000
+    if database_type == DatabaseType.MYSQL:
+        release = tuple(int(part) for part in match.group().split(".")[:2])
+        return release >= (5, 7)
+    if database_type == DatabaseType.ORACLE:
+        release = tuple(int(part) for part in match.group().split(".")[:2])
+        return release >= (11, 2)
     minimum = {
         DatabaseType.SQLSERVER: 11,
         DatabaseType.POSTGRESQL: 13,
-        DatabaseType.MYSQL: 8,
-        DatabaseType.ORACLE: 12,
     }.get(database_type)
     return major >= minimum if minimum is not None else False
 
@@ -278,6 +282,82 @@ def requirements_for(database_type: DatabaseType, feature: str, version: str | N
                                       definition.revoke_template, definition.version_constraints,
                                       definition.permission_reasons, definition.scope_requirements)
     return definition
+
+
+_REPLICATION_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
+    "mysql57_replication": FeaturePermissions(
+        ("REPLICATION CLIENT",), (),
+        "MySQL 5.7 replication channel status is unavailable.",
+        ("SHOW SLAVE STATUS",),
+        permission_reasons=(("REPLICATION CLIENT", "Required by the reviewed SHOW SLAVE STATUS script."),),
+        scope_requirements=(("REPLICATION CLIENT", "REPLICATION CLIENT", "*.*"),)),
+    "mysql80_pre_8022_replication": FeaturePermissions(
+        ("REPLICATION CLIENT",), (),
+        "MySQL 8.0.21 and earlier replication channel status is unavailable.",
+        ("SHOW SLAVE STATUS",),
+        permission_reasons=(("REPLICATION CLIENT", "Required by the reviewed legacy replication status script."),),
+        scope_requirements=(("REPLICATION CLIENT", "REPLICATION CLIENT", "*.*"),)),
+    "mysql80_8022_plus_replication": FeaturePermissions(
+        ("REPLICATION CLIENT",), (),
+        "MySQL 8.0.22+ replication channel status is unavailable.",
+        ("SHOW REPLICA STATUS",),
+        permission_reasons=(("REPLICATION CLIENT", "Required by the reviewed replica status script."),),
+        scope_requirements=(("REPLICATION CLIENT", "REPLICATION CLIENT", "*.*"),)),
+    "mysql84_replication": FeaturePermissions(
+        ("REPLICATION CLIENT",), (), "MySQL 8.4 replication channel status is unavailable.",
+        ("SHOW REPLICA STATUS",),
+        permission_reasons=(("REPLICATION CLIENT", "Required by the reviewed replica status script."),),
+        scope_requirements=(("REPLICATION CLIENT", "REPLICATION CLIENT", "*.*"),)),
+    "pg13_18_replication": FeaturePermissions(
+        ("pg_monitor", "CONNECT"), (),
+        "PostgreSQL replication sender, receiver, slots, or archive evidence is unavailable.",
+        ("pg_stat_replication", "pg_stat_wal_receiver", "pg_replication_slots", "pg_stat_archiver")),
+    "sqlserver_ag_pre2022": FeaturePermissions(
+        ("VIEW SERVER STATE",), (), "Availability Group state and queue evidence is unavailable.",
+        ("sys.availability_groups", "sys.availability_replicas",
+         "sys.dm_hadr_availability_replica_states", "sys.dm_hadr_database_replica_states",
+         "sys.availability_databases_cluster"),
+        version_constraints=("SQL Server 2012-2019",)),
+    "sqlserver_ag_2022": FeaturePermissions(
+        ("VIEW SERVER PERFORMANCE STATE",), (),
+        "Availability Group state and queue evidence is unavailable.",
+        ("sys.availability_groups", "sys.availability_replicas",
+         "sys.dm_hadr_availability_replica_states", "sys.dm_hadr_database_replica_states",
+         "sys.availability_databases_cluster"),
+        version_constraints=("SQL Server 2022",)),
+}
+
+for _profile_id, _objects in {
+    "oracle11gr2_replication": ("SYS.V_$VERSION", "SYS.V_$DATABASE", "SYS.V_$DATAGUARD_STATS",
+                                "SYS.V_$MANAGED_STANDBY", "SYS.V_$ARCHIVE_DEST_STATUS"),
+    "oracle12c_121_replication": ("SYS.V_$VERSION", "SYS.V_$DATABASE", "SYS.V_$DATAGUARD_STATS",
+                                  "SYS.V_$MANAGED_STANDBY", "SYS.V_$ARCHIVE_DEST_STATUS"),
+    "oracle12c_122_replication": ("SYS.V_$VERSION", "SYS.V_$DATABASE", "SYS.V_$DATAGUARD_STATS",
+                                  "SYS.V_$DATAGUARD_PROCESS", "SYS.V_$ARCHIVE_DEST_STATUS"),
+    "oracle_modern_replication": ("SYS.V_$VERSION", "SYS.V_$DATABASE", "SYS.V_$DATAGUARD_STATS",
+                                  "SYS.V_$DATAGUARD_PROCESS", "SYS.V_$ARCHIVE_DEST_STATUS"),
+}.items():
+    _REPLICATION_PROFILE_REQUIREMENTS[_profile_id] = FeaturePermissions(
+        ("CREATE SESSION", *("SELECT " + item for item in _objects)), (),
+        "Data Guard role, lag, process, or archive destination evidence is unavailable.",
+        _objects,
+    )
+
+
+def requirements_for_profile(profile_id: str) -> FeaturePermissions:
+    """Return the complete permission contract bound to one resolved route."""
+    try:
+        return _REPLICATION_PROFILE_REQUIREMENTS[profile_id]
+    except KeyError:
+        raise ValueError("Resolved profile has no replication permission definition") from None
+
+
+def render_profile_sql(profile_id: str, database_type: DatabaseType, account: str,
+                       database: str | None = None, version: str | None = None,
+                       *, revoke: bool = False) -> str:
+    requirements = requirements_for_profile(profile_id)
+    return render_privileges_sql(database_type, requirements.required, account, database,
+                                 version, revoke=revoke)
 
 
 def _quote_identifier(value: str, database_type: DatabaseType) -> str:

@@ -5,3 +5,13 @@ timeout_seconds: 10
 max_rows: 2
 reviewed: true
 description: Reviewed PostgreSQL role, WAL configuration, and standby replay snapshot.
+feature: replication
+version_families:
+  - "13"
+  - "14"
+  - "15"
+  - "16"
+  - "17"
+  - "18"
+runtime_variants:
+  - "default"

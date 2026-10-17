@@ -5,3 +5,10 @@ timeout_seconds: 10
 max_rows: 100
 reviewed: true
 description: Reviewed Oracle managed recovery and remote file server process states.
+feature: replication
+version_families:
+  - "11gr2"
+  - "12c"
+runtime_variants:
+  - "default"
+  - "12_1"

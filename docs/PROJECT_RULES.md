@@ -24,7 +24,7 @@
 - Credential Session Agent may retain a derived data key only in process memory to perform an explicitly approved encrypted-store JIT update; it must never retain the master password, persist the key, and must invalidate/clear the session immediately after a successful mutation.
 - Inventory `connection` 仅允许按数据库类型审核过的非敏感连接参数。统一 Resolver 顺序为 instance.connection > 对应数据库 runtime settings > 代码安全默认值；未知项和任意层级的敏感字段必须由 validate 拒绝。
 - SQL 独立存储；正式加载必须 READ_ONLY 且 reviewed=true，设置 timeout_seconds/max_rows。
-- MySQL Registry 仅允许精确固定的 `SHOW BINARY LOGS` 作为 SELECT 以外的只读元数据查询；需要专用监控账号具备只读 `REPLICATION CLIENT`，不得使用 SUPER/BINLOG_ADMIN。
+- MySQL Registry 的 SELECT 以外只读语句采用封闭精确白名单：`SHOW BINARY LOGS`、`SHOW GRANTS`、`SHOW SLAVE STATUS`、`SHOW REPLICA STATUS`。每条必须是独立审核的固定 Registry 脚本；禁止扩大为任意 SHOW。复制状态查询按版本路由，需要专用监控账号具备只读 `REPLICATION CLIENT`，不得使用 SUPER/BINLOG_ADMIN。
 - 静态 SQL 检查只是附加保护，不是权限控制或安全证明。审查函数副作用，最终边界是数据库监控账号权限。
 - Adapter 只接受自身 Registry 签发并在执行前复核内容/元数据未变更的已审查脚本。禁止任意 SQL 字符串执行接口。
 - SQL Server 使用 pyodbc，Microsoft ODBC Driver 18 优先、17 兼容回退；默认连接超时 5 秒、显式加密并验证证书；autocommit=true，不执行初始化修改语句。每次执行前为新游标设置有效超时=min(metadata.timeout_seconds, runtime.query_timeout)。
