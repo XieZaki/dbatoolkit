@@ -23,7 +23,9 @@ def check_sql(sql: str) -> None:
     """
     # The sole non-SELECT exception is a fixed, reviewed MySQL metadata listing.
     # Reject any suffix, comment, second statement or alternate SHOW form.
-    if sql.strip().upper() in {"SHOW BINARY LOGS", "SHOW GRANTS"}:
+    if sql.strip().upper() in {
+        "SHOW BINARY LOGS", "SHOW GRANTS", "SHOW REPLICA STATUS", "SHOW SLAVE STATUS"
+    }:
         return
     tokens = re.findall(r"[A-Za-z_][A-Za-z_0-9$]*", sql.upper())
     if not tokens or tokens[0] not in {"SELECT", "WITH"}:

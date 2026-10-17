@@ -8,10 +8,13 @@ dba check <database_id>
 dba status <database_id>
 dba diagnose <database_id> slow
 dba diagnose <database_id> disk-growth
+dba diagnose <database_id> replication
 dba diagnose <database_id> slow --verbose
 ```
 
 `dba check` combines the selected runtime, credential lookup, connection/preflight and Permission Registry Feature readiness. `dba status` combines the existing lightweight collectors into a current snapshot. It is not a deep analyzer and does not replace scenario diagnosis.
+
+`dba diagnose <database_id> replication` reports the selected instance's role, observed topology members, transport and apply/replay state, supported lag metrics, backlog, vendor errors, data completeness and reference DBA guidance. Use `--verbose` for additional bounded member and lag rows or `--json` for structured evidence. It never follows peer addresses or executes administrative actions. Check permissions with `dba permissions <database_id> --feature replication`.
 
 `dba check` reports **Account Security** separately from **Permission Readiness**. A `NON_PRIVILEGED` account can still be `MISSING` required permissions for a Feature; that is not a connection failure or evidence that the account is over-privileged. Optional gaps appear as `PARTIAL`, while `READY` has no generic impact warning. A slow diagnosis is stopped when required permissions are missing and returns the specific missing capability, its Registry explanation, an identity-scoped reference GRANT, and `Toolkit Executed: NO` / `DBA Approval Required: YES`. Toolkit never runs GRANT or REVOKE.
 

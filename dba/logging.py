@@ -65,6 +65,10 @@ class SafeFormatter(logging.Formatter):
                 "sqlstate",
                 "classification",
                 "sanitized_message",
+                "replication_role",
+                "replication_health",
+                "replication_issue_count",
+                "replication_highest_severity",
             )
         }
         data["time"] = self.formatTime(record, "%Y-%m-%dT%H:%M:%S")

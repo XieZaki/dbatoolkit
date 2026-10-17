@@ -99,6 +99,8 @@ Driver 17 is not treated as behaviorally identical to Driver 18. `doctor`, `runt
 
 Daily operation uses `dba check <database_id>` and `dba status <database_id>`. Both default to human-readable output; append `--json` for automation. Detailed SQL execution events are kept in `logs/dba.jsonl` and are not printed during normal use.
 
+Replication diagnosis is included in V0.9.0 and uses the same database drivers and offline runtime packages listed above. It connects only to the selected Inventory target; see [Replication Diagnosis](REPLICATION_DIAGNOSIS.md) for version coverage, evidence limits, and read-only behavior.
+
 ## Connection Profiles and Credentials
 
 Inventory entries may define type-checked, non-secret `connection` options. The resolver applies `instance.connection` first, then the corresponding database section of `--settings`, then safe code defaults. Existing Inventory without `connection` remains valid. Supported fields are SQL Server `encrypt`, `trust_server_certificate`, `connect_timeout`, `query_timeout`; PostgreSQL `sslmode`, `connect_timeout`, `query_timeout`; MySQL `ssl_disabled`, `ssl_verify_cert`, `ssl_verify_identity`, `ssl_ca`, `connect_timeout`, `query_timeout`; Oracle `connect_timeout`, `query_timeout` (mapped to driver call timeout). MongoDB and Redis have no implemented adapters and currently accept no options. Validation rejects unknown cross-database settings and sensitive keys, including nested keys.

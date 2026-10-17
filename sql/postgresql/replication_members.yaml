@@ -1,0 +1,7 @@
+name: replication_members
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 100
+reviewed: true
+description: Reviewed PostgreSQL connected standby state and sender-reported lag.

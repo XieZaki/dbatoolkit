@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_permission_registry_covers_supported_database_types(database_type: DatabaseType) -> None:
     assert "slow" in REGISTRY[database_type]
     assert "disk-growth" in REGISTRY[database_type]
+    assert "replication" in REGISTRY[database_type]
     assert ("plan" in REGISTRY[database_type]) is (database_type == DatabaseType.SQLSERVER)
 
 

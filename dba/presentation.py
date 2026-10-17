@@ -376,6 +376,72 @@ def render_incident_summary(value: IncidentSummary | dict[str, Any], verbose: bo
     return "\n".join(lines)
 
 
+def render_replication_summary(report: Any, report_path: str, verbose: bool = False) -> str:
+    """Render a compact DBA-facing replication incident panel."""
+    data = asdict(report) if hasattr(report, "__dataclass_fields__") else report
+    summary = data.get("summary", {})
+    members = data.get("members", [])
+    lags = data.get("lag", [])
+    issues = data.get("issues", [])
+    actions = data.get("recommendations", [])
+    candidate = next((item for item in issues if item.get("candidate", True)), None)
+    lines = ["Replication Health", "-" * 42,
+             _line("Snapshot", summary.get("snapshot_time")),
+             _line("Database", summary.get("database_id")),
+             _line("Platform", summary.get("platform")),
+             _line("Version", summary.get("version")),
+             _line("Local Role", summary.get("local_role")),
+             _line("Vendor Role", summary.get("vendor_role")),
+             _line("Replication Mode", summary.get("replication_mode")),
+             _line("Overall", summary.get("overall")),
+             _line("Status", summary.get("status")),
+             _line("Data Completeness", summary.get("data_completeness")),
+             _line("Transport", summary.get("transport_status")),
+             _line("Apply / Replay", summary.get("apply_status")),
+             _line("Members", len(members)), _line("Issues", len(issues)), "", "Lag / Backlog"]
+    lines.extend(["", "Root Cause Candidate",
+                  f"  {candidate.get('code')}: {candidate.get('message')}" if candidate else
+                  "  No fault candidate in the available snapshot.",
+                  "  Candidate only; validate against database and application evidence."])
+    for item in lags[:6 if not verbose else 15]:
+        lines.append(f"  {item.get('kind', 'lag')}: {item.get('value')} {item.get('unit')} "
+                     f"[{item.get('severity', 'UNKNOWN')}] — {item.get('source', 'source unknown')}")
+    if not lags:
+        lines.append("  No lag metric was returned.")
+    lines.extend(["", "Issues"])
+    for issue in issues[:5 if not verbose else 15]:
+        lines.append(f"  {issue.get('severity', 'UNKNOWN')} {issue.get('code', 'UNKNOWN')}: "
+                     f"{redact(issue.get('message', ''))}")
+        if issue.get("vendor_message"):
+            lines.append(f"    Vendor: {redact(issue['vendor_message'])}")
+    if not issues:
+        lines.append("  No replication issue was observed in this snapshot.")
+    lines.extend(["", "Recommended DBA Review"])
+    for action in actions[:3 if not verbose else 10]:
+        lines.append(f"  - {redact(action.get('message', ''))}")
+    if not actions:
+        lines.append("  No additional action is indicated by this snapshot.")
+    lines.extend(["", "Toolkit Executed  NO", "Reference Commands  None",
+                  f"HTML Report  {report_path}"])
+    permission = data.get("details", {}).get("permission_readiness", {})
+    if permission:
+        lines.extend(["", "Permission Readiness",
+                      _line("Status", permission.get("status"))])
+        if permission.get("missing_required"):
+            lines.append(_line("Missing Required", ", ".join(permission["missing_required"])))
+        if permission.get("missing_optional"):
+            lines.append(_line("Missing Optional", ", ".join(permission["missing_optional"])))
+        if permission.get("suggested_grant"):
+            lines.extend(["Reference Grant Commands", permission["suggested_grant"],
+                          "Toolkit Executed  NO", "DBA Approval Required  YES"])
+    if verbose:
+        lines.extend(["", "Topology Members"])
+        for member in members[:15]:
+            lines.append(f"  {member.get('name')}: {member.get('role')} / {member.get('status')} "
+                         f"({member.get('vendor_status')})")
+    return "\n".join(lines)
+
+
 def _render_error(data: dict[str, Any]) -> str:
     kind = str(data.get("error_type", "Operation Failed"))
     title = {

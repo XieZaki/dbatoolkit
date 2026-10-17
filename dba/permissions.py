@@ -69,6 +69,15 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
                                            "sys.dm_hadr_database_replica_states", "sys.availability_replicas"),
                                           version_constraints=("SQL Server 10.50-15.x: VIEW SERVER STATE",
                                                                "SQL Server 16+: VIEW SERVER PERFORMANCE STATE")),
+        "replication": FeaturePermissions(
+            ("VIEW SERVER STATE",), ("VIEW SERVER PERFORMANCE STATE",),
+            "Availability Group topology and queue evidence may be unavailable.",
+            ("sys.availability_groups", "sys.availability_replicas",
+             "sys.dm_hadr_availability_replica_states", "sys.dm_hadr_database_replica_states",
+             "sys.availability_databases_cluster"),
+            version_constraints=("SQL Server 2008 R2: Availability Groups unsupported",
+                                 "SQL Server 2012-2019: VIEW SERVER STATE",
+                                 "SQL Server 2022+: VIEW SERVER PERFORMANCE STATE")),
     },
     DatabaseType.POSTGRESQL: {
         "slow": FeaturePermissions(("pg_monitor", "CONNECT"), (), "Cross-session statistics may be unavailable.",
@@ -77,6 +86,11 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
         "disk-growth": FeaturePermissions(("pg_monitor", "CONNECT"), (), "WAL, archive, or replication details may be unavailable.",
                                           ("pg_database", "pg_stat_database", "pg_stat_archiver",
                                            "pg_stat_replication", "pg_replication_slots", "pg_stat_activity")),
+        "replication": FeaturePermissions(
+            ("pg_monitor", "CONNECT"), (),
+            "WAL sender, receiver, slot, or archive evidence may be unavailable.",
+            ("pg_stat_replication", "pg_stat_wal_receiver", "pg_replication_slots",
+             "pg_stat_archiver", "pg_settings")),
     },
     DatabaseType.MYSQL: {
         "slow": FeaturePermissions(("PROCESS", "SELECT performance_schema"), (),
@@ -116,6 +130,12 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
                                               ("REPLICATION CLIENT", "REPLICATION CLIENT", "*.*"),
                                               ("SELECT performance_schema", "SELECT", "performance_schema.*"),
                                           )),
+        "replication": FeaturePermissions(
+            ("REPLICATION CLIENT",), (),
+            "Replication channel status and thread errors may be unavailable.",
+            ("show replica status", "show slave status"),
+            permission_reasons=(("REPLICATION CLIENT", "Required for reviewed replication status metadata."),),
+            scope_requirements=(("REPLICATION CLIENT", "REPLICATION CLIENT", "*.*"),)),
     },
     DatabaseType.ORACLE: {
         "slow": FeaturePermissions(("CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$DATABASE",
@@ -144,15 +164,41 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
                                            "SYS.V_$PROCESS", "SYS.V_$SESSION_WAIT", "SYS.USER_TAB_PRIVS_RECD",
                                            "SYS.USER_ROLE_PRIVS", "SYS.SESSION_PRIVS", "SYS.USER_OBJECTS", "DUAL",
                                            "USER_TAB_PRIVS_RECD", "USER_ROLE_PRIVS", "SESSION_PRIVS", "USER_OBJECTS")),
+        "replication": FeaturePermissions(
+            ("CREATE SESSION", "SELECT SYS.V_$DATABASE"),
+            ("SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$MANAGED_STANDBY",
+             "SELECT SYS.V_$ARCHIVE_DEST_STATUS", "SELECT SYS.V_$DATAGUARD_PROCESS"),
+            "Data Guard lag, recovery process, or remote destination evidence may be unavailable.",
+            ("SYS.V_$DATABASE", "SYS.V_$DATAGUARD_STATS", "SYS.V_$MANAGED_STANDBY",
+             "SYS.V_$ARCHIVE_DEST_STATUS", "SYS.V_$DATAGUARD_PROCESS")),
     },
 }
 
 
-ALL_FEATURES = ("slow", "plan", "disk-growth")
+ALL_FEATURES = ("slow", "plan", "disk-growth", "replication")
 
 
 def features_for(database_type: DatabaseType) -> tuple[str, ...]:
     return tuple(feature for feature in ALL_FEATURES if feature in REGISTRY.get(database_type, {}))
+
+
+def feature_supported(database_type: DatabaseType, feature: str, version: str | None) -> bool:
+    """Return known feature-version support; unknown versions remain assessable."""
+    if feature != "replication" or not version:
+        return True
+    match = re.search(r"\d+(?:\.\d+){0,2}", version)
+    if not match:
+        return True
+    major = int(match.group().split(".", maxsplit=1)[0])
+    if database_type == DatabaseType.POSTGRESQL and major >= 10000:
+        major //= 10000
+    minimum = {
+        DatabaseType.SQLSERVER: 11,
+        DatabaseType.POSTGRESQL: 13,
+        DatabaseType.MYSQL: 8,
+        DatabaseType.ORACLE: 12,
+    }.get(database_type)
+    return major >= minimum if minimum is not None else False
 
 
 def status_for(
@@ -216,6 +262,15 @@ def requirements_for(database_type: DatabaseType, feature: str, version: str | N
                                       definition.grant_template, definition.revoke_template,
                                       definition.version_constraints, definition.permission_reasons,
                                       definition.scope_requirements)
+    if database_type == DatabaseType.ORACLE and feature == "replication" and version:
+        version_match = re.match(r"\s*(\d+)\.(\d+)", version)
+        if version_match and (int(version_match.group(1)), int(version_match.group(2))) >= (12, 2):
+            optional = tuple(item for item in definition.optional
+                             if item != "SELECT SYS.V_$MANAGED_STANDBY")
+            return FeaturePermissions(definition.required, optional, definition.impact,
+                                      definition.objects, definition.grant_template,
+                                      definition.revoke_template, definition.version_constraints,
+                                      definition.permission_reasons, definition.scope_requirements)
     return definition
 
 
@@ -303,6 +358,9 @@ def scan_registry_objects(sql_root: Path) -> dict[DatabaseType, frozenset[str]]:
                 objects.add("show binary logs")
             if database_type == DatabaseType.MYSQL and re.search(r"\bSHOW\s+GRANTS\b", source, re.I):
                 objects.add("show grants")
+            if database_type == DatabaseType.MYSQL and re.search(r"\bSHOW\s+(?:REPLICA|SLAVE)\s+STATUS\b", source, re.I):
+                objects.add("show replica status" if re.search(r"\bSHOW\s+REPLICA\s+STATUS\b", source, re.I)
+                            else "show slave status")
         result[database_type] = objects
     return {key: frozenset(value) for key, value in result.items()}
 

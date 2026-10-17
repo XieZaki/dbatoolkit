@@ -1,4 +1,4 @@
-# dba-toolkit 0.8.3.5
+# dba-toolkit 0.9.0
 
 企业内部运维机器上的跨数据库只读诊断基础框架。**工具负责查清楚，DBA 负责做决定。**
 V0.7 保留 SQL Server、PostgreSQL 和 MySQL 诊断，并新增 Oracle 12c+ 连接、基础采集和 Slow Diagnose。运行不依赖 Internet。
@@ -22,7 +22,10 @@ python -m venv .venv
 .venv/Scripts/dba status <database_id>
 .venv/Scripts/dba diagnose <database_id> slow
 .venv/Scripts/dba diagnose <database_id> disk-growth
+.venv/Scripts/dba diagnose <database_id> replication
 ```
+
+Replication diagnosis is observational only. It reads status from the selected Inventory instance, does not connect to discovered peers, and never runs failover, promotion, restart, reset, resynchronization, or repair. See [Replication Diagnosis](docs/REPLICATION_DIAGNOSIS.md).
 
 默认输出面向 DBA 阅读。自动化需要结构化结果时，在命令后添加 `--json`。高级部署与排查命令见 `dba -h`，包括 `show`、`validate`、`doctor`、`runtime-info`、`credentials`、`test-connection`、`permissions` 和 `collect`。
 

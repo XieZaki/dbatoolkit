@@ -82,6 +82,17 @@ def _is_open_transaction(root: dict[str, Any]) -> bool | None:
 
 
 def _quality(details: dict[str, Any], scenario: str) -> tuple[str, tuple[str, ...]]:
+    if scenario == "replication":
+        if not details.get("required_evidence_complete", False):
+            return "INCOMPLETE", ("Replication role and status evidence",)
+        samples = details.get("samples", [])
+        bad = [item for item in samples if isinstance(item, dict)
+               and (not item.get("success", True) or item.get("truncated"))]
+        permission = details.get("permission_readiness", {})
+        if bad or isinstance(permission, dict) and permission.get("status") in {"PARTIAL", "MISSING", "UNKNOWN"}:
+            return "PARTIAL", tuple(str(item.get("collector", "replication evidence")) for item in bad) or (
+                "Replication monitoring permissions or optional evidence",)
+        return "COMPLETE", ()
     if details.get("plan_available") is False:
         return "PARTIAL", ("Execution plan",)
     if scenario == "plan" and details.get("plan_available") is True:
@@ -149,6 +160,13 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
         "BLOCKING": "BLOCKING", "ROOT_BLOCKER": "BLOCKING",
         "IDLE_TRANSACTION_BLOCKER": "IDLE_TRANSACTION", "IDLE_TRANSACTION": "IDLE_TRANSACTION",
         "LONG_RUNNING_SQL": "LONG_RUNNING_SQL", "HIGH_CONCURRENCY": "HIGH_CONCURRENCY",
+        "REPLICATION_LAG": "REPLICATION_LAG", "REPLICATION_STOPPED": "REPLICATION_LAG",
+        "APPLY_STOPPED": "REPLICATION_LAG", "APPLY_FAILURE": "REPLICATION_LAG",
+        "TRANSPORT_FAILURE": "REPLICATION_LAG", "DISCONNECTED_REPLICA": "REPLICATION_LAG",
+        "SOURCE_CONNECTION_ERROR": "REPLICATION_LAG", "IO_THREAD_STOPPED": "REPLICATION_LAG",
+        "SQL_THREAD_STOPPED": "REPLICATION_LAG", "SQL_APPLY_ERROR": "REPLICATION_LAG",
+        "WAL_RETENTION": "REPLICATION_LAG", "LARGE_RETAINED_WAL": "REPLICATION_LAG",
+        "RELAY_LOG_BACKLOG": "REPLICATION_LAG", "INACTIVE_PHYSICAL_SLOT": "REPLICATION_LAG",
     }
     problem_candidates = [title_map[f.title] for f in findings if f.title in title_map]
     if report.scenario == "disk-growth":
@@ -166,7 +184,11 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
     active_now = (primary != "UNKNOWN" or
                   report.scenario == "plan" and details.get("metrics_scope") == "current_request")
     has_warning_finding = any(f.severity.value in {"WARNING", "CRITICAL"} for f in findings)
-    severity = ("CRITICAL" if any(f.title in {"IDLE_TRANSACTION_BLOCKER", "IDLE_TRANSACTION"}
+    severity = ("CRITICAL" if report.scenario == "replication" and
+                any(f.severity.value == "CRITICAL" for f in findings) else
+                "HIGH" if report.scenario == "replication" and
+                any(f.severity.value == "HIGH" for f in findings) else
+                "CRITICAL" if any(f.title in {"IDLE_TRANSACTION_BLOCKER", "IDLE_TRANSACTION"}
                                   and f.severity.value == "CRITICAL" for f in findings) else
                 "HIGH" if primary == "BLOCKING" else
                 "WARNING" if primary != "UNKNOWN" or incomplete or has_warning_finding else "INFO")
@@ -287,6 +309,8 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
         immediate = {"priority": severity,
                      "action": ("Review the execution plan and runtime metrics in the detailed report."
                                 if report.scenario == "plan" else
+                                "Review replication transport, apply state, and vendor evidence with the database owner."
+                                if report.scenario == "replication" else
                                 f"Contact the owning application and review blocker session {root_session}."
                                 if primary == "BLOCKING" and root_session is not None else
                                 "Review the detailed report and validate the observed database impact."),

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dba-toolkit"
-version = "0.8.3.5"
+version = "0.9.0"
 description = "Offline, read-only DBA diagnostic foundations"
 requires-python = ">=3.11,<3.14"
 dependencies = [

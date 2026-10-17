@@ -17,6 +17,7 @@ class HumanReportPolicy:
     max_transactions: int = 50
     max_wait_rows: int = 50
     max_appendix_sessions: int = 50
+    max_replication_rows: int = 50
     max_sql_chars: int = 16 * 1024
     max_plan_operators: int = 10
     soft_report_bytes: int = 2 * 1024 * 1024
@@ -26,7 +27,8 @@ class HumanReportPolicy:
         limits = (self.max_root_blockers, self.max_blocking_nodes_per_root,
                   self.max_related_sessions, self.max_blocked_requests,
                   self.max_nonblocked_long_running, self.max_transactions,
-                  self.max_wait_rows, self.max_appendix_sessions, self.max_sql_chars,
+                  self.max_wait_rows, self.max_appendix_sessions, self.max_replication_rows,
+                  self.max_sql_chars,
                   self.max_plan_operators, self.soft_report_bytes, self.hard_report_bytes)
         if any(type(value) is not int or value < 1 for value in limits):
             raise ValueError("Human report limits must be positive integers.")

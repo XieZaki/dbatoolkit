@@ -636,6 +636,90 @@ def _plan_sections(details: dict[str, Any], plan_artifact: str | None,
     return sections
 
 
+def _replication_sections(report: DiagnosticReport, policy: HumanReportPolicy) -> list[ReportSection]:
+    summary = getattr(report, "summary", None)
+    members = list(getattr(report, "members", ()))
+    lags = list(getattr(report, "lag", ()))
+    backlog = getattr(report, "backlog", {})
+    issues = list(getattr(report, "issues", ()))
+    actions = list(getattr(report, "recommendations", ()))
+    summary_fields = tuple((label, _human(value)) for label, value in (
+        ("Snapshot Time", getattr(summary, "snapshot_time", None)),
+        ("Database", getattr(summary, "database_id", None)),
+        ("Platform", getattr(summary, "platform", None)),
+        ("Version", getattr(summary, "version", None)),
+        ("Local Role", getattr(summary, "local_role", None)),
+        ("Vendor Role", getattr(summary, "vendor_role", None)),
+        ("Replication Mode", getattr(summary, "replication_mode", None)),
+        ("Overall", getattr(summary, "overall", None)),
+        ("Status", getattr(summary, "status", None)),
+        ("Data Completeness", getattr(summary, "data_completeness", None)),
+        ("Transport", getattr(summary, "transport_status", None)),
+        ("Apply / Replay", getattr(summary, "apply_status", None)),
+        ("Toolkit Executed", "NO"),
+    ))
+    sections = [ReportSection("replication-summary", "Replication Summary", fields=summary_fields)]
+    permission = getattr(report, "details", {}).get("permission_readiness", {})
+    if permission:
+        permission_fields = tuple((label, _human(permission.get(key))) for key, label in (
+            ("status", "Permission Status"), ("missing_required", "Missing Required"),
+            ("missing_optional", "Missing Optional"), ("impact", "Impact"),
+            ("toolkit_executed", "Toolkit Executed"),
+            ("dba_approval_required", "DBA Approval Required")))
+        grant = permission.get("suggested_grant")
+        sections.append(ReportSection("replication-permissions", "Permission Readiness",
+                                      fields=permission_fields,
+                                      code_blocks=(ReportCodeBlock("Reference Grant (manual review only)",
+                                                                   str(grant), "sql", True),)
+                                      if grant else ()))
+    visible_members = members[:policy.max_replication_rows]
+    member_rows = [{"name": item.name, "local": _human(item.local), "role": item.role,
+                    "vendor_role": item.vendor_role or "—", "status": item.status,
+                    "transport": item.transport_status or "—", "apply": item.apply_status or "—"}
+                   for item in visible_members]
+    member_table = _table(member_rows, (("Member", ("name",)), ("Local", ("local",)),
+                                       ("Role", ("role",)), ("Vendor Role", ("vendor_role",)),
+                                       ("Status", ("status",)), ("Transport", ("transport",)),
+                                       ("Apply / Replay", ("apply",))))
+    sections.append(ReportSection("replication-topology", "Topology", summary=_omitted(
+        len(members), len(visible_members), "members"), tables=(member_table,) if member_table else ()))
+    visible_lags = lags[:policy.max_replication_rows]
+    lag_rows = [{"kind": item.kind, "value": _human(item.value), "unit": item.unit,
+                 "severity": item.severity, "source": item.source, "note": item.note or "—"}
+                for item in visible_lags]
+    lag_table = _table(lag_rows, (("Metric", ("kind",)), ("Value", ("value",)),
+                                 ("Unit", ("unit",)), ("Severity", ("severity",)),
+                                 ("Source", ("source",)), ("Interpretation", ("note",))))
+    sections.append(ReportSection("replication-lag", "Transport, Apply / Replay and Lag",
+                                  summary=_omitted(len(lags), len(visible_lags), "lag metrics"),
+                                  tables=(lag_table,) if lag_table else ()))
+    backlog_rows = [{"item": key, "observed": _human(value)} for key, value in list(backlog.items())[:policy.max_replication_rows]]
+    backlog_table = _table(backlog_rows, (("Backlog", ("item",)), ("Observed", ("observed",))))
+    sections.append(ReportSection("replication-backlog", "Observed Backlog",
+                                  summary=_omitted(len(backlog), len(backlog_rows), "backlog metrics"),
+                                  tables=(backlog_table,) if backlog_table else ()))
+    visible_issues = issues[:policy.max_replication_rows]
+    issue_rows = [{"code": item.code, "severity": item.severity,
+                   "candidate": "Candidate" if item.candidate else "Evidence",
+                   "message": item.message,
+                   "vendor_message": item.vendor_message or "—"} for item in visible_issues]
+    issue_table = _table(issue_rows, (("Issue", ("code",)), ("Severity", ("severity",)),
+                                      ("Classification", ("candidate",)),
+                                      ("Finding", ("message",)), ("Vendor Error", ("vendor_message",))))
+    sections.append(ReportSection("replication-issues", "Issues and Vendor Evidence",
+                                  summary=_omitted(len(issues), len(visible_issues), "issues"),
+                                  tables=(issue_table,) if issue_table else ()))
+    actions_rows = [{"recommendation": item.message,
+                     "approval": "DBA review required" if item.requires_dba_review else "No"}
+                    for item in actions[:policy.max_replication_rows]]
+    actions_table = _table(actions_rows, (("Recommended DBA Action", ("recommendation",)),
+                                         ("Review", ("approval",))))
+    sections.append(ReportSection("replication-actions", "Recommended Actions",
+                                  summary="Toolkit Executed: NO. No automatic failover, promotion, restart, reset, or repair.",
+                                  tables=(actions_table,) if actions_table else ()))
+    return sections
+
+
 def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
                        policy: HumanReportPolicy = DEFAULT_HUMAN_REPORT_POLICY,
                        plan_artifact: str | None = None) -> ReportModel:
@@ -653,6 +737,8 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
     elif report.scenario == "plan":
         sections = [_recovery_section(incident, details, report.scenario),
                     *_plan_sections(details, plan_artifact, policy)]
+    elif report.scenario == "replication":
+        sections = _replication_sections(report, policy)
     else:
         sections = _disk_growth_sections(details)
         sections.insert(0, _recovery_section(incident, details, report.scenario))
@@ -731,7 +817,8 @@ def render_bounded(model: ReportModel, render: Callable[[ReportModel], str],
         return page
 
     critical_ids = {"immediate-recovery", "root-cause", "root-blockers", "blocking",
-                    "collection-quality", "missing-evidence", "report-budget"}
+                    "collection-quality", "missing-evidence", "report-budget",
+                    "replication-summary", "replication-issues"}
     hard_sections = tuple(_map_section(section, max_chars=1024, drop_sql=True)
                           for section in compact.sections if section.section_id in critical_ids)
     hard_dropped = {section.section_id for section in compact.sections

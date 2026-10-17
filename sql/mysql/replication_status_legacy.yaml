@@ -1,0 +1,7 @@
+name: replication_status_legacy
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 100
+reviewed: true
+description: Reviewed read-only MySQL 8.0.21 and earlier replication channel status listing.

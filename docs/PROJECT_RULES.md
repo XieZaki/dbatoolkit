@@ -86,3 +86,6 @@
 - Credential providers fail closed on authentication failure, corruption, unsupported cryptographic formats, and unsafe permissions; an existing store that fails to unlock must not fall back silently.
 - Database adapters consume resolved credentials and do not implement credential-storage-specific logic.
 - Debug and exception output follow the same secret-redaction rules as normal output.
+- Replication diagnosis is observational only and reads metadata from the single Inventory-selected instance; it must not connect to discovered peers.
+- DBA Toolkit must never automatically promote, fail over, restart, reset, reconfigure, resynchronize, or repair database replication.
+- Replication lag must not be converted between bytes and time unless supported by explicit reliable rate evidence; a single snapshot cannot establish a trend.

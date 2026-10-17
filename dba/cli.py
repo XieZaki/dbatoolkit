@@ -47,6 +47,7 @@ from dba.permissions import (
     ALL_FEATURES,
     PermissionStatus,
     assess_permissions,
+    feature_supported,
     privilege_reasons,
     render_privileges_sql,
     render_sql,
@@ -65,6 +66,7 @@ from dba.presentation import (
     render_json,
 )
 from dba.registry import SqlScriptRegistry
+from dba.replication import diagnose_replication
 from dba.reporting import HtmlReportRenderer, build_report_model, render_bounded
 from dba.runtime import RuntimeStatus, database_runtime_status, doctor, runtime_info
 from dba.settings import MySQLSettings, OracleSettings, PostgreSQLSettings, SQLServerSettings
@@ -298,10 +300,10 @@ def main(
                                                                     *MYSQL_COLLECTORS,
                                                                     *ORACLE_COLLECTORS))))
     _add_output_options(collect)
-    diagnose = commands.add_parser("diagnose", help="Read-only slow, disk-growth or SQL Server plan")
+    diagnose = commands.add_parser("diagnose", help="Read-only slow, disk-growth, replication or SQL Server plan")
     diagnose.add_argument("database_id")
     _add_credential_backend(diagnose)
-    diagnose.add_argument("scenario", choices=("slow", "plan", "disk-growth"))
+    diagnose.add_argument("scenario", choices=("slow", "plan", "disk-growth", "replication"))
     diagnose.add_argument("--session", type=int, help="Positive session ID for plan diagnosis")
     diagnose.add_argument("--report", type=Path, help="Output HTML report file")
     diagnose.add_argument("--format", choices=("console", "json"), default="console",
@@ -593,6 +595,7 @@ def main(
             return 1
     logger = configure_logging()
     started = time.monotonic()
+    replication_log_fields: dict[str, Any] = {}
     permission_credential: Credential | None = None
     instance_for_hint = None
     try:
@@ -731,18 +734,20 @@ def main(
                 if args.command == "permissions":
                     definitions = PERMISSION_REGISTRY.get(instance.db_type, {})
                     requested = ([args.feature] if args.feature else list(ALL_FEATURES))
-                    supported = [feature for feature in requested if feature in definitions]
+                    server_version = adapter.get_server_version()
+                    supported = [feature for feature in requested if feature in definitions
+                                 and feature_supported(instance.db_type, feature, server_version)]
                     if not requested:
                         raise ToolkitError("NotImplemented", "No permission features are implemented for this database type.")
                     observed = set(getattr(adapter, "permission_observations", set()))
                     rows = []
                     for feature in requested:
-                        if feature not in definitions:
+                        if feature not in supported:
                             rows.append({"feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
                                          "missing_required": (), "impact": "Feature is not implemented for this database type."})
                             continue
                         evidence = observed
-                        requirement = requirements_for(instance.db_type, feature, adapter.get_server_version())
+                        requirement = requirements_for(instance.db_type, feature, server_version)
                         assessment = assess_permissions(requirement, evidence)
                         rows.append({"feature": feature, **assessment,
                                      "missing_reasons": privilege_reasons(
@@ -754,7 +759,7 @@ def main(
                     if args.generate_grant or args.generate_revoke:
                         assert permission_credential is not None
                         generated = render_sql(instance.db_type, supported, permission_credential.username,
-                                               instance.database, adapter.get_server_version(),
+                                               instance.database, server_version,
                                                revoke=args.generate_revoke)
                     output = {"database_id": instance.id,
                               "success": True,
@@ -928,6 +933,21 @@ def main(
                                   else diagnose_pg_slow(adapter) if isinstance(adapter, PostgreSQLAdapter)
                                   else diagnose_slow(adapter))
                         output = {"success": not report.details["incomplete"], "report": asdict(report)}
+                    elif args.scenario == "replication":
+                        report = diagnose_replication(adapter)
+                        severities = {"INFO": 0, "WARNING": 1, "HIGH": 2, "CRITICAL": 3}
+                        replication_log_fields = {
+                            "replication_role": report.summary.local_role,
+                            "replication_health": report.summary.overall,
+                            "replication_issue_count": len(report.issues),
+                            "replication_highest_severity": max(
+                                (issue.severity for issue in report.issues),
+                                key=lambda severity: severities.get(str(severity), -1),
+                                default="INFO",
+                            ),
+                        }
+                        output = {"success": report.summary.overall != "UNKNOWN",
+                                  "report": asdict(report)}
                     else:
                         assert isinstance(adapter, SQLServerAdapter)
                         plan_report, plan_xml = diagnose_plan(adapter, args.session)
@@ -995,7 +1015,13 @@ def main(
                         report_path.unlink(missing_ok=True)
                         raise
                 if args.format == "console" and not args.json:
-                    print(render_incident_summary(incident_summary, verbose=args.verbose))
+                    if args.scenario == "replication":
+                        from dba.presentation import render_replication_summary
+
+                        print(render_replication_summary(report, report_path=str(report_path),
+                                                         verbose=args.verbose))
+                    else:
+                        print(render_incident_summary(incident_summary, verbose=args.verbose))
                 else:
                     _emit(args, "diagnose", redact(output))
             else:
@@ -1010,6 +1036,7 @@ def main(
                     "result": "ok",
                     "elapsed_time": time.monotonic() - started,
                     "database_id": getattr(args, "database_id", None),
+                    **replication_log_fields,
                 }
             },
         )

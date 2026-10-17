@@ -1,0 +1,7 @@
+name: replication_metrics
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 10
+reviewed: true
+description: Reviewed Oracle Data Guard transport and apply lag metrics.
