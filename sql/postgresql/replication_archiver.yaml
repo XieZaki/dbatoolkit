@@ -2,6 +2,6 @@ name: replication_archiver
 database_type: postgresql
 risk: READ_ONLY
 timeout_seconds: 10
-max_rows: 1
+max_rows: 2
 reviewed: true
 description: Reviewed PostgreSQL archive failure counters for supporting evidence.

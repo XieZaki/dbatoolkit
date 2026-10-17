@@ -278,6 +278,9 @@ def test_replication_registry_sql_is_reviewed_read_only_and_no_mutation() -> Non
             assert script.metadata.reviewed and script.metadata.risk == "READ_ONLY"
             if not script.text.startswith("SHOW "):
                 check_sql(script.text)
+    for name in ("replication_node", "replication_archiver"):
+        script = SqlScriptRegistry(ROOT / "sql").get(name, DatabaseType.POSTGRESQL)
+        assert script.metadata.max_rows == 2
     with pytest.raises(Exception):
         check_sql("START REPLICA")
 
