@@ -9,6 +9,7 @@ from typing import Any
 
 from dba.core import DatabaseInstance, DatabaseType, DiagnosticReport, Finding, Severity
 from dba.permissions import (
+    OraclePrincipal,
     PermissionStatus,
     assess_permissions,
     privilege_reasons,
@@ -22,6 +23,15 @@ from dba.replication_collectors import (
     collect_replication_evidence,
 )
 from dba.versioning import ResolvedDiagnosticProfile, resolve_profile_for_adapter
+
+
+def _grant_principal(adapter: Any, instance: DatabaseInstance) -> str | OraclePrincipal:
+    if instance.db_type == DatabaseType.ORACLE:
+        principal = getattr(adapter, "principal", None)
+        return (principal if isinstance(principal, OraclePrincipal)
+                else OraclePrincipal.unverified(None))
+    current_user = getattr(adapter, "current_user", None)
+    return current_user if isinstance(current_user, str) and current_user else "monitor"
 
 
 @dataclass(frozen=True)
@@ -619,7 +629,7 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
                   "impact": requirements.impact,
                   "suggested_grant": render_profile_sql(
                       resolved.permission_profile_id or "", instance.db_type,
-                      getattr(adapter, "current_user", "") or "monitor",
+                      _grant_principal(adapter, instance),
                       instance.database, evidence.version) if missing else None,
                   "toolkit_executed": False,
                   "dba_approval_required": bool(missing)}

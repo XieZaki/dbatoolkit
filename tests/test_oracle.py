@@ -19,6 +19,8 @@ from dba.oracle_collectors import (
 )
 from dba.oracle_slow import blocking_graph, build_slow_report
 from dba.oracle_slow_reporter import render_markdown
+from dba.permissions import OraclePrincipal, render_oracle_principal, render_profile_sql
+from dba.presentation import render_human
 from dba.registry import SqlScriptRegistry
 from dba.settings import OracleSettings
 
@@ -94,6 +96,7 @@ def fixture() -> tuple[DatabaseInstance, SqlScriptRegistry, MockCredentialProvid
     names = (*OracleAdapter.REQUIRED, "version_detect")
     sql_names = {registry.get(name, DatabaseType.ORACLE).text: name for name in names}
     data: dict[str, list[dict[str, Any]]] = {
+        "session_identity": [{"session_user": "MONITOR"}],
         "preflight": [{"server_version": "19.0.0.0.0", "inst_id": 1, "rac_mode": "NO",
                        "monitor_user": "MONITOR"}],
         "version_detect": [{"raw_version": "Oracle Database 19c Enterprise Edition "
@@ -136,9 +139,93 @@ def test_oracle_connect_collect_and_close() -> None:
         assert ActiveRequestsCollector(adapter).collect(adapter.instance).rows[0]["sql_text"] == "SELECT 1"
         assert LongRunningCollector(adapter).collect(adapter.instance).row_count == 1
         assert driver.connection.calls[-1][1] == 3000
+        assert driver.connection.calls[0][0] == "session_identity"
+        assert adapter.current_user == "MONITOR"
+        assert adapter.principal == OraclePrincipal.from_runtime("MONITOR")
     assert driver.connection.closed
     assert all(cursor.closed for cursor in driver.connection.cursors)
     assert "TOPSECRET" not in repr(adapter)
+
+
+@pytest.mark.parametrize(("raw_name", "expected", "quoted_required"), [
+    ("DBA_MONITOR", "DBA_MONITOR", False),
+    ("dba_monitor", '"dba_monitor"', True),
+    ("Test-DBA", '"Test-DBA"', True),
+    ('Test"DBA', '"Test""DBA"', True),
+])
+def test_oracle_runtime_principal_rendering(raw_name: str, expected: str,
+                                            quoted_required: bool) -> None:
+    principal = OraclePrincipal.from_runtime(raw_name)
+    assert principal.quoted_required is quoted_required
+    assert render_oracle_principal(principal) == expected
+
+
+def test_oracle_unverified_credential_uses_placeholder_only() -> None:
+    principal = OraclePrincipal.unverified("dba_monitor")
+    rendered = render_profile_sql("oracle_modern_replication", DatabaseType.ORACLE, principal)
+    assert "TO <ORACLE_MONITOR_USER>" in rendered
+    assert 'TO "dba_monitor"' not in rendered
+    assert "TO DBA_MONITOR" not in rendered
+    assert "dba_monitor" not in rendered
+
+
+def test_oracle_plain_username_renderer_never_guesses_identity() -> None:
+    rendered = render_profile_sql("oracle_modern_replication", DatabaseType.ORACLE, "dba_monitor")
+    assert "TO <ORACLE_MONITOR_USER>" in rendered
+    assert 'TO "dba_monitor"' not in rendered
+    assert "TO DBA_MONITOR" not in rendered
+
+
+def test_oracle_session_identity_failure_precedes_monitoring_preflight_and_closes() -> None:
+    adapter, driver = adapter_for_test()
+    driver.connection.fail["session_identity"] = RuntimeError("ORA-01017: invalid credentials")
+    with pytest.raises(ToolkitError, match="session principal could not be verified"):
+        adapter.connect()
+    assert driver.connection.calls == []
+    assert driver.connection.closed
+    assert adapter.principal is None
+
+
+def test_permissions_cli_uses_database_identity_when_monitor_view_preflight_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, _, driver = fixture()
+    driver.connection.data["session_identity"] = [{"session_user": "DBA_MONITOR"}]
+    driver.connection.data["preflight"][0]["monitor_user"] = "DBA_MONITOR"
+    driver.connection.fail["preflight"] = RuntimeError(
+        'ORA-00942: table or view "SYS"."V_$INSTANCE" does not exist'
+    )
+    inventory = tmp_path / "inventory.yaml"
+    inventory.write_text(yaml.safe_dump({"databases": [{
+        "id": "oracle-test", "name": "Oracle test", "db_type": "oracle",
+        "host": "127.0.0.1", "port": 1521, "service_name": "FREEPDB1",
+        "credential_alias": "oracle-monitor", "enabled": True, "version_family": "26ai",
+    }]}), encoding="utf-8")
+
+    class RuntimeProvider:
+        def get_credential(self, _alias: str) -> Credential:
+            return Credential("dba_monitor", "TOPSECRET")
+
+    assert main(["--inventory", str(inventory), "permissions", "oracle-test", "--feature",
+                 "replication", "--json"], provider=RuntimeProvider(), driver=driver) == 0
+    output_text = capsys.readouterr().out
+    output = json.loads(output_text)
+    assert output["monitoring_principal"]["credential_username"] == "dba_monitor"
+    assert output["monitoring_principal"]["database_principal"] == "DBA_MONITOR"
+    assert output["monitoring_principal"]["verification"] == "VERIFIED"
+    assert output["version_profile"]["version_status"] == "UNVERIFIED"
+    assert output["features"][0]["status"] == "UNKNOWN"
+    assert output["runtime_verification"]["vendor_error"]["vendor_code"] == "ORA-00942"
+    grant = output["features"][0]["reference_grant"]
+    assert "GRANT CREATE SESSION TO DBA_MONITOR" in grant
+    assert 'TO "dba_monitor"' not in grant
+    assert "TOPSECRET" not in output_text
+    human = render_human("permissions", output)
+    assert "Credential Username" in human and "dba_monitor" in human
+    assert "Database Principal" in human and "DBA_MONITOR" in human
+    assert "Principal Verification" in human and "VERIFIED" in human
+    assert driver.connection.calls[0][0] == "session_identity"
+    assert driver.connection.closed
 
 
 def test_version_view_is_reported_as_detection_capability_without_auto_grant() -> None:

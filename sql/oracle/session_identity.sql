@@ -1,0 +1,2 @@
+SELECT USER AS session_user
+FROM DUAL

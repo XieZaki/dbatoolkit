@@ -20,7 +20,7 @@ from dba.database_errors import normalize_oracle_error
 from dba.errors import ToolkitError
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
-from dba.permissions import VERSION_DETECTION_PRIVILEGES
+from dba.permissions import VERSION_DETECTION_PRIVILEGES, OraclePrincipal
 from dba.registry import SqlScript, SqlScriptRegistry
 from dba.settings import OracleSettings
 
@@ -75,7 +75,7 @@ def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:
 class OracleAdapter(Adapter):
     """Serial Oracle monitor; no arbitrary SQL entry point or administrative API."""
 
-    REQUIRED = ("preflight", "preflight_privileges", "preflight_object_grants",
+    REQUIRED = ("session_identity", "preflight", "preflight_privileges", "preflight_object_grants",
                 "preflight_owned_objects", "server_info", "database_status",
                 "active_sessions", "active_requests", "long_running", "transactions",
                 "blocking", "blocking_basic", "previous_sql", "probe_lock",
@@ -103,6 +103,7 @@ class OracleAdapter(Adapter):
         self._password = ""
         self._ready = False
         self._version = ""
+        self.principal: OraclePrincipal | None = None
         self.instance_id: int | None = None
         self.rac_enabled = False
         self.preflight_checks: dict[str, bool] = {}
@@ -149,6 +150,7 @@ class OracleAdapter(Adapter):
             if not self._connection.autocommit:
                 raise ToolkitError("AutocommitRequired", "Oracle driver did not enable autocommit.")
             self.preflight_checks["connect"] = True
+            self._identify_session_user()
             self._preflight()
             self._ready = True
         except ToolkitError as exc:
@@ -176,6 +178,9 @@ class OracleAdapter(Adapter):
         if result.truncated or len(result.rows) != 1:
             raise ToolkitError("PreflightFailed", "Oracle monitor identity or version unavailable.")
         row = result.rows[0]
+        if (self.principal is None or row.get("monitor_user") != self.principal.raw_name):
+            raise ToolkitError("PreflightFailed", "Oracle session principal could not be confirmed consistently.",
+                               database_error=result.database_error)
         version = row.get("server_version")
         match = re.match(r"^(\d+)\.(\d+)", version) if isinstance(version, str) else None
         if match is None or (int(match[1]), int(match[2])) < (11, 2):
@@ -262,6 +267,26 @@ class OracleAdapter(Adapter):
                              "lock_evidence": self.blocking_script == "blocking",
                              "process_view": self.preflight_checks["probe_process"],
                              "session_wait_view": self.preflight_checks["probe_wait"]}
+
+    @property
+    def current_user(self) -> str | None:
+        return self.principal.raw_name if self.principal and self.principal.verified else None
+
+    def _identify_session_user(self) -> None:
+        result = self._run(self.registry.get("session_identity", DatabaseType.ORACLE))
+        if not result.success:
+            raise ToolkitError("PreflightFailed", "Oracle session principal could not be verified.",
+                               database_error=result.database_error)
+        if result.truncated or len(result.rows) != 1:
+            raise ToolkitError("PreflightFailed", "Oracle session principal result was incomplete.")
+        raw_name = result.rows[0].get("session_user")
+        if not isinstance(raw_name, str):
+            raise ToolkitError("PreflightFailed", "Oracle session principal result was invalid.")
+        try:
+            self.principal = OraclePrincipal.from_runtime(raw_name)
+        except ValueError:
+            raise ToolkitError("PreflightFailed", "Oracle session principal result was invalid.") from None
+        self.preflight_checks["session_identity"] = True
 
     def _close(self) -> bool:
         connection, self._connection = self._connection, None

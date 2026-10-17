@@ -128,9 +128,16 @@ def render_human(command: str, value: Any) -> str:
         return "\n".join(lines)
     if command == "permissions":
         lines = ["Permission Check", "-" * 42, "", "Database",
-                 _line("ID", data.get("database_id")), "", "Monitoring Account",
-                 _line("Account", data.get("account")), "", "Feature          Status",
-                 "-" * 30]
+                 _line("ID", data.get("database_id")), "", "Monitoring Account"]
+        principal = data.get("monitoring_principal")
+        if isinstance(principal, dict):
+            lines.extend([_line("Credential Username", principal.get("credential_username")
+                                or data.get("account")),
+                          _line("Database Principal", principal.get("database_principal") or "UNKNOWN"),
+                          _line("Principal Verification", principal.get("verification", "UNVERIFIED"))])
+        else:
+            lines.append(_line("Account", data.get("account")))
+        lines.extend(["", "Feature          Status", "-" * 30])
         lines.extend(f"{row['feature']:<17}{row['status']}" for row in data.get("features", []))
         for row in data.get("features", []):
             if row.get("missing_required"):
@@ -173,6 +180,8 @@ def render_human(command: str, value: Any) -> str:
             lines.extend(["", "Result", "  Monitoring permissions are ready."])
         else:
             lines.extend(["", "Result", "  Some monitoring permissions need DBA review."])
+        if not runtime and data.get("guidance"):
+            lines.extend(["", "Guidance", f"  {data['guidance']}"])
         return "\n".join(lines)
     if command == "doctor":
         lines = ["DBA Toolkit Doctor", "-" * 42, "", "Core Runtime",

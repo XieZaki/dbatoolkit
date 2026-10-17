@@ -45,6 +45,7 @@ from dba.oracle_collectors import COLLECTORS as ORACLE_COLLECTORS
 from dba.oracle_slow import diagnose_slow as diagnose_oracle_slow
 from dba.permissions import (
     ALL_FEATURES,
+    OraclePrincipal,
     PermissionStatus,
     assess_permissions,
     feature_supported,
@@ -208,6 +209,27 @@ def _permission_matches_evidence(permission: str, evidence: str) -> bool:
     if candidate == "VIEW SERVER STATE":
         return "VIEW SERVER PERFORMANCE STATE" in evidence
     return False
+
+
+def _grant_account(instance: Any, adapter: Any, credential: Credential | None) -> str | OraclePrincipal:
+    if instance.db_type == DatabaseType.ORACLE:
+        principal = getattr(adapter, "principal", None)
+        if isinstance(principal, OraclePrincipal) and principal.verified:
+            return principal
+        return OraclePrincipal.unverified(credential.username if credential else None)
+    current_user = getattr(adapter, "current_user", None)
+    if isinstance(current_user, str) and current_user:
+        return current_user
+    return credential.username if credential else "monitor"
+
+
+def _oracle_principal_output(adapter: Any, credential: Credential | None) -> dict[str, Any]:
+    principal = getattr(adapter, "principal", None)
+    if not isinstance(principal, OraclePrincipal) or not principal.verified:
+        principal = OraclePrincipal.unverified(credential.username if credential else None)
+    result = principal.to_dict()
+    result["credential_username"] = credential.username if credential else None
+    return result
 
 
 def main(
@@ -621,6 +643,7 @@ def main(
     replication_log_fields: dict[str, Any] = {}
     permission_credential: Credential | None = None
     instance_for_hint = None
+    adapter_instance: Any | None = None
     try:
         inventory = Inventory.load(args.inventory)
         if args.command == "list":
@@ -693,10 +716,19 @@ def main(
                          for feature in requested]
                 generated_sql = render_sql(instance.db_type, supported, permission_credential.username,
                                            instance.database, revoke=args.generate_revoke)
-                _emit(args, "permissions", {"database_id": instance.id,
+                offline_permission_output = {"database_id": instance.id,
                                              "account": permission_credential.username,
                                              "features": rows, "generated_sql": generated_sql,
-                                             "toolkit_executes_grants": False})
+                                             "toolkit_executes_grants": False}
+                if instance.db_type == DatabaseType.ORACLE:
+                    offline_permission_output["monitoring_principal"] = OraclePrincipal.unverified(
+                        permission_credential.username
+                    ).to_dict()
+                    offline_permission_output["guidance"] = (
+                        "Oracle session identity was not verified for this offline grant. "
+                        "Replace <ORACLE_MONITOR_USER> with the exact database principal before execution."
+                    )
+                _emit(args, "permissions", offline_permission_output)
                 return 0
             if args.command == "diagnose":
                 if args.scenario == "plan" and (type(args.session) is not int or not 1 <= args.session <= 32767):
@@ -734,7 +766,7 @@ def main(
                     raise ToolkitError("NotImplemented", "Collector not implemented for Oracle.")
                 oracle_settings = _effective_settings(instance, args.settings)
                 assert isinstance(oracle_settings, OracleSettings)
-                adapter_instance: SQLServerAdapter | PostgreSQLAdapter | MySQLAdapter | OracleAdapter = OracleAdapter(
+                adapter_instance = OracleAdapter(
                     instance, active_provider, SqlScriptRegistry(args.sql_root),
                     oracle_settings, driver=driver)
             elif instance.db_type == DatabaseType.MYSQL:
@@ -761,6 +793,7 @@ def main(
                 adapter_instance = SQLServerAdapter(
                     instance, active_provider, SqlScriptRegistry(args.sql_root),
                     sql_settings, driver=driver)
+            assert adapter_instance is not None
             if args.command in {"permissions", "collect", "diagnose", "test-connection", "check", "status"}:
                 permission_credential = active_provider.get_credential(instance.credential_alias)
                 adapter_instance.provider = _CachedCredentialProvider(permission_credential)
@@ -840,8 +873,7 @@ def main(
                                 row["impact"] = requirement.impact
                                 row["reference_grant"] = render_profile_sql(
                                     profile.permission_profile_id, instance.db_type,
-                                    getattr(adapter, "current_user", None)
-                                    or (permission_credential.username if permission_credential else "monitor"),
+                                    _grant_account(instance, adapter, permission_credential),
                                     instance.database, server_version,
                                 )
                             rows.append(row)
@@ -866,7 +898,8 @@ def main(
                                 and replication_profile.permission_profile_id:
                             generated = render_profile_sql(
                                 replication_profile.permission_profile_id, instance.db_type,
-                                permission_credential.username, instance.database, server_version,
+                                _grant_account(instance, adapter, permission_credential),
+                                instance.database, server_version,
                                 revoke=args.generate_revoke,
                             )
                         elif args.feature is None:
@@ -886,11 +919,13 @@ def main(
                                         if privilege not in privileges:
                                             privileges.append(privilege)
                                 generated = render_privileges_sql(
-                                    instance.db_type, privileges, permission_credential.username,
+                                    instance.db_type, privileges,
+                                    _grant_account(instance, adapter, permission_credential),
                                     instance.database, server_version, revoke=args.generate_revoke,
                                 )
                         else:
-                            generated = render_sql(instance.db_type, supported, permission_credential.username,
+                            generated = render_sql(instance.db_type, supported,
+                                                   _grant_account(instance, adapter, permission_credential),
                                                    instance.database, server_version,
                                                    revoke=args.generate_revoke)
                     output = {"database_id": instance.id,
@@ -899,6 +934,10 @@ def main(
                               or (permission_credential.username if permission_credential else None),
                               "features": rows, "generated_sql": generated,
                               "toolkit_executes_grants": False}
+                    if instance.db_type == DatabaseType.ORACLE:
+                        output["monitoring_principal"] = _oracle_principal_output(
+                            adapter, permission_credential
+                        )
                 elif args.command == "check":
                     detection = DEFAULT_VERSION_DETECTOR.detect(
                         instance.db_type, adapter.registry, adapter
@@ -1082,10 +1121,11 @@ def main(
                                 requirement, adapter.permission_observations
                             )
                             if assessment["status"] == PermissionStatus.MISSING:
-                                account = adapter.current_user or ""
                                 missing = assessment["missing_required"]
                                 grant = render_privileges_sql(
-                                    instance.db_type, missing, account, instance.database,
+                                    instance.db_type, missing,
+                                    _grant_account(instance, adapter, permission_credential),
+                                    instance.database,
                                     adapter.get_server_version(),
                                 )
                                 raise ToolkitError(
@@ -1155,7 +1195,8 @@ def main(
                             "required_privileges": definition.required,
                             "impact": definition.impact,
                             "suggested_grant": render_sql(instance.db_type, (feature,),
-                                                           permission_credential.username,
+                                                           _grant_account(instance, adapter,
+                                                                          permission_credential),
                                                            instance.database) if permission_credential else None,
                             "toolkit_executed_grant": False,
                             "evidence": output.get("error_message"),
@@ -1251,11 +1292,23 @@ def main(
                     "impact": requirement.impact,
                     "reference_grant": render_profile_sql(
                         profile.permission_profile_id, DatabaseType.ORACLE,
-                        permission_credential.username if permission_credential else "DBA_MONITOR",
+                        _grant_account(instance_for_hint, adapter_instance,
+                                       permission_credential),
                         instance_for_hint.database,
                     ),
                 })
-                guidance = "Runtime verification failed; permissions are UNKNOWN. Review this declared-family reference grant."
+                principal = _oracle_principal_output(adapter_instance, permission_credential)
+                feature_row["monitoring_principal"] = principal
+                if principal["verified"]:
+                    guidance = (
+                        "Runtime version verification failed; permissions are UNKNOWN. "
+                        "Review this declared-family reference grant for the verified database principal."
+                    )
+                else:
+                    guidance = (
+                        "Oracle session identity could not be verified. Replace "
+                        "<ORACLE_MONITOR_USER> with the exact database principal before execution."
+                    )
             else:
                 feature_row["impact"] = (
                     "Permission guidance is unavailable without a declared canonical Oracle version_family."
@@ -1265,6 +1318,9 @@ def main(
                 "success": True,
                 "database_id": instance_for_hint.id,
                 "account": permission_credential.username if permission_credential else None,
+                "monitoring_principal": _oracle_principal_output(
+                    adapter_instance, permission_credential
+                ),
                 "features": [feature_row],
                 "version_profile": asdict(profile),
                 "runtime_verification": {
@@ -1413,7 +1469,8 @@ def main(
                         "required_privileges": missing_items,
                         "impact": "; ".join(definitions[name].impact for name in affected),
                         "suggested_grant": render_sql(
-                            instance_for_hint.db_type, affected, permission_credential.username,
+                            instance_for_hint.db_type, affected,
+                            _grant_account(instance_for_hint, adapter_instance, permission_credential),
                             instance_for_hint.database,
                         ),
                         "toolkit_executed_grant": False,

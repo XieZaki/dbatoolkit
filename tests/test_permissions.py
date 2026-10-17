@@ -13,6 +13,7 @@ from dba.permissions import (
     ORACLE_COMMON_MONITOR_REQUIREMENTS,
     REGISTRY,
     VERSION_DETECTION_PRIVILEGES,
+    OraclePrincipal,
     PermissionStatus,
     render_profile_sql,
     render_sql,
@@ -69,7 +70,7 @@ def test_postgres_mysql_oracle_minimum_grants() -> None:
     assert "GRANT PROCESS ON *.*" in mysql
     assert "GRANT REPLICATION CLIENT ON *.*" in mysql
     assert "SUPER" not in mysql and "SELECT ON *.*" not in mysql
-    oracle = render_sql(DatabaseType.ORACLE, ("slow",), "DBA_MONITOR")
+    oracle = render_sql(DatabaseType.ORACLE, ("slow",), OraclePrincipal.from_runtime("DBA_MONITOR"))
     assert "GRANT SELECT ON SYS.V_$SESSION TO DBA_MONITOR" in oracle
     assert "SELECT_CATALOG_ROLE" not in oracle and "SYSDBA" not in oracle
 
@@ -83,8 +84,9 @@ def test_grant_revoke_deduplicate_and_identifier_escape() -> None:
     assert "DBA Toolkit does NOT execute" in grant
     mysql = render_sql(DatabaseType.MYSQL, ("slow",), "a'b")
     assert "'a''b'@'<approved_monitor_client_host>'" in mysql
-    with pytest.raises(ValueError):
-        render_sql(DatabaseType.ORACLE, ("slow",), "x; GRANT DBA TO x")
+    injected = render_sql(DatabaseType.ORACLE, ("slow",), "x; GRANT DBA TO x")
+    assert "TO <ORACLE_MONITOR_USER>" in injected
+    assert "GRANT DBA" not in injected
 
 
 def test_all_feature_union_deduplicates_privileges() -> None:
@@ -204,11 +206,13 @@ def test_oracle_replication_permissions_render_static_guidance_when_preflight_fa
         assert output["version_profile"]["version_status"] == "UNVERIFIED"
         assert "SELECT SYS.V_$DATAGUARD_PROCESS" in row["required_privileges"]
         assert "SELECT SYS.V_$INSTANCE" in row["required_privileges"]
-        assert "GRANT SELECT ON SYS.V_$INSTANCE TO DBA_MONITOR" in row["reference_grant"]
+        assert output["monitoring_principal"]["verification"] == "UNVERIFIED"
+        assert output["monitoring_principal"]["database_principal"] == "UNKNOWN"
+        assert "GRANT SELECT ON SYS.V_$INSTANCE TO <ORACLE_MONITOR_USER>" in row["reference_grant"]
         assert "SELECT SYS.V_$SESSION" in row["required_privileges"]
         assert "SELECT SYS.V_$SQL" in row["required_privileges"]
         assert "SELECT SYS.V_$TRANSACTION" in row["required_privileges"]
-        assert "GRANT SELECT ON SYS.V_$DATAGUARD_PROCESS TO DBA_MONITOR" in row["reference_grant"]
+        assert "GRANT SELECT ON SYS.V_$DATAGUARD_PROCESS TO <ORACLE_MONITOR_USER>" in row["reference_grant"]
         assert "V_$MANAGED_STANDBY" not in row["required_privileges"]
         assert main(["--inventory", str(inventory), "permissions", "oracle", "--feature",
                      "replication"], provider=provider, driver=object()) == 0
@@ -218,6 +222,8 @@ def test_oracle_replication_permissions_render_static_guidance_when_preflight_fa
         assert "MONITORING_OBJECT_UNAVAILABLE" in human
         assert "Vendor Guidance" in human and "direct SELECT" in human
         assert "Reference Grants" in human
+        assert "<ORACLE_MONITOR_USER>" in human
+        assert "UNVERIFIED" in human
         assert "Toolkit did NOT execute this script." in human
     else:
         assert output["version_profile"]["version_status"] == "UNKNOWN"
@@ -239,7 +245,8 @@ def test_oracle_11gr2_offline_replication_grant_uses_legacy_objects_only() -> No
     assert profile.version_status == VersionStatus.UNVERIFIED
     assert profile.permission_profile_id == "oracle11gr2_replication"
     required = requirements_for_profile(profile.permission_profile_id).required
-    grant = render_profile_sql(profile.permission_profile_id, DatabaseType.ORACLE, "DBA_MONITOR")
+    grant = render_profile_sql(profile.permission_profile_id, DatabaseType.ORACLE,
+                               OraclePrincipal.from_runtime("DBA_MONITOR"))
     assert "SELECT SYS.V_$MANAGED_STANDBY" in required
     assert "SELECT SYS.V_$DATAGUARD_PROCESS" not in required
     assert "V_$DATAGUARD_PROCESS" not in grant
@@ -275,7 +282,8 @@ def test_oracle_replication_profiles_include_bootstrap_version_and_feature_permi
     assert all("SELECT " + item in required for item in feature_objects)
     if family == "11gr2" or (family == "12c" and profile.runtime_variant == "12_1"):
         assert "SELECT SYS.V_$DATAGUARD_PROCESS" not in required
-    grant = render_profile_sql(profile_id, DatabaseType.ORACLE, "DBA_MONITOR")
+    grant = render_profile_sql(profile_id, DatabaseType.ORACLE,
+                               OraclePrincipal.from_runtime("DBA_MONITOR"))
     assert "GRANT CREATE SESSION TO DBA_MONITOR" in grant
     assert "GRANT SELECT ON SYS.V_$INSTANCE TO DBA_MONITOR" in grant
     assert "GRANT SELECT ON SYS.V_$VERSION TO DBA_MONITOR" in grant
@@ -300,7 +308,8 @@ def test_oracle_replication_missing_bootstrap_object_is_isolated_but_full_grant_
     status, missing = status_for(requirements, observed)
     assert status == PermissionStatus.MISSING
     assert missing == ("SELECT SYS.V_$INSTANCE",)
-    grant = render_profile_sql("oracle_modern_replication", DatabaseType.ORACLE, "DBA_MONITOR")
+    grant = render_profile_sql("oracle_modern_replication", DatabaseType.ORACLE,
+                               OraclePrincipal.from_runtime("DBA_MONITOR"))
     assert "GRANT SELECT ON SYS.V_$INSTANCE TO DBA_MONITOR" in grant
     assert all(item.removeprefix("SELECT ") in grant for item in requirements.required
                if item.startswith("SELECT "))

@@ -1,0 +1,7 @@
+name: session_identity
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: Read-only database-confirmed Oracle session principal lookup.

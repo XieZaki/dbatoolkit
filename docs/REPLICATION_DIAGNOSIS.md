@@ -42,6 +42,8 @@ The permission command uses the shared Registry. It only generates minimum grant
 
 Known follow-up for a later permission-profile phase: Oracle `slow` and `disk-growth` profiles have not yet been migrated to compose the full common login/preflight/version bootstrap contract. This release closes that contract for replication only; it does not change the other Oracle feature profiles.
 
+Oracle reference grants use the session principal returned by the fixed, reviewed `SELECT USER FROM DUAL` query, which runs before monitoring-view preflight. Ordinary uppercase principals render unquoted; case-sensitive or special names render as escaped quoted identifiers. If runtime identity cannot be verified, generated Oracle grants use `<ORACLE_MONITOR_USER>` and require DBA replacement. Credential usernames are never guessed to be database principals, and the Toolkit never executes these grants.
+
 ## Reports and safe operation
 
 The default terminal output is a compact incident panel. The offline HTML report has bounded tables for summary, topology, lag/backlog, issues, permission readiness, recommendations, and collection quality. JSON contains the structured summary and bounded vendor evidence. All displayed database-derived strings are escaped/redacted.

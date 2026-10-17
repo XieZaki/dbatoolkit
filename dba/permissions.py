@@ -40,6 +40,43 @@ class PermissionAssessment(TypedDict):
     available: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class OraclePrincipal:
+    """Oracle login principal, separate from the credential's login string."""
+
+    raw_name: str | None
+    source: str
+    verified: bool
+
+    @classmethod
+    def from_runtime(cls, raw_name: str) -> OraclePrincipal:
+        if not raw_name or any(ord(char) < 32 or ord(char) == 127 for char in raw_name):
+            raise ValueError("Oracle runtime principal is empty or contains control characters")
+        return cls(raw_name, "RUNTIME_SESSION_USER", True)
+
+    @classmethod
+    def unverified(cls, credential_username: str | None) -> OraclePrincipal:
+        return cls(credential_username, "CREDENTIAL_USERNAME", False)
+
+    @property
+    def quoted_required(self) -> bool:
+        return not bool(self.raw_name and re.fullmatch(r"[A-Z][A-Z0-9_$#]{0,127}", self.raw_name))
+
+    @property
+    def verification(self) -> str:
+        return "VERIFIED" if self.verified else "UNVERIFIED"
+
+    def to_dict(self) -> dict[str, str | bool | None]:
+        return {
+            "credential_username": self.raw_name if not self.verified else None,
+            "database_principal": self.raw_name if self.verified else "UNKNOWN",
+            "source": self.source,
+            "verified": self.verified,
+            "verification": self.verification,
+            "quoted_required": self.quoted_required if self.verified else False,
+        }
+
+
 # Privilege names describe effective monitor capabilities; grant renderer below
 # maps only this closed vocabulary to reviewed dialect-specific statements.
 REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
@@ -366,7 +403,7 @@ def requirements_for_profile(profile_id: str) -> FeaturePermissions:
         raise ValueError("Resolved profile has no replication permission definition") from None
 
 
-def render_profile_sql(profile_id: str, database_type: DatabaseType, account: str,
+def render_profile_sql(profile_id: str, database_type: DatabaseType, account: str | OraclePrincipal,
                        database: str | None = None, version: str | None = None,
                        *, revoke: bool = False) -> str:
     requirements = requirements_for_profile(profile_id)
@@ -384,9 +421,27 @@ def _quote_identifier(value: str, database_type: DatabaseType) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def _grant(permission: str, database_type: DatabaseType, account: str, database: str | None,
+def render_oracle_principal(principal: str | OraclePrincipal) -> str:
+    """Render only a database-confirmed Oracle principal; otherwise use a placeholder."""
+    identity = principal if isinstance(principal, OraclePrincipal) else OraclePrincipal.unverified(principal)
+    if not identity.verified or not identity.raw_name:
+        return "<ORACLE_MONITOR_USER>"
+    name = identity.raw_name
+    if any(ord(char) < 32 or ord(char) == 127 for char in name):
+        raise ValueError("Oracle principal contains control characters")
+    if not identity.quoted_required:
+        return name
+    return _quote_identifier(name, DatabaseType.ORACLE)
+
+
+def _grant(permission: str, database_type: DatabaseType, account: str | OraclePrincipal, database: str | None,
            version: str | None) -> tuple[str, str] | None:
-    user = _quote_identifier(account, database_type)
+    if database_type == DatabaseType.ORACLE:
+        user = render_oracle_principal(account)
+    elif isinstance(account, str):
+        user = _quote_identifier(account, database_type)
+    else:
+        raise ValueError("Database principal type does not match grant dialect")
     if database_type == DatabaseType.SQLSERVER:
         if permission == "VIEW SERVER STATE" and not version:
             return (
@@ -410,6 +465,8 @@ def _grant(permission: str, database_type: DatabaseType, account: str, database:
             db = _quote_identifier(database, database_type)
             return (f"GRANT CONNECT ON DATABASE {db} TO {user};", f"REVOKE CONNECT ON DATABASE {db} FROM {user};")
     elif database_type == DatabaseType.MYSQL:
+        if not isinstance(account, str):
+            raise ValueError("Database principal type does not match grant dialect")
         identity = account.split("@", 1) if "@" in account else [account, "<approved_monitor_client_host>"]
         username, host = identity
         mysql_user = "'" + username.replace("\\", "\\\\").replace("'", "''") + "'@'" + host.replace("\\", "\\\\").replace("'", "''") + "'"
@@ -418,9 +475,6 @@ def _grant(permission: str, database_type: DatabaseType, account: str, database:
         if permission == "SELECT performance_schema":
             return (f"GRANT SELECT ON `performance_schema`.* TO {mysql_user};", f"REVOKE SELECT ON `performance_schema`.* FROM {mysql_user};")
     elif database_type == DatabaseType.ORACLE:
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]{0,127}", account):
-            raise ValueError("Oracle account must be an unquoted simple identifier")
-        user = account if account == account.upper() else _quote_identifier(account, database_type)
         if permission == "CREATE SESSION":
             return (f"GRANT CREATE SESSION TO {user};", f"REVOKE CREATE SESSION FROM {user};")
         match = re.fullmatch(r"SELECT (SYS\.[A-Z0-9_$#]+)", permission)
@@ -465,7 +519,7 @@ def scan_registry_objects(sql_root: Path) -> dict[DatabaseType, frozenset[str]]:
     return {key: frozenset(value) for key, value in result.items()}
 
 
-def render_sql(database_type: DatabaseType, features: Iterable[str], account: str,
+def render_sql(database_type: DatabaseType, features: Iterable[str], account: str | OraclePrincipal,
                database: str | None = None, version: str | None = None,
                *, revoke: bool = False) -> str:
     definitions = REGISTRY.get(database_type, {})
@@ -480,7 +534,7 @@ def render_sql(database_type: DatabaseType, features: Iterable[str], account: st
                                  revoke=revoke)
 
 
-def render_privileges_sql(database_type: DatabaseType, privileges: Iterable[str], account: str,
+def render_privileges_sql(database_type: DatabaseType, privileges: Iterable[str], account: str | OraclePrincipal,
                           database: str | None = None, version: str | None = None,
                           *, revoke: bool = False) -> str:
     statements: list[str] = []
