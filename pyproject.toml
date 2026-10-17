@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dba-toolkit"
+version = "0.8.3.5"
+description = "Offline, read-only DBA diagnostic foundations"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "PyYAML>=6.0,<7",
+    "keyring>=25,<26",
+    "cryptography>=42,<47",
+    "argon2-cffi>=23.1,<26",
+]
+
+[project.optional-dependencies]
+sqlserver = ["pyodbc>=5.2,<6"]
+postgresql = ["psycopg[binary]>=3.2,<4"]
+mysql = ["PyMySQL[rsa]>=1.1,<1.2"]
+oracle = ["oracledb>=2.0,<4"]
+mongodb = ["pymongo>=4.10,<5"]
+redis = ["redis>=5.2,<7"]
+all-db = [
+    "pyodbc>=5.2,<6",
+    "psycopg[binary]>=3.2,<4",
+    "PyMySQL[rsa]>=1.1,<1.2",
+    "oracledb>=2.0,<4",
+    "pymongo>=4.10,<5",
+    "redis>=5.2,<7",
+]
+dev = ["pytest==8.4.2", "ruff==0.11.13", "mypy==1.15.0", "types-PyYAML==6.0.12.20250516"]
+
+[project.scripts]
+dba = "dba.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dba*"]
+
+[tool.setuptools.package-data]
+"dba.reporting.templates" = ["*.html"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".tmp"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--basetemp=.tmp/pytest"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["argon2.*", "cryptography.*"]
+ignore_missing_imports = true
+

@@ -1,0 +1,7 @@
+name: connections
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 5000
+reviewed: true
+description: Connection source and most recent batch; unavailable text remains NULL, no SQL Server 2014 input-buffer dependency.

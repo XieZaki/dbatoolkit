@@ -1,0 +1,2 @@
+SELECT channel_name, service_state, last_error_number, last_heartbeat_timestamp
+FROM performance_schema.replication_connection_status

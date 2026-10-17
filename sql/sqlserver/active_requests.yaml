@@ -1,0 +1,7 @@
+name: active_requests
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 5000
+reviewed: true
+description: Reviewed request DMV read; longest first, batch SQL text limited to 16384 characters with an explicit text truncation flag.

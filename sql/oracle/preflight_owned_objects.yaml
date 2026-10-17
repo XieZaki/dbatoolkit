@@ -1,0 +1,7 @@
+name: preflight_owned_objects
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2
+reviewed: true
+description: Reviewed Oracle monitor account object inventory.

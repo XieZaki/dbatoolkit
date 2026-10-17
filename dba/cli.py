@@ -1,0 +1,1187 @@
+import argparse
+import re
+import time
+from collections.abc import Sequence
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Any, cast
+
+from dba import __version__
+from dba.connection import public_connection_settings, resolve_connection_settings
+from dba.core import DatabaseType, DiagnosticReport
+from dba.credential_session import (
+    CredentialSessionClient,
+    parse_ttl,
+)
+from dba.credentials import (
+    Credential,
+    CredentialProvider,
+    CredentialStore,
+    KeyringCredentialStore,
+    PromptCredentialProvider,
+    confirm_action,
+    prompt_credential_for_storage,
+    validate_alias,
+)
+from dba.disk_growth import diagnose_disk_growth
+from dba.encrypted_credentials import (
+    CredentialResolver,
+    EncryptedFileCredentialStore,
+    prompt_master_password,
+    prompt_new_master_password,
+)
+from dba.environment import driver_info
+from dba.errors import ToolkitError
+from dba.execution_plan import diagnose_plan
+from dba.incident import build_incident_summary
+from dba.inventory import Inventory, ValidationError
+from dba.logging import configure_logging, redact
+from dba.mysql import MySQLAdapter
+from dba.mysql_collectors import COLLECTORS as MYSQL_COLLECTORS
+from dba.mysql_slow import diagnose_slow as diagnose_mysql_slow
+from dba.oracle import OracleAdapter
+from dba.oracle_collectors import COLLECTORS as ORACLE_COLLECTORS
+from dba.oracle_slow import diagnose_slow as diagnose_oracle_slow
+from dba.permissions import (
+    ALL_FEATURES,
+    PermissionStatus,
+    assess_permissions,
+    privilege_reasons,
+    render_privileges_sql,
+    render_sql,
+    requirements_for,
+)
+from dba.permissions import REGISTRY as PERMISSION_REGISTRY
+from dba.postgresql import PostgreSQLAdapter
+from dba.postgresql_collectors import COLLECTORS as PG_COLLECTORS
+from dba.postgresql_slow import diagnose_slow as diagnose_pg_slow
+from dba.presentation import (
+    CheckResult,
+    OutputMode,
+    StatusResult,
+    render_human,
+    render_incident_summary,
+    render_json,
+)
+from dba.registry import SqlScriptRegistry
+from dba.reporting import HtmlReportRenderer, build_report_model, render_bounded
+from dba.runtime import RuntimeStatus, database_runtime_status, doctor, runtime_info
+from dba.settings import MySQLSettings, OracleSettings, PostgreSQLSettings, SQLServerSettings
+from dba.slow import diagnose_slow
+from dba.sqlserver import SQLServerAdapter
+from dba.sqlserver_collectors import COLLECTORS
+
+
+class _CachedCredentialProvider(CredentialProvider):
+    def __init__(self, credential: Credential) -> None:
+        self.credential = credential
+
+    def get_credential(self, alias: str) -> Credential:
+        return self.credential
+
+
+def _account_security(adapter: Any) -> dict[str, Any]:
+    evidence = getattr(adapter, "privilege_classification", {})
+    classification = evidence.get("classification") if isinstance(evidence, dict) else None
+    if classification in {"NON_PRIVILEGED", "PRIVILEGED", "UNKNOWN"}:
+        return {"classification": classification, "evidence": evidence}
+    # A successful connection means the database-specific, fail-closed
+    # monitoring-account preflight completed for adapters with legacy output.
+    return {"classification": "NON_PRIVILEGED", "evidence_source": "monitor_preflight"}
+
+
+class _InjectedCredentialProvider(CredentialProvider):
+    """Use only the explicitly injected store; never auto-resolve another backend."""
+
+    def __init__(self, store: CredentialStore) -> None:
+        self.store = store
+        self.last_backend: str | None = None
+
+    def get_credential(self, alias: str) -> Credential:
+        credential = self.store.get(validate_alias(alias))
+        if credential is None:
+            raise ToolkitError("CredentialNotFound", "Credential alias was not found in the injected store.")
+        self.last_backend = self.store.backend_name
+        return credential
+
+
+def _add_output_options(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--json", action="store_true", help="Write structured JSON")
+    command.add_argument("--quiet", action="store_true", help="Show only the final status")
+
+
+def _add_credential_backend(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--credential-backend", choices=("auto", "os", "encrypted", "interactive"),
+        default="auto", help="Select credential source; encrypted sessions may avoid repeated unlock prompts",
+    )
+
+
+def _emit(args: Any, command: str, result: Any) -> None:
+    mode = OutputMode.JSON if bool(getattr(args, "json", False)) or (
+        command == "diagnose" and getattr(args, "format", "console") == "json"
+    ) else OutputMode.HUMAN
+    if mode == OutputMode.JSON:
+        print(render_json(result))
+    elif getattr(args, "quiet", False):
+        status = result.get("status", "READY" if result.get("success", True) else "FAILED")
+        print(f"{status}  {result.get('database_id', result.get('database', {}).get('id', ''))}".rstrip())
+    else:
+        print(render_human(command, result))
+
+
+def _runtime_defaults(database_type: DatabaseType, path: Path | None) -> object:
+    if database_type == DatabaseType.SQLSERVER:
+        return SQLServerSettings.load(path) if path else SQLServerSettings()
+    if database_type == DatabaseType.POSTGRESQL:
+        return PostgreSQLSettings.load(path) if path else PostgreSQLSettings()
+    if database_type == DatabaseType.MYSQL:
+        return MySQLSettings.load(path) if path else MySQLSettings()
+    if database_type == DatabaseType.ORACLE:
+        return OracleSettings.load(path) if path else OracleSettings()
+    if database_type in {DatabaseType.MONGODB, DatabaseType.REDIS}:
+        return object()
+    raise ToolkitError("NotImplemented", "Connection settings are not implemented for this database type.")
+
+
+def _effective_settings(instance: Any, path: Path | None) -> object:
+    return resolve_connection_settings(
+        instance.db_type, instance.connection, _runtime_defaults(instance.db_type, path)
+    )
+
+
+def _feature_for_command(args: Any) -> str | None:
+    if args.command == "diagnose":
+        return args.scenario if args.scenario in ALL_FEATURES else "slow"
+    if args.command == "collect":
+        if args.collector in {"disk_growth", "disk-growth", "log_growth"}:
+            return "disk-growth"
+        return "slow"
+    return None
+
+
+def _diagnostic_report_path(database_id: str, scenario: str, requested: Path | None) -> Path:
+    if requested is not None:
+        return requested if requested.suffix.lower() == ".html" else requested.with_suffix(".html")
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", database_id).strip("._") or "database"
+    stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+    directory = Path("reports")
+    base = f"{safe_id}_{scenario}_{stamp}"
+    candidate = directory / f"{base}.html"
+    suffix = 2
+    while candidate.exists():
+        candidate = directory / f"{base}_{suffix:02d}.html"
+        suffix += 1
+    return candidate
+
+
+def _permission_matches_evidence(permission: str, evidence: str) -> bool:
+    candidate = permission.upper()
+    if candidate in evidence:
+        return True
+    if candidate == "VIEW SERVER STATE":
+        return "VIEW SERVER PERFORMANCE STATE" in evidence
+    return False
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    provider: CredentialProvider | None = None,
+    driver: Any | None = None,
+    credential_store: CredentialStore | None = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dba", description=("Common DBA commands. Missing database credentials can be entered "
+                                "interactively when a command first needs them."),
+        epilog=("Common DBA Commands:\n"
+                "  dba list\n"
+                "  dba check <database_id>\n"
+                "  dba status <database_id>\n"
+                "  dba diagnose <database_id> slow\n"
+                "  dba diagnose <database_id> disk-growth\n\n"
+                "Advanced commands: dba -h"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version=f"dba-toolkit {__version__}")
+    parser.add_argument("--inventory", type=Path, default=Path("config/inventory.yaml"))
+    parser.add_argument("--sql-root", type=Path, default=Path("sql"))
+    parser.add_argument(
+        "--settings", type=Path, help="Optional runtime YAML; safe defaults when omitted"
+    )
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser("help", help="Show common DBA tasks")
+    listing = commands.add_parser("list", help="List inventory")
+    _add_output_options(listing)
+    listing.add_argument("--type", choices=[t.value for t in DatabaseType])
+    listing.add_argument("--env")
+    listing.add_argument("--group")
+    listing.add_argument("--tag")
+    showing = commands.add_parser("show", help="Show one inventory instance")
+    showing.add_argument("database_id")
+    _add_output_options(showing)
+    validation = commands.add_parser("validate", help="Validate inventory and all formal SQL scripts")
+    _add_output_options(validation)
+    driver_info_command = commands.add_parser(
+        "driver-info", help="Inspect local Python/ODBC environment without connecting"
+    )
+    _add_output_options(driver_info_command)
+    doctor_command = commands.add_parser("doctor", help="Check local Toolkit runtime without credentials or connections")
+    doctor_command.add_argument("--database", action="append", choices=[t.value for t in DatabaseType],
+                                help="Check a configured database runtime (repeatable)")
+    _add_output_options(doctor_command)
+    runtime_command = commands.add_parser("runtime-info", help="Show local runtime components without connecting")
+    _add_output_options(runtime_command)
+    credentials = commands.add_parser(
+        "credentials", help="Manage secure credentials; missing database aliases can be enrolled on demand",
+        description=("Database commands can enroll a missing credential alias when first needed. "
+                     "Use these commands for sessions and advanced credential administration."),
+    )
+    credential_commands = credentials.add_subparsers(dest="credential_command", required=True)
+    credential_set = credential_commands.add_parser(
+        "set", help="Advanced: store or update one credential explicitly"
+    )
+    credential_set.add_argument("credential_alias")
+    credential_set.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    _add_output_options(credential_set)
+    credential_list = credential_commands.add_parser("list", help="List stored credential aliases")
+    credential_list.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    credential_show = credential_commands.add_parser("show", help="Show credential metadata only")
+    credential_show.add_argument("credential_alias")
+    credential_show.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    _add_output_options(credential_show)
+    credential_delete = credential_commands.add_parser("delete", help="Delete one stored credential")
+    credential_delete.add_argument("credential_alias")
+    credential_delete.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    _add_output_options(credential_delete)
+    credential_test = credential_commands.add_parser("test", help="Test credential retrieval only")
+    credential_test.add_argument("credential_alias")
+    credential_test.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    _add_output_options(credential_test)
+    _add_output_options(credential_commands.choices["list"])
+    credential_init = credential_commands.add_parser("init", help="Initialize encrypted local credential storage")
+    credential_init.add_argument("--backend", choices=("encrypted",), required=True)
+    _add_output_options(credential_init)
+    credential_backend = credential_commands.add_parser("backend", help="Show credential backend availability")
+    _add_output_options(credential_backend)
+    credential_rekey = credential_commands.add_parser("rekey", help="Change encrypted store master password")
+    credential_rekey.add_argument("--backend", choices=("encrypted",), required=True)
+    _add_output_options(credential_rekey)
+    credential_unlock = credential_commands.add_parser("unlock", help="Unlock encrypted credentials for a short session")
+    credential_unlock.add_argument("--backend", choices=("encrypted",), default="encrypted")
+    credential_unlock.add_argument("--ttl", default=None, help="Absolute session lifetime, 5m to 8h (default 30m)")
+    credential_unlock.add_argument("--renew", action="store_true", help="Re-authenticate and replace an active session")
+    _add_output_options(credential_unlock)
+    credential_status = credential_commands.add_parser("status", help="Show credential session status")
+    _add_output_options(credential_status)
+    credential_lock = credential_commands.add_parser("lock", help="Lock and clear the active credential session")
+    _add_output_options(credential_lock)
+    check = commands.add_parser("check", help="Check runtime, credentials, connection and feature readiness")
+    check.add_argument("database_id")
+    _add_credential_backend(check)
+    _add_output_options(check)
+    status_command = commands.add_parser("status", help="Show lightweight current database status")
+    status_command.add_argument("database_id")
+    _add_credential_backend(status_command)
+    _add_output_options(status_command)
+    connection = commands.add_parser(
+        "test-connection", help="Connect, verify monitoring permissions and close"
+    )
+    connection.add_argument("database_id")
+    _add_credential_backend(connection)
+    _add_output_options(connection)
+    collect = commands.add_parser("collect", help="Run a reviewed database collector")
+    collect.add_argument("database_id")
+    _add_credential_backend(collect)
+    collect.add_argument("collector", choices=tuple(dict.fromkeys((*COLLECTORS, *PG_COLLECTORS,
+                                                                    *MYSQL_COLLECTORS,
+                                                                    *ORACLE_COLLECTORS))))
+    _add_output_options(collect)
+    diagnose = commands.add_parser("diagnose", help="Read-only slow, disk-growth or SQL Server plan")
+    diagnose.add_argument("database_id")
+    _add_credential_backend(diagnose)
+    diagnose.add_argument("scenario", choices=("slow", "plan", "disk-growth"))
+    diagnose.add_argument("--session", type=int, help="Positive session ID for plan diagnosis")
+    diagnose.add_argument("--report", type=Path, help="Output HTML report file")
+    diagnose.add_argument("--format", choices=("console", "json"), default="console",
+                          help=argparse.SUPPRESS)
+    diagnose.add_argument("--verbose", action="store_true",
+                          help="Include secondary signals and collector quality in the incident summary")
+    _add_output_options(diagnose)
+    permissions = commands.add_parser("permissions", help="Inspect monitor permissions or generate review scripts")
+    permissions.add_argument("database_id")
+    _add_credential_backend(permissions)
+    _add_output_options(permissions)
+    permission_scope = permissions.add_mutually_exclusive_group()
+    permission_scope.add_argument("--feature", choices=ALL_FEATURES)
+    permission_scope.add_argument("--all-features", action="store_true")
+    permission_action = permissions.add_mutually_exclusive_group()
+    permission_action.add_argument("--generate-grant", action="store_true")
+    permission_action.add_argument("--generate-revoke", action="store_true")
+    args = parser.parse_args(argv)
+    encrypted_store = EncryptedFileCredentialStore()
+    if args.command is None or args.command == "help":
+        parser.print_help()
+        return 0
+    if args.command == "driver-info":
+        info = driver_info()
+        _emit(args, "driver-info", info)
+        return 0 if info["ready"] else 1
+    if args.command == "doctor":
+        if args.database:
+            configured = {DatabaseType(item) for item in args.database}
+        else:
+            inventory = Inventory.load(args.inventory)
+            configured = {instance.db_type for instance in inventory.instances}
+        doctor_report = doctor(configured_databases=configured)
+        _emit(args, "doctor", doctor_report)
+        return 0 if doctor_report["overall"] in {
+            RuntimeStatus.READY.value, RuntimeStatus.READY_WITH_WARNING.value
+        } else 1
+    if args.command == "runtime-info":
+        _emit(args, "runtime-info", runtime_info())
+        return 0
+    if args.command == "credentials":
+        injected_store = credential_store is not None
+        os_store = credential_store if credential_store is not None else KeyringCredentialStore()
+        store: CredentialStore = os_store
+        try:
+            alias = str(getattr(args, "credential_alias", ""))
+            credential_output: dict[str, Any]
+            session_credential: Credential | None = None
+            selected = "injected" if injected_store else getattr(args, "backend", "auto")
+            session_client = CredentialSessionClient()
+            if args.credential_command == "status":
+                credential_output = session_client.status()
+                _emit(args, "credentials status", credential_output)
+                return 0
+            if args.credential_command == "lock":
+                previous = session_client.status()
+                session_client.lock()
+                credential_output = {"status": "ALREADY_LOCKED" if previous.get("status") == "LOCKED" else "LOCKED",
+                                     "cleared": previous.get("status") != "LOCKED"}
+                _emit(args, "credentials lock", credential_output)
+                return 0
+            if args.credential_command == "unlock":
+                if injected_store:
+                    raise ToolkitError("CredentialBackendUnsupported",
+                                       "Credential sessions require the encrypted credential store.")
+                ttl_seconds = parse_ttl(args.ttl)
+                existing = session_client.status()
+                if existing.get("status") == "UNLOCKED" and not args.renew:
+                    credential_output = {**existing, "status": "ALREADY_UNLOCKED"}
+                    _emit(args, "credentials unlock", credential_output)
+                    return 0
+                encrypted_store._require_crypto()
+                if not encrypted_store.exists:
+                    raise ToolkitError("CredentialStoreNotInitialized",
+                                       "Initialize the encrypted credential store before unlocking it.")
+                _, decrypted_credentials = encrypted_store._read_container()
+                store_key = encrypted_store.session_key()
+                try:
+                    credential_output = session_client.load(
+                        decrypted_credentials, ttl_seconds, encrypted_store.path, store_key
+                    )
+                finally:
+                    encrypted_store.lock()
+                    decrypted_credentials.clear()
+                    store_key = b""
+                credential_output = {**credential_output, "ttl_seconds": ttl_seconds,
+                                     "scope": "Current OS user", "secrets_persisted": False}
+                _emit(args, "credentials unlock", credential_output)
+                return 0
+            if args.credential_command == "backend":
+                if injected_store:
+                    credential_output = {
+                        "backend": os_store.backend_name,
+                        "available": os_store.available(),
+                    }
+                    _emit(args, "credentials backend", credential_output)
+                    return 0
+                from dba.credentials import credential_store_status
+
+                credential_output = credential_store_status(os_store)
+                credential_output["credential_session"] = session_client.status()
+                _emit(args, "credentials backend", credential_output)
+                return 0
+            if args.credential_command == "init":
+                if injected_store:
+                    raise ToolkitError("CredentialBackendUnsupported",
+                                       "Encrypted store initialization is unavailable with an injected credential store.")
+                encrypted_store._require_crypto()
+                if not encrypted_store.available():
+                    raise ToolkitError("CredentialCryptoUnavailable",
+                                       "Encrypted credential storage requires cryptography and argon2-cffi from the local wheelhouse.")
+                if encrypted_store.exists:
+                    raise ToolkitError("CredentialStoreExists",
+                                       "Credential store already exists; it was not overwritten.")
+                password = prompt_new_master_password()
+                encrypted_store.initialize(password)
+                encrypted_store.lock()
+                credential_output = {"backend": encrypted_store.backend_name,
+                                     "path": str(encrypted_store.path), "status": "READY",
+                                     "cipher": "AES-256-GCM", "kdf": "Argon2id", "format": 1}
+                _emit(args, "credentials init", credential_output)
+                return 0
+            if args.credential_command == "rekey":
+                if injected_store:
+                    raise ToolkitError("CredentialBackendUnsupported",
+                                       "Encrypted store rekey is unavailable with an injected credential store.")
+                encrypted_store._require_crypto()
+                if not encrypted_store.exists:
+                    raise ToolkitError("CredentialStoreNotInitialized",
+                                       "No encrypted credential store exists to rekey.")
+                old_password = prompt_master_password("Current master password: ")
+                new_password = prompt_new_master_password()
+                encrypted_store.rekey(old_password, new_password)
+                encrypted_store.lock()
+                session_client.lock()
+                credential_output = {"backend": encrypted_store.backend_name, "status": "READY"}
+                _emit(args, "credentials rekey", credential_output)
+                return 0
+
+            if injected_store:
+                store = os_store
+            elif selected == "encrypted":
+                store = encrypted_store
+                encrypted_store._require_crypto()
+                if args.credential_command in {"show", "test"}:
+                    session_credential = session_client.get(alias)
+                if args.credential_command == "set" and not encrypted_store.exists:
+                    raise ToolkitError("CredentialStoreNotInitialized",
+                                       "Initialize encrypted credential storage before storing credentials.")
+            elif selected == "os":
+                store = os_store
+                if not store.available():
+                    raise ToolkitError("CredentialStoreUnavailable", "OS secure credential store is unavailable.")
+            elif args.credential_command == "list":
+                credential_rows: dict[str, dict[str, str]] = {}
+                if os_store.available():
+                    for item in os_store.aliases():
+                        saved = os_store.get(item)
+                        credential_rows[item] = {"alias": item,
+                                                 "username": saved.username if saved else "",
+                                                 "backend": os_store.backend_name}
+                session_status = session_client.status()
+                if session_status.get("status") == "UNLOCKED":
+                    metadata_rows = session_client.list_metadata()
+                    if metadata_rows is None:
+                        raise ToolkitError("CredentialSessionUnavailable", "Credential session metadata is unavailable.")
+                    for metadata_row in metadata_rows:
+                        credential_rows[metadata_row["alias"]] = {
+                            "alias": metadata_row["alias"], "username": metadata_row["username"],
+                            "backend": encrypted_store.backend_name,
+                        }
+                elif encrypted_store.exists:
+                    for item in encrypted_store.aliases():
+                        saved = encrypted_store.get(item)
+                        credential_rows[item] = {"alias": item, "username": saved.username if saved else "",
+                                                 "backend": encrypted_store.backend_name}
+                credential_output = {"credentials": [credential_rows[key]
+                                                       for key in sorted(credential_rows)]}
+            elif not injected_store:
+                os_credential = os_store.get(alias) if os_store.available() else None
+                if os_credential is not None:
+                    store = os_store
+                elif args.credential_command != "set" and selected in {"auto", "encrypted"}:
+                    session_credential = session_client.get(alias)
+                    if session_credential is not None:
+                        store = encrypted_store
+                    elif encrypted_store.exists:
+                        store = encrypted_store
+                    elif args.credential_command != "set":
+                        raise ToolkitError("CredentialNotFound", "Credential alias was not found in secure stores.")
+                elif encrypted_store.exists:
+                    encrypted_credential = encrypted_store.get(alias)
+                    if encrypted_credential is not None:
+                        store = encrypted_store
+                    elif args.credential_command != "set":
+                        raise ToolkitError("CredentialNotFound", "Credential alias was not found in secure stores.")
+                    elif os_store.available():
+                        store = os_store
+                    else:
+                        store = encrypted_store
+                elif args.credential_command == "set" and os_store.available():
+                    store = os_store
+                elif args.credential_command == "set":
+                    raise ToolkitError(
+                        "CredentialStoreUnavailable",
+                        "No persistent secure backend is available. Initialize with `dba credentials init --backend encrypted`.",
+                    )
+                else:
+                    raise ToolkitError("CredentialNotFound", "Credential alias was not found in secure stores.")
+
+            if args.credential_command == "list":
+                if selected == "injected":
+                    credential_output = {"credentials": [
+                        {"alias": item,
+                         "username": (stored.username if (stored := store.get(item)) is not None else ""),
+                         "backend": store.backend_name}
+                        for item in store.aliases()
+                    ]}
+                elif selected == "encrypted":
+                    session_status = session_client.status()
+                    if session_status.get("status") == "UNLOCKED":
+                        metadata_rows = session_client.list_metadata()
+                        if metadata_rows is None:
+                            raise ToolkitError("CredentialSessionUnavailable", "Credential session metadata is unavailable.")
+                        credential_output = {"credentials": [
+                            {"alias": item["alias"], "username": item["username"],
+                             "backend": encrypted_store.backend_name}
+                            for item in metadata_rows
+                        ]}
+                    else:
+                        credential_output = {"credentials": [
+                            {"alias": item, "username": (stored.username if (stored := store.get(item)) else ""),
+                             "backend": store.backend_name}
+                            for item in store.aliases()
+                        ]}
+                elif selected != "auto":
+                    credential_output = {"credentials": [
+                        {"alias": item,
+                         "username": (stored.username if (stored := store.get(item)) is not None else ""),
+                         "backend": store.backend_name}
+                        for item in store.aliases()
+                    ]}
+            if args.credential_command == "list":
+                pass
+            elif args.credential_command == "show":
+                stored = session_credential or store.get(alias)
+                if stored is None:
+                    raise ToolkitError("CredentialNotFound", "Credential alias was not found.")
+                credential_output = {
+                    "alias": alias,
+                    "username": stored.username,
+                    "backend": store.backend_name,
+                    "status": "STORED",
+                }
+            elif args.credential_command == "test":
+                if session_credential is None and store.get(alias) is None:
+                    raise ToolkitError("CredentialNotFound", "Credential alias was not found.")
+                credential_output = {"alias": alias, "backend": store.backend_name, "status": "READY"}
+            elif args.credential_command == "delete":
+                if store.get(alias) is None:
+                    raise ToolkitError("CredentialNotFound", "Credential alias was not found.")
+                if not confirm_action(f"Delete credential {alias}? [y/N] "):
+                    raise ToolkitError("Cancelled", "Credential deletion cancelled.")
+                store.delete(alias)
+                if store is encrypted_store:
+                    session_client.lock()
+                credential_output = {"alias": alias, "backend": store.backend_name, "deleted": True}
+            else:
+                exists = store.get(alias) is not None
+                if exists and not confirm_action("Credential already exists. Update credential? [y/N] "):
+                    raise ToolkitError("Cancelled", "Credential update cancelled.")
+                store.set(alias, prompt_credential_for_storage())
+                if store is encrypted_store:
+                    session_client.lock()
+                credential_output = {
+                    "alias": alias,
+                    "backend": store.backend_name,
+                    "stored": True,
+                    "updated": exists,
+                }
+            _emit(args, f"credentials {args.credential_command}", credential_output)
+            return 0
+        except ToolkitError as exc:
+            _emit(args, f"credentials {args.credential_command}",
+                  {"success": False, "error_type": exc.error_type,
+                   "error_message": str(exc),
+                   "alias": getattr(args, "credential_alias", None),
+                   "backend": getattr(store, "backend_name", None)})
+            return 1
+    logger = configure_logging()
+    started = time.monotonic()
+    permission_credential: Credential | None = None
+    instance_for_hint = None
+    try:
+        inventory = Inventory.load(args.inventory)
+        if args.command == "list":
+            rows = [redact(asdict(instance)) for instance in
+                    inventory.filter(args.type, args.env, args.group, args.tag)]
+            _emit(args, "list", {"databases": rows})
+        elif args.command == "show":
+            shown = inventory.get(args.database_id)
+            effective = public_connection_settings(
+                shown.db_type, _effective_settings(shown, args.settings)
+            )
+            effective["host"] = shown.host
+            effective["port"] = shown.port
+            if shown.db_type == DatabaseType.ORACLE:
+                effective["target"] = shown.service_name or shown.sid
+            else:
+                effective["target"] = shown.database or (
+                    "master" if shown.db_type == DatabaseType.SQLSERVER else
+                    "postgres" if shown.db_type == DatabaseType.POSTGRESQL else None
+                )
+            if shown.db_type == DatabaseType.SQLSERVER:
+                effective["selected_driver"] = database_runtime_status(
+                    DatabaseType.SQLSERVER
+                ).get("selected_native_driver")
+            _emit(args, "show", redact({**asdict(shown), "effective_connection": effective}))
+        elif args.command == "validate":
+            scripts = SqlScriptRegistry(args.sql_root).validate()
+            validation_result = {"success": True, "instance_count": len(inventory.instances),
+                                "sql_script_count": len(scripts)}
+            if args.json:
+                _emit(args, "validate", validation_result)
+            else:
+                print(f"Validation OK: {len(inventory.instances)} instances, {len(scripts)} SQL scripts")
+        elif args.command in {"test-connection", "collect", "diagnose", "permissions", "check", "status"}:
+            instance = inventory.get(args.database_id)
+            instance_for_hint = instance
+            if instance.db_type not in {DatabaseType.SQLSERVER, DatabaseType.POSTGRESQL,
+                                        DatabaseType.MYSQL, DatabaseType.ORACLE}:
+                raise ToolkitError("NotImplemented", "Not implemented for this database type.")
+            active_provider = provider or (
+                _InjectedCredentialProvider(credential_store) if credential_store is not None else
+                CredentialResolver(
+                    KeyringCredentialStore(), encrypted_store,
+                    PromptCredentialProvider(), getattr(args, "credential_backend", "auto"),
+                    database_id=instance.id,
+                )
+            )
+            if args.command == "permissions" and (args.generate_grant or args.generate_revoke):
+                permission_credential = active_provider.get_credential(instance.credential_alias)
+                definitions = PERMISSION_REGISTRY.get(instance.db_type, {})
+                requested = [args.feature] if args.feature else list(ALL_FEATURES)
+                supported = [feature for feature in requested if feature in definitions]
+                rows = [{"feature": feature,
+                         "status": PermissionStatus.UNKNOWN.value if feature in definitions else PermissionStatus.UNSUPPORTED.value,
+                         "missing_required": (),
+                         "impact": definitions[feature].impact if feature in definitions else
+                                  "Feature is not implemented for this database type."}
+                         for feature in requested]
+                generated_sql = render_sql(instance.db_type, supported, permission_credential.username,
+                                           instance.database, revoke=args.generate_revoke)
+                _emit(args, "permissions", {"database_id": instance.id,
+                                             "account": permission_credential.username,
+                                             "features": rows, "generated_sql": generated_sql,
+                                             "toolkit_executes_grants": False})
+                return 0
+            if args.command == "diagnose":
+                if args.scenario == "plan" and (type(args.session) is not int or not 1 <= args.session <= 32767):
+                    raise ToolkitError("InvalidSession", "Plan diagnosis requires --session with a positive session ID.")
+                if args.scenario != "plan" and args.session is not None:
+                    raise ToolkitError("InvalidSession", "--session is only supported for plan diagnosis.")
+                if args.scenario == "plan" and instance.db_type != DatabaseType.SQLSERVER:
+                    raise ToolkitError("NotImplemented", "Plan diagnosis is not implemented for this database type.")
+            if driver is None:
+                runtime = database_runtime_status(instance.db_type)
+                if runtime.get("status") not in {
+                    RuntimeStatus.READY.value, RuntimeStatus.READY_WITH_WARNING.value
+                }:
+                    if instance.db_type == DatabaseType.SQLSERVER:
+                        runtime_detail = (
+                            "SQL Server runtime unavailable. "
+                            f"pyodbc: {runtime.get('status', 'UNKNOWN')}; "
+                            f"ODBC Driver 18: {runtime.get('driver18_status', 'UNKNOWN')}; "
+                            f"ODBC Driver 17: {runtime.get('driver17_status', 'UNKNOWN')}. "
+                            "Run `dba doctor` for details."
+                        )
+                    else:
+                        runtime_detail = (
+                            f"{instance.db_type.value} runtime unavailable: "
+                            f"{runtime.get('package', 'Python driver')} "
+                            f"is {runtime.get('status', 'UNKNOWN')}. "
+                            "Run `dba doctor` for details."
+                        )
+                    raise ToolkitError(
+                        "DriverUnavailable",
+                        runtime_detail,
+                    )
+            if instance.db_type == DatabaseType.ORACLE:
+                if args.command == "collect" and args.collector not in ORACLE_COLLECTORS:
+                    raise ToolkitError("NotImplemented", "Collector not implemented for Oracle.")
+                oracle_settings = _effective_settings(instance, args.settings)
+                assert isinstance(oracle_settings, OracleSettings)
+                adapter_instance: SQLServerAdapter | PostgreSQLAdapter | MySQLAdapter | OracleAdapter = OracleAdapter(
+                    instance, active_provider, SqlScriptRegistry(args.sql_root),
+                    oracle_settings, driver=driver)
+            elif instance.db_type == DatabaseType.MYSQL:
+                if args.command == "collect" and args.collector not in MYSQL_COLLECTORS:
+                    raise ToolkitError("NotImplemented", "Collector not implemented for MySQL.")
+                mysql_settings = _effective_settings(instance, args.settings)
+                assert isinstance(mysql_settings, MySQLSettings)
+                adapter_instance = MySQLAdapter(
+                    instance, active_provider, SqlScriptRegistry(args.sql_root),
+                    mysql_settings, driver=driver)
+            elif instance.db_type == DatabaseType.POSTGRESQL:
+                if args.command == "collect" and args.collector not in PG_COLLECTORS:
+                    raise ToolkitError("NotImplemented", "Collector not implemented for PostgreSQL.")
+                pg_settings = _effective_settings(instance, args.settings)
+                assert isinstance(pg_settings, PostgreSQLSettings)
+                adapter_instance = PostgreSQLAdapter(
+                    instance, active_provider, SqlScriptRegistry(args.sql_root),
+                    pg_settings, driver=driver)
+            else:
+                if args.command == "collect" and args.collector not in COLLECTORS:
+                    raise ToolkitError("NotImplemented", "Collector not implemented for SQL Server.")
+                sql_settings = _effective_settings(instance, args.settings)
+                assert isinstance(sql_settings, SQLServerSettings)
+                adapter_instance = SQLServerAdapter(
+                    instance, active_provider, SqlScriptRegistry(args.sql_root),
+                    sql_settings, driver=driver)
+            if args.command in {"permissions", "collect", "diagnose", "test-connection", "check", "status"}:
+                permission_credential = active_provider.get_credential(instance.credential_alias)
+                adapter_instance.provider = _CachedCredentialProvider(permission_credential)
+            output: dict[str, Any] = {}
+            with adapter_instance as adapter:
+                if args.command == "permissions":
+                    definitions = PERMISSION_REGISTRY.get(instance.db_type, {})
+                    requested = ([args.feature] if args.feature else list(ALL_FEATURES))
+                    supported = [feature for feature in requested if feature in definitions]
+                    if not requested:
+                        raise ToolkitError("NotImplemented", "No permission features are implemented for this database type.")
+                    observed = set(getattr(adapter, "permission_observations", set()))
+                    rows = []
+                    for feature in requested:
+                        if feature not in definitions:
+                            rows.append({"feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
+                                         "missing_required": (), "impact": "Feature is not implemented for this database type."})
+                            continue
+                        evidence = observed
+                        requirement = requirements_for(instance.db_type, feature, adapter.get_server_version())
+                        assessment = assess_permissions(requirement, evidence)
+                        rows.append({"feature": feature, **assessment,
+                                     "missing_reasons": privilege_reasons(
+                                         requirement, assessment["missing_required"]
+                                     ),
+                                     **({"impact": definitions[feature].impact}
+                                        if assessment["status"] != PermissionStatus.READY else {})})
+                    generated: str | None = None
+                    if args.generate_grant or args.generate_revoke:
+                        assert permission_credential is not None
+                        generated = render_sql(instance.db_type, supported, permission_credential.username,
+                                               instance.database, adapter.get_server_version(),
+                                               revoke=args.generate_revoke)
+                    output = {"database_id": instance.id,
+                              "success": True,
+                              "account": getattr(adapter, "current_user", None)
+                              or (permission_credential.username if permission_credential else None),
+                              "features": rows, "generated_sql": generated,
+                              "toolkit_executes_grants": False}
+                elif args.command == "check":
+                    runtime = database_runtime_status(instance.db_type)
+                    runtime_packages = runtime_info()
+                    python_component = runtime_packages["python"]
+                    driver_component = runtime_packages["drivers"].get(instance.db_type.value, {})
+                    observed = set(getattr(adapter, "permission_observations", set()))
+                    definitions = PERMISSION_REGISTRY.get(instance.db_type, {})
+                    permission_rows: list[dict[str, Any]] = []
+                    for feature in ALL_FEATURES:
+                        if feature not in definitions:
+                            permission_rows.append({"feature": feature, "status": "UNSUPPORTED"})
+                            continue
+                        requirement = requirements_for(
+                            instance.db_type, feature, adapter.get_server_version()
+                        )
+                        assessment = assess_permissions(requirement, observed)
+                        permission_rows.append({"feature": feature, **assessment,
+                                                "missing_reasons": privilege_reasons(
+                                                    requirement, assessment["missing_required"]
+                                                ),
+                                                **({"impact": definitions[feature].impact}
+                                                   if assessment["status"] != PermissionStatus.READY else {})})
+                    effective = public_connection_settings(instance.db_type, adapter.settings)
+                    effective.update({"host": instance.host, "port": instance.port,
+                                      "database": instance.database or (
+                                          "master" if instance.db_type == DatabaseType.SQLSERVER else None
+                                      ), "target": f"{instance.host}:{instance.port}",
+                                      "status": "READY"})
+                    if isinstance(adapter, SQLServerAdapter):
+                        effective["driver"] = adapter.odbc_driver
+                        effective["tls"] = (
+                            f"Encrypt={'yes' if effective.get('encrypt') else 'no'}; "
+                            f"TrustServerCertificate={'yes' if effective.get('trust_server_certificate') else 'no'}"
+                        )
+                    states = {row["status"] for row in permission_rows
+                              if row["status"] != "UNSUPPORTED"}
+                    if "MISSING" in states:
+                        overall = "PARTIAL" if "READY" in states else "MISSING"
+                    elif "PARTIAL" in states:
+                        overall = "PARTIAL"
+                    elif runtime.get("status") == RuntimeStatus.READY_WITH_WARNING.value:
+                        overall = RuntimeStatus.READY_WITH_WARNING.value
+                    else:
+                        overall = RuntimeStatus.READY.value
+                    warnings = tuple([str(runtime["warning"])] if runtime.get("warning") else [])
+                    check_result = CheckResult(
+                        {"id": instance.id, "db_type": instance.db_type.value,
+                         "environment": instance.environment},
+                        {"status": runtime.get("status"),
+                         "python": python_component.get("version"),
+                         "driver": runtime.get("selected_native_driver") or driver_component.get("package"),
+                         "driver_version": driver_component.get("version")},
+                        {"alias": instance.credential_alias,
+                         "backend": getattr(active_provider, "last_backend", None)
+                         or "Provided Credential Provider", "status": "READY"},
+                        effective, tuple(permission_rows), overall, warnings,
+                        _account_security(adapter),
+                    )
+                    output = asdict(check_result) | {"success": overall in {
+                        "READY", "READY_WITH_WARNING", "PARTIAL"
+                    }}
+                elif args.command == "status":
+                    collectors = (ORACLE_COLLECTORS if isinstance(adapter, OracleAdapter)
+                                  else MYSQL_COLLECTORS if isinstance(adapter, MySQLAdapter)
+                                  else PG_COLLECTORS if isinstance(adapter, PostgreSQLAdapter)
+                                  else COLLECTORS)
+                    names = ("server-info", "database-status", "active-sessions",
+                             "active-requests", "long-running")
+                    collector_adapter = cast(Any, adapter)
+                    results = {name: collectors[name](collector_adapter).collect(instance)
+                               for name in names if name in collectors}
+                    warnings = tuple(
+                        f"{name}: " + (f"collection failed ({result.error_type or 'unknown'})"
+                                        if not result.success else "result truncated at configured row limit")
+                        for name, result in results.items()
+                        if not result.success or result.truncated
+                    )
+                    sessions = results.get("active-sessions")
+                    requests = results.get("active-requests")
+                    long_running = results.get("long-running")
+                    databases = results.get("database-status")
+                    state_counts: dict[str, int] = {}
+                    if databases and databases.success:
+                        for row in databases.rows:
+                            state_name = str(row.get("state", "UNKNOWN"))
+                            state_counts[state_name] = state_counts.get(state_name, 0) + 1
+                    server_info = results.get("server-info")
+                    version_value = None
+                    if server_info and server_info.rows:
+                        version_value = str(server_info.rows[0].get("product_version") or
+                                            server_info.rows[0].get("version") or "UNKNOWN")
+                    status_result = StatusResult(
+                        {"id": instance.id, "db_type": instance.db_type.value,
+                         "target": f"{instance.host}:{instance.port}"}, version_value,
+                        "READY", sessions.row_count if sessions else None,
+                        requests.row_count if requests else None,
+                        long_running.row_count if long_running else None,
+                        state_counts, "PARTIAL" if warnings else "READY", warnings,
+                    )
+                    output = asdict(status_result) | {"success": not warnings}
+                elif args.command == "test-connection":
+                    output = {
+                        "database_id": instance.id,
+                        "success": True,
+                        "version": adapter.get_server_version(),
+                        "preflight": adapter.preflight_checks,
+                        "privilege_classification": _account_security(adapter),
+                        "account_security": _account_security(adapter),
+                        "credential": {
+                            "alias": instance.credential_alias,
+                            "backend": getattr(active_provider, "last_backend", None)
+                            or "Provided Credential Provider",
+                        },
+                    }
+                    effective = public_connection_settings(instance.db_type, adapter.settings)
+                    effective["host"] = instance.host
+                    effective["port"] = instance.port
+                    if isinstance(adapter, SQLServerAdapter):
+                        effective["driver"] = adapter.odbc_driver
+                        effective["database"] = instance.database or "master"
+                    else:
+                        if instance.db_type == DatabaseType.ORACLE:
+                            effective["target"] = instance.service_name or instance.sid
+                        else:
+                            effective["target"] = instance.database or (
+                                "postgres" if instance.db_type == DatabaseType.POSTGRESQL else None
+                            )
+                    output["connection"] = effective
+                elif args.command == "diagnose":
+                    report: DiagnosticReport
+                    if args.scenario == "disk-growth":
+                        report = diagnose_disk_growth(adapter)
+                        output = {"success": not report.details["incomplete"], "report": asdict(report)}
+                    elif args.scenario == "slow":
+                        if isinstance(adapter, MySQLAdapter):
+                            requirement = requirements_for(
+                                instance.db_type, "slow", adapter.get_server_version()
+                            )
+                            assessment = assess_permissions(
+                                requirement, adapter.permission_observations
+                            )
+                            if assessment["status"] == PermissionStatus.MISSING:
+                                account = adapter.current_user or ""
+                                missing = assessment["missing_required"]
+                                grant = render_privileges_sql(
+                                    instance.db_type, missing, account, instance.database,
+                                    adapter.get_server_version(),
+                                )
+                                raise ToolkitError(
+                                    "MissingPermission",
+                                    "Required monitoring permissions are missing for slow diagnosis.",
+                                    permission_readiness={
+                                        "feature": "slow", **assessment,
+                                        "missing_reasons": privilege_reasons(requirement, missing),
+                                        "impact": requirement.impact,
+                                        "account_security": adapter.privilege_classification,
+                                        "suggested_grant": grant,
+                                        "toolkit_executed": False,
+                                        "dba_approval_required": True,
+                                    },
+                                )
+                        report = (diagnose_oracle_slow(adapter) if isinstance(adapter, OracleAdapter)
+                                  else diagnose_mysql_slow(adapter) if isinstance(adapter, MySQLAdapter)
+                                  else diagnose_pg_slow(adapter) if isinstance(adapter, PostgreSQLAdapter)
+                                  else diagnose_slow(adapter))
+                        output = {"success": not report.details["incomplete"], "report": asdict(report)}
+                    else:
+                        assert isinstance(adapter, SQLServerAdapter)
+                        plan_report, plan_xml = diagnose_plan(adapter, args.session)
+                        report = plan_report
+                        output = {"success": plan_report.details["plan_available"],
+                                  "report": asdict(plan_report)}
+                else:
+                    result = (ORACLE_COLLECTORS[args.collector](adapter).collect(instance)
+                              if isinstance(adapter, OracleAdapter)
+                              else MYSQL_COLLECTORS[args.collector](adapter).collect(instance)
+                              if isinstance(adapter, MySQLAdapter)
+                              else PG_COLLECTORS[args.collector](adapter).collect(instance)
+                              if isinstance(adapter, PostgreSQLAdapter)
+                              else COLLECTORS[args.collector](adapter).collect(instance))
+                    output = asdict(result)
+            if (not output.get("success", True)
+                    and output.get("error_type") in {"MissingPermission", "PreflightDenied",
+                                                       "QueryDenied", "CapabilityUnavailable"}):
+                feature = _feature_for_command(args)
+                if feature and instance.db_type in PERMISSION_REGISTRY:
+                    definition = PERMISSION_REGISTRY[instance.db_type].get(feature)
+                    if definition:
+                        evidence_text = str(output.get("error_message", ""))
+                        evidence_upper = evidence_text.upper()
+                        missing = tuple(item for item in definition.required
+                                        if item.upper() in evidence_upper
+                                        or (item.upper().startswith("SELECT ")
+                                            and item.upper()[7:] in evidence_upper))
+                        output["permission_missing"] = {
+                            "feature": feature,
+                            "missing_privileges": missing,
+                            "required_privileges": definition.required,
+                            "impact": definition.impact,
+                            "suggested_grant": render_sql(instance.db_type, (feature,),
+                                                           permission_credential.username,
+                                                           instance.database) if permission_credential else None,
+                            "toolkit_executed_grant": False,
+                            "evidence": output.get("error_message"),
+                        }
+            if args.command == "diagnose":
+                report_path = _diagnostic_report_path(instance.id, args.scenario, args.report)
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                incident_summary = build_incident_summary(report, str(report_path))
+                output["incident_summary"] = asdict(incident_summary)
+                output["report_path"] = str(report_path)
+                plan_artifact_path: Path | None = None
+                if args.scenario == "plan" and plan_xml:
+                    plan_artifact_path = report_path.with_suffix(".sqlplan")
+                model = build_report_model(report, incident_summary,
+                                           plan_artifact=(plan_artifact_path.name
+                                                          if plan_artifact_path else None))
+                html_content = render_bounded(model, HtmlReportRenderer().render)
+                with report_path.open("x", encoding="utf-8") as report_file:
+                    report_file.write(html_content)
+                if plan_artifact_path is not None and plan_xml is not None:
+                    created_plan = False
+                    try:
+                        with plan_artifact_path.open("x", encoding="utf-8", newline="") as plan_file:
+                            created_plan = True
+                            plan_file.write(plan_xml)
+                        output["plan_artifact_path"] = str(plan_artifact_path)
+                    except Exception:
+                        if created_plan:
+                            plan_artifact_path.unlink(missing_ok=True)
+                        report_path.unlink(missing_ok=True)
+                        raise
+                if args.format == "console" and not args.json:
+                    print(render_incident_summary(incident_summary, verbose=args.verbose))
+                else:
+                    _emit(args, "diagnose", redact(output))
+            else:
+                _emit(args, args.command, redact(output))
+            if not output["success"]:
+                return 1
+        logger.info(
+            "event",
+            extra={
+                "event": {
+                    "module": "cli",
+                    "result": "ok",
+                    "elapsed_time": time.monotonic() - started,
+                    "database_id": getattr(args, "database_id", None),
+                }
+            },
+        )
+        return 0
+    except KeyboardInterrupt:
+        interrupted = {
+                    "success": False,
+                    "error_type": "Interrupted",
+                    "error_message": "Operation interrupted.",
+                }
+        _emit(args, args.command or "help", interrupted)
+        return 130
+    except (OSError, ValidationError, UnicodeError, ToolkitError) as exc:
+        # YAML/OS exceptions may contain supplied content: emit only safe categories.
+        detail = (
+            str(exc)
+            if isinstance(exc, (ValidationError, ToolkitError))
+            else "File could not be read"
+        )
+        failure: dict[str, Any] = {
+                    "success": False,
+                    "error_type": exc.error_type
+                    if isinstance(exc, ToolkitError)
+                    else type(exc).__name__,
+                    "error_message": detail,
+                }
+        detail_upper = detail.upper()
+        if isinstance(exc, ToolkitError) and exc.trigger_reason is not None:
+            failure["trigger_reason"] = exc.trigger_reason
+        if isinstance(exc, ToolkitError) and exc.permission_readiness is not None:
+            failure["permission_readiness"] = exc.permission_readiness
+            failure["privilege_classification"] = exc.permission_readiness.get("account_security")
+        database_error = getattr(exc, "database_error", None)
+        if database_error is not None:
+            vendor_payload = database_error.to_dict()
+            failure["error"] = vendor_payload
+            failure["database_type"] = vendor_payload.get("database_type")
+            failure["driver"] = vendor_payload.get("driver")
+        if instance_for_hint is not None:
+            failure["database_id"] = instance_for_hint.id
+            failure["target"] = f"{instance_for_hint.host}:{instance_for_hint.port}"
+            failure["alias"] = instance_for_hint.credential_alias
+            if database_error is not None:
+                safe_settings = public_connection_settings(
+                    instance_for_hint.db_type,
+                    _effective_settings(instance_for_hint, getattr(args, "settings", None)),
+                )
+                failure["effective_connection"] = {
+                    "host": instance_for_hint.host,
+                    "port": instance_for_hint.port,
+                    "database": instance_for_hint.database or "NOT_SET",
+                    "connect_timeout": safe_settings.get("connect_timeout"),
+                    "ssl": ("DISABLED" if safe_settings.get("ssl_disabled") is True else
+                            "ENABLED" if safe_settings.get("ssl_disabled") is False else "DEFAULT"),
+                }
+            try:
+                selected_driver = database_runtime_status(
+                    instance_for_hint.db_type
+                ).get("selected_native_driver")
+                if selected_driver:
+                    failure.setdefault("driver", selected_driver)
+                safe_settings = (public_connection_settings(
+                    instance_for_hint.db_type,
+                    _effective_settings(instance_for_hint, getattr(args, "settings", None)),
+                ) if instance_for_hint.db_type in {DatabaseType.SQLSERVER, DatabaseType.POSTGRESQL,
+                                                   DatabaseType.MYSQL, DatabaseType.ORACLE} else {})
+                if "encrypt" in safe_settings:
+                    failure["tls"] = (
+                        f"Encrypt={'yes' if safe_settings.get('encrypt') else 'no'}; "
+                        f"TrustServerCertificate={'yes' if safe_settings.get('trust_server_certificate') else 'no'}"
+                    )
+            except (ToolkitError, ValueError):
+                pass
+            if isinstance(exc, ToolkitError) and exc.error_type == "PrivilegedAccount":
+                failure["account"] = permission_credential.username if permission_credential else None
+                failure["privilege_classification"] = {
+                    "classification": "PRIVILEGED",
+                    "trigger_reason": exc.trigger_reason,
+                }
+            elif isinstance(exc, ToolkitError) and exc.error_type == "PrivilegeClassificationUnknown":
+                failure["privilege_classification"] = {
+                    "classification": "UNKNOWN", "trigger_reason": exc.trigger_reason,
+                }
+            elif isinstance(exc, ToolkitError) and exc.error_type == "UnsafeMonitoringAccount":
+                failure["account_security"] = {
+                    "classification": "NON_PRIVILEGED",
+                    "write_capability_detected": exc.trigger_reason,
+                }
+        if args.command == "permissions" and instance_for_hint is not None:
+            definitions = PERMISSION_REGISTRY.get(instance_for_hint.db_type, {})
+            requested = [args.feature] if args.feature else list(ALL_FEATURES)
+            rows = []
+            for feature in requested:
+                definition = definitions.get(feature)
+                if definition is None:
+                    rows.append({"feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
+                                 "missing_required": ()})
+                    continue
+                missing = tuple(item for item in definition.required
+                                if item.upper() in detail_upper
+                                or (item.upper().startswith("SELECT ")
+                                    and item.upper()[7:] in detail_upper))
+                status = PermissionStatus.MISSING if missing else PermissionStatus.UNKNOWN
+                rows.append({"feature": feature, "status": status.value,
+                             "missing_required": missing, "impact": definition.impact})
+            failure["features"] = rows
+            failure["toolkit_executes_grants"] = False
+        if isinstance(exc, ToolkitError) and exc.error_type in {
+            "MissingPermission", "PreflightDenied", "QueryDenied", "CapabilityUnavailable"
+        }:
+            feature = _feature_for_command(args)
+            if args.command == "check" and instance_for_hint is not None:
+                definitions = PERMISSION_REGISTRY.get(instance_for_hint.db_type, {})
+                detail_upper = detail.upper()
+                affected = [name for name, definition in definitions.items()
+                            if any(_permission_matches_evidence(item, detail_upper)
+                                   or (item.upper().startswith("SELECT ")
+                                       and _permission_matches_evidence(item[7:], detail_upper))
+                                   for item in definition.required)]
+                if affected and permission_credential is not None:
+                    missing_items = sorted({item for name in affected
+                                            for item in requirements_for(
+                                                instance_for_hint.db_type, name
+                                            ).required
+                                            if _permission_matches_evidence(item, detail_upper)
+                                            or (item.upper().startswith("SELECT ")
+                                                and _permission_matches_evidence(item[7:], detail_upper))})
+                    failure["features"] = [
+                        {"feature": name, "status": "MISSING",
+                         "missing_required": [item for item in requirements_for(
+                             instance_for_hint.db_type, name
+                         ).required if item in missing_items],
+                         "impact": definitions[name].impact}
+                        for name in affected
+                    ]
+                    failure["permission_missing"] = {
+                        "feature": ", ".join(affected),
+                        "missing_privileges": missing_items,
+                        "required_privileges": missing_items,
+                        "impact": "; ".join(definitions[name].impact for name in affected),
+                        "suggested_grant": render_sql(
+                            instance_for_hint.db_type, affected, permission_credential.username,
+                            instance_for_hint.database,
+                        ),
+                        "toolkit_executed_grant": False,
+                        "evidence": detail,
+                    }
+        if (isinstance(exc, ToolkitError) and exc.database_error is not None
+                and exc.error_type == "PermissionInspectionFailed"):
+            vendor_detail = getattr(exc.database_error, "to_dict", None)
+            if callable(vendor_detail):
+                failure["error"] = vendor_detail()
+            failure["privilege_classification"] = {"classification": "UNKNOWN"}
+        _emit(args, args.command or "help", failure)
+        logger.error(
+            "event",
+            extra={
+                "event": {
+                    "module": "cli",
+                    "result": "failed",
+                    "elapsed_time": time.monotonic() - started,
+                    "error_type": getattr(exc, "error_type", type(exc).__name__),
+                    "database_id": instance_for_hint.id if instance_for_hint else None,
+                    "target": (f"{instance_for_hint.host}:{instance_for_hint.port}"
+                               if instance_for_hint else None),
+                    "database_type": getattr(database_error, "database_type", None),
+                    "driver": getattr(database_error, "driver", None),
+                    "vendor_code": getattr(database_error, "vendor_code", None),
+                    "sqlstate": getattr(database_error, "sqlstate", None),
+                    "classification": getattr(database_error, "classification", None),
+                    "sanitized_message": getattr(database_error, "message", None),
+                }
+            },
+        )
+        return 1

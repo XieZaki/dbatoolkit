@@ -1,0 +1,7 @@
+name: version_probe
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 1
+reviewed: true
+description: Offline fixture selecting a constant; does not query server version.

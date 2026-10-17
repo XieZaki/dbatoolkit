@@ -1,0 +1,4 @@
+PyYAML>=6.0,<7
+keyring>=25,<26
+cryptography>=42,<47
+argon2-cffi>=23.1,<26

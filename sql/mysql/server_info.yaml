@@ -1,0 +1,7 @@
+name: server_info
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: MySQL server version, identity, uptime and read-only flags.

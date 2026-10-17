@@ -1,0 +1,88 @@
+# 长期项目约束
+
+- 项目是内部 DBA 只读采集、检查、关联、诊断、报告工具；工具查清楚，DBA 做决定。
+- 网络：DBA → 堡垒机 → 运维机器 → 生产数据库。只从运维机器主动连接数据库；不依赖生产服务器反向连接。
+- 生产无 Internet。安装依赖必须提前在匹配目标 OS/Python 的联网机器准备离线 wheelhouse；禁止运行时下载。
+- 优先 SQL Server、PostgreSQL、MySQL、Oracle；Redis/MongoDB 后续扩展。
+- 当前 V0.8 在 V0.7.1 基础上增加 SQL Server、PostgreSQL、MySQL、Oracle 的 disk-growth 当前状态诊断；各库只连接用户指定实例，不扫描 Inventory 执行诊断，不自动安装驱动。
+- 默认资产目录是 config/inventory/，有 YAML 时优先于旧 config/inventory.yaml；演示资产只在 examples/inventory/，不得混入生产资产池。跨文件 ID 必须唯一，来源路径仅用于校验/调试。
+- 永远不得自动执行 KILL、terminate/cancel、任何数据/DDL/权限变更、重启、切换、提升、扩容、参数修改、索引变更或强制计划。
+- 不提供 --execute、--force 或其他执行参考命令/绕过只读限制的接口。
+- ReferenceCommand 只保存文本，永远无 execute 方法；DBA 在原生客户端人工判断与执行。
+- PostgreSQL pg_cancel_backend/pg_terminate_backend 只可作为已确认 Root Blocker 的纯文本 ReferenceCommand；Toolkit 不执行函数，也不自动生成 SQL 变更语句。循环、不完整或截断采样不生成参考命令。
+- MySQL KILL QUERY/KILL 只可作为已确认 Root Blocker 的纯文本 ReferenceCommand；Toolkit 不执行。Sleep + 未结束事务必须有关联 InnoDB 事务证据，不能仅凭 Sleep 判断。循环、不完整或截断采样不生成参考命令。
+- KILL 只能由已知正整数根会话生成参考文本；缺失根会话不生成命令。循环、特殊负数 blocker、采样截断和缺失数据必须显式报告。Sleeping 未提交事务结论必须关联事务 DMV，不能只用 open_transaction_count。
+- 仅显式调用的隔离 Docker 集成测试可按用户授权创建测试对象、运行测试事务并 ROLLBACK/清理；这些脚本位于 tests/integration，不能通过 Toolkit 或正式 Registry 执行。诊断账号始终只读，禁止 KILL。
+- Inventory 仅存 credential_alias，不保存 password/pwd/secret/token。日志禁止凭据与带密码连接串。
+- 生产只使用专用最小权限监控账号；禁止 sa/root/SYS/SYSTEM/postgres 超级用户及其他最高权限账号。
+- Credential Provider 优先从 Windows Credential Manager 或 Linux 安全系统 Keyring/Secret Service 读取 credential_alias；已验证不存在时允许统一 CredentialResolver 做 JIT 隐藏输入并明确征求安全保存同意。拒绝保存只限本次进程使用；不得自动初始化 Encrypted Store。现有加密 Store 解锁、认证、格式或权限失败必须 fail closed，不能回退到 JIT。
+- Credential Store 优先使用 OS 安全密钥环；允许明确初始化的 AES-256-GCM + Argon2id 用户级加密 Store；禁止明文/自制加密持久化和 CLI 密码参数。`credentials list/show/test/delete/set` 不显示密码、hash 或密文；删除和覆盖必须交互确认。生产拒绝 Mock，包括开发中创建后传给生产 Adapter 的情况。
+- Credential Store 可继续扩展企业 Vault/PAM Provider；适配器不直接依赖凭据存储实现。
+- Credential session data must remain in process memory only and must never be persisted to disk, environment variables, registry, shell history, logs, or reports.
+- Credential session IPC must be restricted to the current OS user and must fail closed when peer identity cannot be verified.
+- Master passwords must not be retained after encrypted credential store unlock. Credential session expiration must be absolute and bounded.
+- Credential Session Agent may retain a derived data key only in process memory to perform an explicitly approved encrypted-store JIT update; it must never retain the master password, persist the key, and must invalidate/clear the session immediately after a successful mutation.
+- Inventory `connection` 仅允许按数据库类型审核过的非敏感连接参数。统一 Resolver 顺序为 instance.connection > 对应数据库 runtime settings > 代码安全默认值；未知项和任意层级的敏感字段必须由 validate 拒绝。
+- SQL 独立存储；正式加载必须 READ_ONLY 且 reviewed=true，设置 timeout_seconds/max_rows。
+- MySQL Registry 仅允许精确固定的 `SHOW BINARY LOGS` 作为 SELECT 以外的只读元数据查询；需要专用监控账号具备只读 `REPLICATION CLIENT`，不得使用 SUPER/BINLOG_ADMIN。
+- 静态 SQL 检查只是附加保护，不是权限控制或安全证明。审查函数副作用，最终边界是数据库监控账号权限。
+- Adapter 只接受自身 Registry 签发并在执行前复核内容/元数据未变更的已审查脚本。禁止任意 SQL 字符串执行接口。
+- SQL Server 使用 pyodbc，Microsoft ODBC Driver 18 优先、17 兼容回退；默认连接超时 5 秒、显式加密并验证证书；autocommit=true，不执行初始化修改语句。每次执行前为新游标设置有效超时=min(metadata.timeout_seconds, runtime.query_timeout)。
+- PostgreSQL 使用 psycopg 3；默认 SSL verify-full、连接超时 5 秒。连接启动参数启用只读事务和有界 statement_timeout，诊断连接 autocommit，断开时关闭；无任意 SQL、修改会话状态的初始化 SQL 或后台取消动作。监控账号需要跨会话统计与设置读取能力，不能是超级用户或具管理属性的账号。
+- MySQL 使用 PyMySQL 1.1 系列；默认 SSL 验证证书和主机名、连接超时 5 秒，autocommit、禁用 local infile。生产只允许专用监控账号；预检拒绝已知非监控直接权限及活动角色，并实际探测 Performance Schema、InnoDB 事务和锁视图。预检不能证明所有隐含或存储程序权限都只读。流式游标有界提取，截断时关闭连接，避免游标关闭时遍历全部剩余行；read_timeout 是网络读取限制，不等于整批查询绝对墙钟上限。
+- Account Security classification and Permission Readiness are independent. Missing permissions never imply a privileged account. Assess each Feature from the shared Permission Registry; show required/optional gaps, capability impact, and text-only minimum grants. `READY` has no generic impact warning. MySQL classifies grants using privilege, scope, grant option and role/principal evidence; global read-only `SELECT` is not admin, while known administrative privileges and grant option remain high-risk. Unresolved roles are `UNKNOWN` and fail closed. Never execute GRANT/REVOKE or account-management SQL.
+- Oracle 使用 python-oracledb Thin；只接受 service_name 或 SID 其一，账号必须专用且仅持必要直接只读授权。预检拒绝 SYS/SYSTEM、已授角色、非监控系统权限、写权限对象授权和自有对象；核心 V_$ 视图必须可读。V_$LOCK、V_$LOCKED_OBJECT、V_$PROCESS、V_$SESSION_WAIT 缺少时标记能力不足，锁链可降级为 V$SESSION 证据。Toolkit 不执行权限变更；call_timeout 限制驱动调用而非完整流程墙钟。Oracle KILL SESSION 仅为已确认单实例完整根会话的纯文本 ReferenceCommand；RAC 跨实例快照缺失时不生成。任何 Oracle 诊断 SQL 均来自 Registry。
+- fetchmany(max_rows) 有界读取，达到上限就标记 truncated=true（表示可能截断，不额外读取整批结果）；请求 SQL 文本也有独立长度上限和标志。
+- 连接自动执行只读预检：拒绝 sysadmin/db_owner、非监控有效权限、权限信息截断、不完整或缺少跨会话可见性；实际探测四类基础采集能力。有效权限检查限于服务器和当前数据库，其他数据库仍需 DBA 按最小权限配置。
+- 不将 readonly 驱动提示、静态检查或预检宣称为所有数据库写权限的完整证明。当前不支持 Azure SQL Database 的不同权限模型；SQL 兼容目标为 2008 R2+，2022+ 使用 VIEW SERVER PERFORMANCE STATE。目标不等于已通过实机验证。
+- 旧版会话字段必须通过实际列能力检测选择受审查的兼容 SQL。sys.sysprocesses.dbid/open_tran 返回真实进程数据并注明来源，不能伪装为新版会话统计或编造缺失值。缺失列能力信息拒绝继续。Driver 18 与老服务器的 TLS/补丁互通须另行实测。
+- 查询失败关闭游标和连接；连接非 autocommit 时尝试 rollback，失败仍尝试 close。驱动异常仅映射为受控错误类别/消息，禁止透传原始异常或连接串。
+- NativeTool 与 SQL Collector 分离。未来 mysqlbinlog 仅使用远程协议及固定审查参数；禁止任意 shell 和数据库服务器破坏性操作。
+- Analyzer 按数据库类型和场景注册。disk-growth 可按空间来源调用数据库专属分析器，禁止把统一规则硬套不同数据库。
+- 预留 slow、blocking、long-transaction、disk-growth、log-growth、replication-lag、space、backup、connection、high-cpu、io、temp-growth。
+- SQL Server 日志：log_reuse_wait_desc、使用率、恢复模式、最老/长事务、备份、AG、复制、CDC、VLF、增长配置及突发事务。
+- PostgreSQL WAL：生成速率、pg_wal、LSN、slot/restart_lsn/confirmed_flush_lsn、retained WAL、流复制、归档、checkpoint、长事务、逻辑复制及写入压力。
+- MySQL 空间：Binlog、Relay Log、Redo、Undo、临时/慢/普通日志、InnoDB；未来 mysqlbinlog 按库/表/操作/事务/时间分析。
+- Oracle：Redo、Archive、FRA、Flashback、切换频率、归档目标、Data Guard 传输/应用延迟、RMAN、长事务及批量写入。
+- 空间来源需区分数据文件、各类事务日志、Temp/TempDB/Oracle TEMP、Backup、Audit、Trace、Dump、普通日志。
+- 不擅自增加 Web UI、微服务、Docker、CI/CD、无需求依赖或完整诊断。普通测试使用 Fake Driver，不连接任何真实数据库。
+
+- 新增 Collector、Analyzer 或 Registry SQL 引入系统视图、DMV、数据库角色或权限时，必须同步维护 dba/permissions.py 的 Permission Registry、对应 Preflight 和权限一致性测试。GRANT/REVOKE 只可生成为人工审核文本，永不从 Toolkit 执行。
+- Runtime 依赖以 deployment/runtime-manifest.yaml、pyproject extras 和 requirements lock 输入共同维护；生产 bootstrap 仅从本地 wheelhouse 使用 --no-index 安装，不自动访问互联网、执行 MSI/RPM/DEB、调用系统包管理器、修改 PATH/注册表或删除已有 .venv。
+- SQL Server ODBC 选择顺序固定为 Driver 18 优先、Driver 17 兼容回退；连接必须显式设置 Encrypt 与 TrustServerCertificate。Oracle 固定默认 Thin Mode，不把 Instant Client 作为必需依赖。
+
+## CLI presentation rules
+
+- Default CLI output is written for a human DBA. JSON is opt-in with `--json`; retain structured domain data for automation.
+- Structured SQL execution logs are internal output and must not dominate normal terminal output. Keep them in a protected log sink and continue redacting sensitive fields.
+- New features expose reusable domain results through the common presentation layer. Adapters and analyzers must not print directly to the terminal or build command-specific console output.
+- New diagnosis scenarios extend `dba diagnose <database_id> <scenario>` unless a documented architectural reason requires another command.
+- Human-facing errors explain the failure, impact, and next safe action when known. Never omit permission trigger details or expose credentials.
+- `dba check` and `dba status` compose existing runtime, credential, preflight, permission, and collector capabilities; they must not duplicate database-specific analyzer logic.
+- Human diagnose output is an incident-response summary, not a full evidence dump.
+- Default terminal output should prioritize impact, duration, root-cause candidate, source, recovery action, and termination risk.
+- Selected SQL, related sessions, Top-N analysis and evidence needed for DBA decisions belong in self-contained offline HTML reports; `--json` remains the structured machine-readable format within the collectors' own limits.
+- Reference termination commands may be displayed only when evidence is sufficient and must never be executed by Toolkit.
+- Any displayed termination command must include reason, transaction/rollback risk, and explicit `Toolkit Executed: NO`; missing, failed or truncated evidence suppresses the command.
+- Non-blocking slow SQL does not produce a session termination command by default; unknown rollback duration stays `UNKNOWN`.
+- Human diagnostic reports must be rendered as self-contained offline HTML with inline CSS and no external resources.
+- Raw dictionaries, lists, JSON dumps, internal Python representations and collector payloads must not appear in human-facing reports.
+- Report filenames use the database ID, scenario and local timestamp, with a numeric collision suffix instead of random UUIDs.
+- Analyzer and Adapter code must not construct HTML; use the shared ReportModel and renderer/template layer.
+- Escape all database-derived text before placing it in HTML. Long SQL and full unrelated session evidence stay collapsed.
+- Human HTML reports are bounded analysis artifacts, not raw collector dumps; `--json` is the structured diagnostic interface and JSONL is for Toolkit runtime events.
+- Human report tables use scenario-defined field sets, never dynamic unions of Collector fields. Session identity and request runtime are separate; unavailable-field explanations belong in Collection Quality.
+- Every human-report omission is disclosed with total, displayed and omitted counts. A report-level `HumanReportPolicy` owns row, SQL text, appendix and byte budgets; limits do not change Collector or Registry limits.
+- Immediate Recovery follows Incident Summary. Root blocker identity and critical paths, data completeness and safety statements must survive report-size reduction.
+- Default human HTML does not embed raw execution-plan XML. An available SQL Server plan may be saved as a paired `.sqlplan` artifact under the local reports path; treat it as sensitive and ignore it in Git.
+- Findings reference evidence sections instead of copying full evidence. Keep shared ReportModel/Renderer and split scenario presentation/database evidence normalization rather than creating per-database HTML renderers.
+- Real Inventory files are local site configuration and must not be committed. Examples use disabled assets and reserved example addresses/hostnames.
+- Credentials, reports, logs, SQLPLAN artifacts, local runtime environments, and secret-store exports must never be committed. `.gitignore` does not remove tracked or historical sensitive data.
+- Repository updates and upgrade scripts must preserve local Inventory and OS credential storage; scripts never rewrite Inventory, read credential values, delete reports, or modify databases.
+- Secret scanning checks Git-tracked files only and must not print candidate secret values. If the project is not inside a Git worktree, report that the tracking audit could not run.
+- Plaintext credentials must never be stored in Inventory, source code, repository, logs, reports, temporary files, or runtime configuration.
+- Encrypted credential stores must never be committed to Git, even when encrypted; disclosure enables offline password guessing.
+- Credential encryption keys and master passwords must never be stored beside encrypted credential stores or on disk.
+- Credential providers fail closed on authentication failure, corruption, unsupported cryptographic formats, and unsafe permissions; an existing store that fails to unlock must not fall back silently.
+- Database adapters consume resolved credentials and do not implement credential-storage-specific logic.
+- Debug and exception output follow the same secret-redaction rules as normal output.

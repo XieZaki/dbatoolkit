@@ -1,0 +1,73 @@
+# Python runtime and build output
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tmp/
+temp/
+tmp/
+build/
+dist/
+*.whl
+*.tar.gz
+*.key
+*.pem
+*.pfx
+*.p12
+*.secret
+*.secrets
+
+# Local site inventory only; keep the directory marker versioned
+config/inventory.yaml
+config/inventory/*.yaml
+config/inventory/**/*.yaml
+config/inventory/*.yml
+config/inventory/**/*.yml
+!config/inventory/.gitkeep
+# Runtime configuration is site-specific and must remain local.
+config/runtime.yaml
+config/runtime.yml
+config/sqlserver/
+config/**/*.local.yaml
+config/**/*.local.yml
+
+# Human and runtime artifacts
+reports/**
+logs/**
+*.sqlplan
+*.jsonl
+*.jsonl.*
+*.tmp
+*.bak
+
+# Local credential exports / environment files
+.env
+.env.*
+*.credential-store
+*.credential-store.*
+*.credential-export
+*.keyring
+credentials.enc
+*.credentials.enc
+credentials.enc.lock
+*.credentials.enc.lock
+master.key
+unlock.key
+recovery.key
+credential-password.txt
+mysql_login_test.py
+
+# Offline packages are supplied through approved internal channels
+deployment/wheelhouse/*
+!deployment/wheelhouse/README.md
+deployment/packages/*
+!deployment/packages/README.md
+
+# IDE and operating system
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

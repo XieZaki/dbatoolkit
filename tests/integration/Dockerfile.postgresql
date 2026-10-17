@@ -1,0 +1,9 @@
+FROM mcr.microsoft.com/devcontainers/python:3.12-bookworm
+USER root
+RUN python3 -m venv /opt/verification-venv \
+    && /opt/verification-venv/bin/pip install --no-cache-dir \
+       --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+       'psycopg[binary]>=3.2,<4' 'PyYAML>=6,<7'
+ENV PATH="/opt/verification-venv/bin:${PATH}"
+USER vscode
+WORKDIR /workspace

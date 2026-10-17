@@ -1,0 +1,2 @@
+-r base.lock
+oracledb>=2.0,<4

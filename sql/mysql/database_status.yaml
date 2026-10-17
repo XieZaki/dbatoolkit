@@ -1,0 +1,7 @@
+name: database_status
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 1000
+reviewed: true
+description: Schema metadata size and table counts without row scans.

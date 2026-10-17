@@ -1,0 +1,7 @@
+name: monitor_grants
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 100
+reviewed: true
+description: Current account grants used for monitor privilege classification and readiness.

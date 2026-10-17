@@ -1,0 +1,13 @@
+databases:
+  - id: example-oracle
+    name: Example Oracle
+    db_type: oracle
+    host: 192.0.2.20
+    port: 1521
+    service_name: EXAMPLE
+    credential_alias: example-only-oracle-monitor
+    enabled: false
+    environment: example
+    connection:
+      connect_timeout: 5
+      query_timeout: 15

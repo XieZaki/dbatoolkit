@@ -1,0 +1,7 @@
+name: disk_database
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 200
+reviewed: true
+description: Current database size and cumulative temporary statistics

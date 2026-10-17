@@ -1,0 +1,2 @@
+-r base.lock
+redis>=5.2,<7

@@ -1,0 +1,7 @@
+name: monitor_permissions
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 10000
+reviewed: true
+description: Reports effective permissions and token grants with principal source, scope, securable object, and module execution context; effective permissions do not establish grant provenance.

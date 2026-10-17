@@ -1,0 +1,7 @@
+name: active_requests
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 1000
+reviewed: true
+description: Reviewed bounded Oracle active requests monitoring query.

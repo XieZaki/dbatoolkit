@@ -1,0 +1,15 @@
+SELECT current_setting('server_version_num')::integer AS server_version_num,
+    current_setting('default_transaction_read_only') AS default_transaction_read_only,
+    current_setting('transaction_read_only') AS transaction_read_only,
+    current_user AS monitor_user,
+    r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolreplication, r.rolbypassrls,
+    pg_has_role(current_user, 'pg_read_all_stats', 'USAGE') AS read_all_stats,
+    pg_has_role(current_user, 'pg_read_all_settings', 'USAGE') AS read_all_settings,
+    EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid()) AS activity_visible,
+    EXISTS (SELECT 1 FROM pg_locks) AS locks_visible,
+    EXISTS (SELECT 1 FROM pg_stat_database) AS database_stats_visible,
+    EXISTS (SELECT 1 FROM pg_stat_replication) AS replication_visible,
+    EXISTS (SELECT 1 FROM pg_replication_slots) AS slots_visible,
+    EXISTS (SELECT 1 FROM pg_stat_archiver) AS archiver_visible,
+    EXISTS (SELECT 1 FROM pg_settings WHERE name = 'track_activities') AS settings_visible
+FROM pg_roles AS r WHERE r.rolname = current_user;

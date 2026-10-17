@@ -1,0 +1,51 @@
+runtime:
+  python:
+    supported: ">=3.11,<3.14"
+    primary: "3.12"
+  credential_store:
+    python_package: keyring
+    distribution: keyring
+    version: ">=25,<26"
+    windows_backend: Windows Credential Manager
+    linux_backends:
+      - Secret Service
+      - KWallet
+  credential_encryption:
+    cryptography:
+      python_package: cryptography
+      distribution: cryptography
+      version: ">=42,<47"
+    argon2:
+      python_package: argon2
+      distribution: argon2-cffi
+      version: ">=23.1,<26"
+
+drivers:
+  sqlserver:
+    python_package: pyodbc
+    distribution: pyodbc
+    version: ">=5.2,<6"
+    preferred_native_drivers:
+      - ODBC Driver 18 for SQL Server
+      - ODBC Driver 17 for SQL Server
+  postgresql:
+    python_package: psycopg
+    distribution: psycopg
+    version: ">=3.2,<4"
+  mysql:
+    python_package: pymysql
+    distribution: PyMySQL
+    version: ">=1.1,<1.2"
+  oracle:
+    python_package: oracledb
+    distribution: oracledb
+    version: ">=2.0,<4"
+    mode: thin
+  mongodb:
+    python_package: pymongo
+    distribution: pymongo
+    version: ">=4.10,<5"
+  redis:
+    python_package: redis
+    distribution: redis
+    version: ">=5.2,<7"

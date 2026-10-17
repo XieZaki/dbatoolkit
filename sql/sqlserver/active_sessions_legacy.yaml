@@ -1,0 +1,7 @@
+name: active_sessions_legacy
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 5000
+reviewed: true
+description: Reviewed legacy session read using sys.sysprocesses dbid/open_tran; explicit source columns describe compatibility semantics, no fabricated defaults.

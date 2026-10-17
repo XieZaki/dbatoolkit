@@ -1,0 +1,10 @@
+databases:
+  - id: example-mongodb
+    name: Example MongoDB
+    db_type: mongodb
+    host: 198.51.100.20
+    port: 27017
+    database: exampledb
+    credential_alias: example-only-mongodb-monitor
+    enabled: false
+    environment: example

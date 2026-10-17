@@ -1,0 +1,7 @@
+name: server_info
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: Reviewed constant/server metadata SELECT; no state-changing calls.

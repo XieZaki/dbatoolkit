@@ -1,0 +1,42 @@
+databases:
+  - id: demo-sqlserver
+    name: SQL Server offline example
+    db_type: sqlserver
+    host: sqlserver.example.invalid
+    port: 1433
+    database: null
+    service_name: null
+    instance_name: null
+    environment: development
+    level: non-production
+    role: primary
+    cluster: null
+    business: example
+    owner: DBA
+    credential_alias: monitoring-demo-sqlserver
+    enabled: false
+  - id: demo-postgresql
+    name: PostgreSQL offline example
+    db_type: postgresql
+    host: postgresql.example.invalid
+    port: 5432
+    environment: development
+    credential_alias: monitoring-demo-postgresql
+    enabled: false
+  - id: demo-mysql
+    name: MySQL offline example
+    db_type: mysql
+    host: mysql.example.invalid
+    port: 3306
+    environment: development
+    credential_alias: monitoring-demo-mysql
+    enabled: false
+  - id: demo-oracle
+    name: Oracle offline example
+    db_type: oracle
+    host: oracle.example.invalid
+    port: 1521
+    service_name: EXAMPLE
+    environment: development
+    credential_alias: monitoring-demo-oracle
+    enabled: false

@@ -1,0 +1,14 @@
+databases:
+  - id: example-postgresql
+    name: Example PostgreSQL
+    db_type: postgresql
+    host: 198.51.100.10
+    port: 5432
+    database: exampledb
+    credential_alias: example-only-postgresql-monitor
+    enabled: false
+    environment: example
+    connection:
+      sslmode: verify-full
+      connect_timeout: 5
+      query_timeout: 15

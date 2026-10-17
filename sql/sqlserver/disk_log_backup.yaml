@@ -1,0 +1,7 @@
+name: disk_log_backup
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2
+reviewed: true
+description: Most recent visible log backup finish time

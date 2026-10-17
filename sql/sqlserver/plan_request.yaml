@@ -1,0 +1,7 @@
+name: plan_request
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2
+reviewed: true
+description: One bound user session active request, statement text, handles and size-gated XML Showplan.

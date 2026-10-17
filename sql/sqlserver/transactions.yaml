@@ -1,0 +1,7 @@
+name: transactions
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 5000
+reviewed: true
+description: Session-associated transaction state and server-clock duration; SQL Server 2008 R2 compatible syntax.

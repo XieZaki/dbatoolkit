@@ -1,0 +1,7 @@
+name: monitor_capabilities
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: Reviewed membership and effective visibility checks; no permission changes.

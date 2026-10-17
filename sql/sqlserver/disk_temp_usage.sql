@@ -1,0 +1,6 @@
+SELECT file_id, total_page_count AS total_pages,
+ unallocated_extent_page_count AS free_pages,
+ user_object_reserved_page_count AS user_object_pages,
+ internal_object_reserved_page_count AS internal_object_pages,
+ version_store_reserved_page_count AS version_store_pages
+FROM tempdb.sys.dm_db_file_space_usage

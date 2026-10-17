@@ -1,0 +1,7 @@
+name: preflight
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: MySQL version, monitoring role and instrumentation checks.

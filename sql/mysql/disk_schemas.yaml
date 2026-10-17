@@ -1,0 +1,7 @@
+name: disk_schemas
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 200
+reviewed: true
+description: Current schema data and index estimates

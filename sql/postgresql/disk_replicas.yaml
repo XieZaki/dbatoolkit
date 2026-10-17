@@ -1,0 +1,7 @@
+name: disk_replicas
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 200
+reviewed: true
+description: Current streaming replica state

@@ -1,0 +1,7 @@
+name: active_sessions
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2000
+reviewed: true
+description: Current foreground connection and transaction snapshot.

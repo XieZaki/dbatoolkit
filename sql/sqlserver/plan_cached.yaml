@@ -1,0 +1,7 @@
+name: plan_cached
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2
+reviewed: true
+description: One bound still-connected user session recent SQL handle and cached last-execution statistics with size-gated XML Showplan; no arbitrary cache scan.

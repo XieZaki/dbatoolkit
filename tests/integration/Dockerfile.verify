@@ -1,0 +1,13 @@
+FROM mcr.microsoft.com/devcontainers/python:3.12-bookworm
+USER root
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends curl ca-certificates unixodbc \
+    && curl -fsSL https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -o /tmp/msprod.deb \
+    && dpkg -i /tmp/msprod.deb && rm /tmp/msprod.deb \
+    && apt-get update && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/verification-venv \
+    && /opt/verification-venv/bin/pip install --no-cache-dir --index-url https://pypi.tuna.tsinghua.edu.cn/simple 'pyodbc>=5.2,<6' 'PyYAML>=6,<7'
+ENV PATH="/opt/verification-venv/bin:${PATH}"
+USER vscode
+WORKDIR /workspace

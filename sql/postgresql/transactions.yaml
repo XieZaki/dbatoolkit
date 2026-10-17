@@ -1,0 +1,7 @@
+name: transactions
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 5000
+reviewed: true
+description: Reviewed PostgreSQL transactions monitoring snapshot.

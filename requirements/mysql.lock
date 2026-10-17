@@ -1,0 +1,2 @@
+-r base.lock
+PyMySQL[rsa]>=1.1,<1.2

@@ -1,0 +1,16 @@
+databases:
+  - id: example-mysql
+    name: Example MySQL
+    db_type: mysql
+    host: 203.0.113.10
+    port: 3306
+    database: exampledb
+    credential_alias: example-only-mysql-monitor
+    enabled: false
+    environment: example
+    connection:
+      ssl_disabled: false
+      ssl_verify_cert: true
+      ssl_verify_identity: true
+      connect_timeout: 5
+      query_timeout: 15

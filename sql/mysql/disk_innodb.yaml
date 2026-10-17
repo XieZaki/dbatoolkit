@@ -1,0 +1,7 @@
+name: disk_innodb
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2
+reviewed: true
+description: Visible InnoDB redo and undo capacity settings
