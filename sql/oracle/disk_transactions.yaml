@@ -1,0 +1,21 @@
+name: disk_transactions
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 5000
+reviewed: true
+description: oracle transaction context used as optional disk-growth evidence.
+feature: disk-growth
+version_families:
+- 11gr2
+- 12c
+- 18c
+- 19c
+- 21c
+- 23ai
+- 26ai
+runtime_variants:
+- default
+- '12_1'
+- 12_2_plus
+profile_role: optional

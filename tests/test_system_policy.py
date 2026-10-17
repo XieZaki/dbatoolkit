@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from test_system_cli import (
+    is_expected_oracle_disk_permission_block,
     is_local_test_instance,
     is_oracle_create_session_block,
     is_structured_incomplete_diagnosis,
@@ -62,3 +63,26 @@ def test_system_runner_records_oracle_create_session_permission_block() -> None:
     assert is_oracle_create_session_block(("check", "oraclefree"), 1, output)
     assert not is_oracle_create_session_block(("check", "oraclefree"), 0, output)
     assert not is_oracle_create_session_block(("check", "oraclefree"), 1, "not json")
+
+
+@pytest.mark.unit
+def test_system_runner_accepts_only_known_oracle_disk_growth_permission_gap() -> None:
+    output = json.dumps({
+        "error_type": "MissingPermission",
+        "permission_readiness": {
+            "feature": "disk-growth", "status": "MISSING",
+            "missing_required": [
+                "SELECT SYS.DBA_TABLESPACE_USAGE_METRICS",
+                "SELECT SYS.DBA_TABLESPACES",
+                "SELECT SYS.DBA_DATA_FILES",
+                "SELECT SYS.DBA_TEMP_FREE_SPACE",
+            ],
+            "toolkit_executed": False,
+        },
+    })
+    command = ("diagnose", "oraclefree", "disk-growth")
+    assert is_expected_oracle_disk_permission_block(command, 1, output)
+    assert not is_expected_oracle_disk_permission_block(command, 0, output)
+    assert not is_expected_oracle_disk_permission_block(
+        ("diagnose", "sqlserver2022", "disk-growth"), 1, output
+    )

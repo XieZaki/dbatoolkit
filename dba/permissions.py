@@ -122,7 +122,8 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
                                      "pg_replication_slots", "pg_stat_archiver", "pg_stat_replication", "pg_roles")),
         "disk-growth": FeaturePermissions(("pg_monitor", "CONNECT"), (), "WAL, archive, or replication details may be unavailable.",
                                           ("pg_database", "pg_stat_database", "pg_stat_archiver",
-                                           "pg_stat_replication", "pg_replication_slots", "pg_stat_activity")),
+                                           "pg_stat_replication", "pg_replication_slots", "pg_stat_activity",
+                                           "pg_class", "pg_namespace")),
         "replication": FeaturePermissions(
             ("pg_monitor", "CONNECT"), (),
             "WAL sender, receiver, slot, or archive evidence may be unavailable.",
@@ -149,9 +150,10 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
                                         ("PROCESS", "PROCESS", "*.*"),
                                         ("SELECT performance_schema", "SELECT", "performance_schema.*"),
                                     )),
-        "disk-growth": FeaturePermissions(("PROCESS", "REPLICATION CLIENT", "SELECT performance_schema"), (),
-                                          "Binlog list, replication, or transaction details may be unavailable.",
-                                          ("information_schema.tables", "information_schema.innodb_trx",
+        "disk-growth": FeaturePermissions((), ("PROCESS", "REPLICATION CLIENT", "SELECT performance_schema"),
+                                          "Transaction, binary-log inventory, and InnoDB evidence may be unavailable.",
+                                          ("information_schema.tables", "information_schema.files",
+                                           "information_schema.innodb_trx",
                                            "performance_schema.global_variables",
                                            "performance_schema.replication_connection_status", "SHOW BINARY LOGS",
                                            "information_schema.user_privileges", "information_schema.schema_privileges",
@@ -160,9 +162,9 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
                                            "performance_schema.threads", "information_schema.schemata",
                                            "show grants"),
                                           permission_reasons=(
-                                              ("PROCESS", "Required to inspect sessions and transaction metadata across accounts."),
-                                              ("REPLICATION CLIENT", "Required to inspect binary log and replication metadata."),
-                                              ("SELECT performance_schema", "Required to read reviewed monitoring views."),
+                                              ("PROCESS", "Optional cross-account transaction or tablespace evidence."),
+                                              ("REPLICATION CLIENT", "Optional SHOW BINARY LOGS inventory."),
+                                              ("SELECT performance_schema", "Optional InnoDB and replication metadata."),
                                           ),
                                           scope_requirements=(
                                               ("PROCESS", "PROCESS", "*.*"),
@@ -417,6 +419,116 @@ _SLOW_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
     },
 }
 
+
+_DISK_GROWTH_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
+    "sqlserver_disk_pre2014_permissions": FeaturePermissions(
+        ("VIEW SERVER STATE", "VIEW ANY DATABASE"), ("SELECT msdb.dbo.backupset",),
+        "Backup-history details may be unavailable.", REGISTRY[DatabaseType.SQLSERVER]["disk-growth"].objects,
+        permission_reasons=(
+            ("VIEW SERVER STATE", "Required by the reviewed SQL Server 2008 R2 log-space DMV route."),
+            ("VIEW ANY DATABASE", "Required for reliable database-name visibility."),
+            ("SELECT msdb.dbo.backupset", "Optional last-log-backup evidence."),
+        ), version_constraints=("SQL Server 2008 R2 and 2012: VIEW SERVER STATE",)),
+    "sqlserver_disk_2014_2019_permissions": FeaturePermissions(
+        ("VIEW SERVER STATE", "VIEW ANY DATABASE"), ("SELECT msdb.dbo.backupset",),
+        "Backup-history details may be unavailable.", REGISTRY[DatabaseType.SQLSERVER]["disk-growth"].objects,
+        permission_reasons=(
+            ("VIEW SERVER STATE", "Required by the reviewed log-space and TempDB monitoring DMV routes."),
+            ("VIEW ANY DATABASE", "Required for reliable database-name visibility."),
+            ("SELECT msdb.dbo.backupset", "Optional last-log-backup evidence."),
+        ), version_constraints=("SQL Server 2014 through 2019: VIEW SERVER STATE",)),
+    "sqlserver_disk_2022_permissions": FeaturePermissions(
+        ("VIEW SERVER PERFORMANCE STATE", "VIEW ANY DATABASE"),
+        ("SELECT msdb.dbo.backupset", "VIEW SERVER STATE"),
+        "Backup-history details may be unavailable.", REGISTRY[DatabaseType.SQLSERVER]["disk-growth"].objects,
+        permission_reasons=(
+            ("VIEW SERVER PERFORMANCE STATE", "Required by SQL Server 2022 DMV permission rules."),
+            ("VIEW ANY DATABASE", "Required for reliable database-name visibility."),
+            ("SELECT msdb.dbo.backupset", "Optional last-log-backup evidence."),
+            ("VIEW SERVER STATE", "Optional legacy server-state visibility."),
+        ), version_constraints=("SQL Server 2022+: VIEW SERVER PERFORMANCE STATE",)),
+    "mysql_disk_57_permissions": FeaturePermissions(
+        (), ("PROCESS", "REPLICATION CLIENT", "SELECT performance_schema"),
+        "Transaction, binary-log inventory, and InnoDB configuration evidence may be unavailable.",
+        (*REGISTRY[DatabaseType.MYSQL]["disk-growth"].objects,
+         "information_schema.files", "information_schema.tables"),
+        permission_reasons=(
+            ("PROCESS", "Optional cross-account transaction context."),
+            ("REPLICATION CLIENT", "Optional SHOW BINARY LOGS inventory; required only when that evidence is requested."),
+            ("SELECT performance_schema", "Optional InnoDB and replica metadata."),
+        ), scope_requirements=(
+            ("PROCESS", "PROCESS", "*.*"),
+            ("REPLICATION CLIENT", "REPLICATION CLIENT", "*.*"),
+            ("SELECT performance_schema", "SELECT", "performance_schema.*"),
+        ), version_constraints=("MySQL 5.7: expire_logs_days query variant",)),
+    "mysql_disk_80_permissions": FeaturePermissions(
+        (), ("PROCESS", "REPLICATION CLIENT", "SELECT performance_schema"),
+        "Transaction, binary-log inventory, and InnoDB configuration evidence may be unavailable.",
+        (*REGISTRY[DatabaseType.MYSQL]["disk-growth"].objects,
+         "information_schema.files", "information_schema.tables"),
+        permission_reasons=(
+            ("PROCESS", "Optional cross-account transaction context."),
+            ("REPLICATION CLIENT", "Optional SHOW BINARY LOGS inventory."),
+            ("SELECT performance_schema", "Optional InnoDB and replica metadata."),
+        ), scope_requirements=(
+            ("PROCESS", "PROCESS", "*.*"),
+            ("REPLICATION CLIENT", "REPLICATION CLIENT", "*.*"),
+            ("SELECT performance_schema", "SELECT", "performance_schema.*"),
+        )),
+    "mysql_disk_84_permissions": FeaturePermissions(
+        (), ("PROCESS", "REPLICATION CLIENT", "SELECT performance_schema"),
+        "Transaction, binary-log inventory, and InnoDB configuration evidence may be unavailable.",
+        (*REGISTRY[DatabaseType.MYSQL]["disk-growth"].objects,
+         "information_schema.files", "information_schema.tables"),
+        permission_reasons=(
+            ("PROCESS", "Optional cross-account transaction context."),
+            ("REPLICATION CLIENT", "Optional SHOW BINARY LOGS inventory."),
+            ("SELECT performance_schema", "Optional InnoDB and replica metadata."),
+        ), scope_requirements=(
+            ("PROCESS", "PROCESS", "*.*"),
+            ("REPLICATION CLIENT", "REPLICATION CLIENT", "*.*"),
+            ("SELECT performance_schema", "SELECT", "performance_schema.*"),
+        )),
+    "postgresql_disk_13_18_permissions": FeaturePermissions(
+        ("pg_monitor", "CONNECT"), (),
+        "Database size and monitor-only WAL/archive evidence are available through pg_monitor.",
+        REGISTRY[DatabaseType.POSTGRESQL]["disk-growth"].objects,
+        version_constraints=("PostgreSQL 13 through 18",)),
+    "oracle_disk_11gr2_permissions": FeaturePermissions(
+        (*ORACLE_COMMON_MONITOR_REQUIREMENTS, "SELECT SYS.DBA_TABLESPACE_USAGE_METRICS",
+         "SELECT SYS.DBA_TABLESPACES", "SELECT SYS.DBA_DATA_FILES", "SELECT SYS.DBA_TEMP_FREE_SPACE"),
+        ("SELECT SYS.V_$RECOVERY_FILE_DEST", "SELECT SYS.V_$RECOVERY_AREA_USAGE",
+         "SELECT SYS.V_$ARCHIVE_DEST_STATUS", "SELECT SYS.V_$ARCHIVED_LOG",
+         "SELECT SYS.V_$LOG_HISTORY", "SELECT SYS.V_$DATABASE"),
+        "Missing required grants prevent core tablespace, datafile, and temp totals; FRA, archive, and redo-history evidence may also be unavailable or not configured.",
+        REGISTRY[DatabaseType.ORACLE]["disk-growth"].objects,
+        version_constraints=("Oracle 11gR2 minimum direct object grants",)),
+    "oracle_disk_12c_121_permissions": FeaturePermissions(
+        (*ORACLE_COMMON_MONITOR_REQUIREMENTS, "SELECT SYS.DBA_TABLESPACE_USAGE_METRICS",
+         "SELECT SYS.DBA_TABLESPACES", "SELECT SYS.DBA_DATA_FILES", "SELECT SYS.DBA_TEMP_FREE_SPACE"),
+        ("SELECT SYS.V_$RECOVERY_FILE_DEST", "SELECT SYS.V_$RECOVERY_AREA_USAGE",
+         "SELECT SYS.V_$ARCHIVE_DEST_STATUS", "SELECT SYS.V_$ARCHIVED_LOG",
+         "SELECT SYS.V_$LOG_HISTORY", "SELECT SYS.V_$DATABASE"),
+        "Missing required grants prevent core tablespace, datafile, and temp totals; FRA, archive, and redo-history evidence may also be unavailable or not configured.",
+        REGISTRY[DatabaseType.ORACLE]["disk-growth"].objects),
+    "oracle_disk_12c_122_permissions": FeaturePermissions(
+        (*ORACLE_COMMON_MONITOR_REQUIREMENTS, "SELECT SYS.DBA_TABLESPACE_USAGE_METRICS",
+         "SELECT SYS.DBA_TABLESPACES", "SELECT SYS.DBA_DATA_FILES", "SELECT SYS.DBA_TEMP_FREE_SPACE"),
+        ("SELECT SYS.V_$RECOVERY_FILE_DEST", "SELECT SYS.V_$RECOVERY_AREA_USAGE",
+         "SELECT SYS.V_$ARCHIVE_DEST_STATUS", "SELECT SYS.V_$ARCHIVED_LOG",
+         "SELECT SYS.V_$LOG_HISTORY", "SELECT SYS.V_$DATABASE"),
+        "Missing required grants prevent core tablespace, datafile, and temp totals; FRA, archive, and redo-history evidence may also be unavailable or not configured.",
+        REGISTRY[DatabaseType.ORACLE]["disk-growth"].objects),
+    "oracle_disk_modern_permissions": FeaturePermissions(
+        (*ORACLE_COMMON_MONITOR_REQUIREMENTS, "SELECT SYS.DBA_TABLESPACE_USAGE_METRICS",
+         "SELECT SYS.DBA_TABLESPACES", "SELECT SYS.DBA_DATA_FILES", "SELECT SYS.DBA_TEMP_FREE_SPACE"),
+        ("SELECT SYS.V_$RECOVERY_FILE_DEST", "SELECT SYS.V_$RECOVERY_AREA_USAGE",
+         "SELECT SYS.V_$ARCHIVE_DEST_STATUS", "SELECT SYS.V_$ARCHIVED_LOG",
+         "SELECT SYS.V_$LOG_HISTORY", "SELECT SYS.V_$DATABASE"),
+        "Missing required grants prevent core tablespace, datafile, and temp totals; FRA, archive, and redo-history evidence may also be unavailable or not configured.",
+        REGISTRY[DatabaseType.ORACLE]["disk-growth"].objects),
+}
+
 for _profile_id, _objects in {
     "oracle11gr2_replication": ("SYS.V_$DATAGUARD_STATS", "SYS.V_$MANAGED_STANDBY",
                                 "SYS.V_$ARCHIVE_DEST_STATUS"),
@@ -443,7 +555,10 @@ def requirements_for_profile(profile_id: str) -> FeaturePermissions:
         try:
             return _SLOW_PROFILE_REQUIREMENTS[profile_id]
         except KeyError:
-            raise ValueError("Resolved profile has no permission definition") from None
+            try:
+                return _DISK_GROWTH_PROFILE_REQUIREMENTS[profile_id]
+            except KeyError:
+                raise ValueError("Resolved profile has no permission definition") from None
 
 
 def render_profile_sql(profile_id: str, database_type: DatabaseType, account: str | OraclePrincipal,

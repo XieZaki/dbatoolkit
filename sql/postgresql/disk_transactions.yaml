@@ -1,0 +1,18 @@
+name: disk_transactions
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 5000
+reviewed: true
+description: postgresql transaction context used as optional disk-growth evidence.
+feature: disk-growth
+version_families:
+- '13'
+- '14'
+- '15'
+- '16'
+- '17'
+- '18'
+runtime_variants:
+- default
+profile_role: optional

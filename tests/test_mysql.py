@@ -23,7 +23,7 @@ from dba.mysql_collectors import (
 )
 from dba.mysql_slow import build_slow_report
 from dba.mysql_slow_reporter import render_console, render_markdown
-from dba.permissions import PermissionStatus
+from dba.permissions import PermissionStatus, requirements_for
 from dba.registry import SqlScriptRegistry
 from dba.settings import MySQLSettings
 
@@ -169,6 +169,12 @@ def test_mysql57_preflight_does_not_execute_mysql80_role_function() -> None:
         assert target.get_server_version() == "5.7.44-log"
         assert "preflight_roles" not in driver.connection.executed
         assert target.preflight_checks["permission_replication"]
+
+
+def test_mysql_disk_growth_monitoring_grants_are_optional_in_preflight_contract() -> None:
+    requirements = requirements_for(DatabaseType.MYSQL, "disk-growth", "8.4.11")
+    assert requirements.required == ()
+    assert requirements.optional == ("PROCESS", "REPLICATION CLIENT", "SELECT performance_schema")
 
 
 def test_mysql80_preflight_fails_closed_when_active_roles_cannot_be_read() -> None:

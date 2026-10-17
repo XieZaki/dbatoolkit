@@ -91,3 +91,21 @@ V0.9.1 Phase C adds slow profile coverage for SQL Server 2008 R2 through 2022
 MySQL 5.7 legacy lock views, normalized evidence aliases, required versus
 optional collector failures and fail-closed version gating. These tests use
 Fake Adapters and do not replace live E2E verification.
+
+The current Oracle 26ai local test account lacks four required disk-growth
+object grants; the system runner records only that exact `oraclefree` result as
+an expected permission blocker. It does not run disk-growth SQL or change the
+database. Use `dba permissions oraclefree --feature disk-growth` for the
+manual-only grant text.
+
+V0.9.1 Phase D adds version-bound disk-growth SQL, permission and parser
+contracts for SQL Server 2008 R2–2022, MySQL 5.7/8.0/8.4, PostgreSQL 13–18,
+and Oracle 11gR2–26ai. On 2026-10-18 the opt-in system test passed against the
+four local Docker assets. Disk-growth collection completed with FULL visibility
+for `sqlserver2022` (SQL Server 16.0.4305.5), `pg16` (PostgreSQL 16.15), and
+`mysql84` (MySQL 8.4.11). Oracle 26ai connection, principal, version and
+permission checks passed; collection was correctly blocked before feature SQL
+because four required core object grants are absent. The system policy accepts
+only that exact known gap as an expected permission blocker. No old-version
+live compatibility is implied by Fake Adapter coverage, and the suite does not
+create disk pressure or modify database state.

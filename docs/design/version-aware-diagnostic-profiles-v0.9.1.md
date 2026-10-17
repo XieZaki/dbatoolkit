@@ -8,9 +8,10 @@
 **This document is architecture, not a statement that every listed version is implemented or verified.**
 
 **Implementation status:** Phase A foundation is implemented. Phase B routes
-replication SQL bundles, version-specific permission profiles, parser
-contracts, and support state through the immutable resolver. Slow, disk-growth,
-backup, and plan remain on their existing paths.
+replication, Phase C routes slow diagnosis, and Phase D routes disk-growth SQL,
+version-specific permission profiles, parser contracts, and support state
+through the immutable resolver. Backup remains on its existing path; SQL Server
+plan remains on its existing path and is not migrated by Phase D.
 
 ## 1. Goals and non-goals
 
@@ -283,26 +284,33 @@ Extend existing SQL Registry metadata with ID, database type, feature, family/va
 
 For MySQL replication, Phase B is gated on the explicit safety-policy reconciliation in §6; the router may select only exact reviewed Registry scripts already permitted by the reconciled project policy.
 
-### Phase C — Permissions and slow migration (implemented)
+### Phase C — Slow migration (implemented)
 
 Slow is migrated as one atomic SQL/permission/parser/support route per family
 and runtime variant. Required/optional collector contracts are declared with
-the slow SQL profile. Disk-growth and plan remain on their legacy paths.
-Preserve text-only GRANT/REVOKE generation and fail closed on AUTO_DETECTED,
-UNVERIFIED, MISMATCH, or UNKNOWN diagnosis routes.
-
-### Phase D — Parser contracts (implemented for slow)
+the slow SQL profile. Preserve text-only GRANT/REVOKE generation and fail
+closed on AUTO_DETECTED, UNVERIFIED, MISMATCH, or UNKNOWN diagnosis routes.
 
 Slow uses shared normalized field aliases and retains raw evidence. Split
 semantic parser implementations only when meaning or record shape truly
 changes. Slow report visibility reflects required and optional sample quality.
 
+### Phase D — Disk-growth migration (implemented)
+
+Disk-growth selects required and optional Registry SQL, version-bound
+permissions and the normalized parser contract as one resolved profile.
+SQL Server 2008 R2/2012 retain the legacy log-space route; MySQL 5.7 has a
+legacy variable query; PostgreSQL 17+ has a separate slot-field query. Core
+totals determine incompleteness; optional evidence failures only reduce
+visibility. Oracle 26ai live collection currently requires four additional
+direct object grants, shown by `dba permissions oraclefree --feature disk-growth`.
+
 ### Phase E — Remaining migrations and tests
 
-Disk-growth and SQL Server plan remain future migrations. Update examples and
-docs, run unit/integration/regression tests, then opt-in representative Docker
-E2E. Record actual evidence levels and provide an Inventory migration warning.
-Do not auto-edit local Inventory.
+SQL Server plan remains a future migration. Update examples and docs, run
+unit/integration/regression tests, then opt-in representative Docker E2E.
+Record actual evidence levels and provide an Inventory migration warning. Do
+not auto-edit local Inventory.
 
 ## 17. Maintenance workflow and complexity limits
 

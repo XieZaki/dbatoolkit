@@ -5,3 +5,17 @@ timeout_seconds: 10
 max_rows: 200
 reviewed: true
 description: Fast recovery area usage by file type
+feature: disk-growth
+profile_role: optional
+version_families:
+- 11gr2
+- 12c
+- 18c
+- 19c
+- 21c
+- 23ai
+- 26ai
+runtime_variants:
+- default
+- '12_1'
+- 12_2_plus

@@ -39,11 +39,11 @@ def test_permission_registry_covers_supported_database_types(database_type: Data
 def test_status_semantics() -> None:
     definition = REGISTRY[DatabaseType.MYSQL]["disk-growth"]
     assert status_for(definition, None)[0] == PermissionStatus.UNKNOWN
-    assert status_for(definition, ())[0] == PermissionStatus.MISSING
+    assert status_for(definition, ())[0] == PermissionStatus.PARTIAL
     assert status_for(definition, (
         "GRANT PROCESS ON *.* TO 'monitor'@'%';",
         "GRANT REPLICATION CLIENT ON *.* TO 'monitor'@'%';",
-    ))[0] == PermissionStatus.MISSING
+    ))[0] == PermissionStatus.PARTIAL
     assert status_for(definition, (
         "GRANT PROCESS ON *.* TO 'monitor'@'%';",
         "GRANT REPLICATION CLIENT ON *.* TO 'monitor'@'%';",
@@ -67,8 +67,9 @@ def test_postgres_mysql_oracle_minimum_grants() -> None:
     assert "GRANT pg_monitor TO \"dbamon\"" in pg
     assert 'GRANT CONNECT ON DATABASE "orders"' in pg
     mysql = render_sql(DatabaseType.MYSQL, ("disk-growth",), "dbamon")
-    assert "GRANT PROCESS ON *.*" in mysql
-    assert "GRANT REPLICATION CLIENT ON *.*" in mysql
+    assert "No grantable privileges" in mysql
+    assert "GRANT PROCESS" not in mysql
+    assert "GRANT REPLICATION CLIENT" not in mysql
     assert "SUPER" not in mysql and "SELECT ON *.*" not in mysql
     oracle = render_sql(DatabaseType.ORACLE, ("slow",), OraclePrincipal.from_runtime("DBA_MONITOR"))
     assert "GRANT SELECT ON SYS.V_$SESSION TO DBA_MONITOR" in oracle

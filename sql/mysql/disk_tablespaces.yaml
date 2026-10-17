@@ -1,0 +1,18 @@
+name: disk_tablespaces
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 200
+reviewed: true
+description: InnoDB tablespace file and extent evidence; FILES may require PROCESS
+  on newer MySQL 8.0 releases.
+feature: disk-growth
+version_families:
+- '5.7'
+- '8.0'
+- '8.4'
+runtime_variants:
+- default
+- pre_8022
+- 8022_plus
+profile_role: optional

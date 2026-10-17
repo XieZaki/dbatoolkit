@@ -1,0 +1,18 @@
+name: disk_relations
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 201
+reviewed: true
+description: Largest user relation and total relation sizes (bounded top 201).
+feature: disk-growth
+version_families:
+- '13'
+- '14'
+- '15'
+- '16'
+- '17'
+- '18'
+runtime_variants:
+- default
+profile_role: optional

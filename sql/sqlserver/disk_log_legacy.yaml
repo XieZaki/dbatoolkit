@@ -1,0 +1,15 @@
+name: disk_log_legacy
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 200
+reviewed: true
+description: SQL Server 2008 R2 transaction log utilization using the reviewed read-only
+  DBCC SQLPERF(LOGSPACE) form.
+feature: disk-growth
+version_families:
+- 2008r2
+- '2012'
+runtime_variants:
+- default
+profile_role: required

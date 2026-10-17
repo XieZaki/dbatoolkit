@@ -1,0 +1,16 @@
+name: disk_binlog_config_legacy
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2
+reviewed: true
+description: MySQL 5.7 binary log and log configuration; uses expire_logs_days available
+  in 5.7.
+feature: disk-growth
+version_families:
+- '5.7'
+runtime_variants:
+- default
+- pre_8022
+- 8022_plus
+profile_role: optional

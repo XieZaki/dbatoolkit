@@ -1,0 +1,19 @@
+name: disk_transactions
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 5000
+reviewed: true
+description: sqlserver transaction context used as optional disk-growth evidence.
+feature: disk-growth
+version_families:
+- 2008r2
+- '2012'
+- '2014'
+- '2016'
+- '2017'
+- '2019'
+- '2022'
+runtime_variants:
+- default
+profile_role: optional

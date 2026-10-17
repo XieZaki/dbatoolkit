@@ -5,3 +5,14 @@ timeout_seconds: 10
 max_rows: 200
 reviewed: true
 description: Current database size and cumulative temporary statistics
+feature: disk-growth
+profile_role: required
+version_families:
+- '13'
+- '14'
+- '15'
+- '16'
+- '17'
+- '18'
+runtime_variants:
+- default

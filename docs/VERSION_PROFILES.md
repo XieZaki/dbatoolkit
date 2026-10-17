@@ -1,10 +1,10 @@
-# Version Profiles (V0.9.1 Phase B)
+# Version Profiles (V0.9.1)
 
 Phase A added version declaration and detection. Phase B migrated replication;
-Phase C migrates `slow`. Slow SQL, permission requirements, parser aliases,
-required/optional collectors and support state are selected together by the
-immutable `DiagnosticProfileResolver`. Disk-growth and plan remain on their
-existing paths.
+Phase C migrated `slow`; Phase D migrates `disk-growth`. Each migrated feature
+selects reviewed SQL, permission requirements, parser contract,
+required/optional collectors and support state together through the immutable
+`DiagnosticProfileResolver`. SQL Server plan remains on its existing path.
 
 ## Inventory declaration
 
@@ -66,7 +66,7 @@ account and permission summary. It does not persist detected versions.
 
 The central `DiagnosticProfileResolver` returns a frozen profile containing the
 SQL bundle, permission profile, parser contract and support state from one
-binding. Replication and slow require declared and detected families to match
+binding. Replication, slow and disk-growth require declared and detected families to match
 before any version-specific feature SQL runs. `AUTO_DETECTED`, `UNVERIFIED`,
 `MISMATCH`, and unknown variants fail closed for diagnosis. `check` and
 `permissions` report permission readiness as UNKNOWN without verified version
@@ -78,6 +78,41 @@ version. Required collector failures stop diagnosis. Optional failures retain
 available evidence and set `data_visibility` to `PARTIAL`; truncation on
 required evidence marks the report incomplete. Long-running thresholds remain
 in Analyzer/runtime configuration, not version profiles.
+
+Disk-growth SQL selection is profile-owned as well. Required totals determine
+whether a report is incomplete; failures in optional FRA, archive, slot, binlog,
+backup or transaction evidence lower visibility without discarding complete
+core totals. A configured-off feature such as binary logging or archiving is
+reported as `NOT_CONFIGURED`/`NOT_APPLICABLE`. Thresholds remain in the Analyzer
+and are not version-profile settings.
+
+### Disk-growth support matrix
+
+`SUPPORTED`, test coverage, and live verification are separate claims. In this
+phase, every supported route has static SQL/profile validation and Fake Adapter
+unit/integration coverage. Only the explicitly selected local Docker assets
+may be described as E2E verified; older-version families remain unverified on
+real servers unless separately recorded.
+
+| Database family | Support | Routed SQL profile | Evidence level |
+|---|---|---|---|
+| SQL Server 2008 R2 | SUPPORTED | Legacy `DBCC SQLPERF(LOGSPACE)` plus file totals | Unit/Fake integration; no live legacy instance |
+| SQL Server 2012 | SUPPORTED | Legacy log-space query plus compatible file SQL | Unit/Fake integration; no live legacy instance |
+| SQL Server 2014–2019 | SUPPORTED | DMV log usage and bounded file/temp evidence | Unit/Fake integration; no live legacy instance |
+| SQL Server 2022 | SUPPORTED | Current DMV profile; performance-state permission contract | Unit/Fake integration; E2E verified 2026-10-18 against SQL Server 16.0.4305.5 |
+| SQL Server 2025 | UNKNOWN | No executable profile | Fail closed |
+| MySQL 5.7 | SUPPORTED | `expire_logs_days` variant and bounded size queries | Unit/Fake integration; no live legacy instance |
+| MySQL 8.0 / 8.4 | SUPPORTED | Current binlog configuration and size queries | Unit/Fake integration; MySQL 8.4 E2E verified 2026-10-18 against 8.4.11 |
+| PostgreSQL 13–16 | SUPPORTED | Shared database/relation/slot/archive profile | Unit/Fake integration; PG16 E2E verified 2026-10-18 against 16.15 |
+| PostgreSQL 17–18 | SUPPORTED | Slot query includes `wal_status` and `safe_wal_size` | Unit/Fake integration; no live major-version matrix |
+| Oracle 11gR2 | SUPPORTED | Tablespace/data/temp core with legacy-compatible views | Unit/Fake integration; no live legacy instance |
+| Oracle 12c–23ai | SUPPORTED | Tablespace/data/temp core; optional FRA/archive/redo | Unit/Fake integration; no live instance in this run |
+| Oracle 26ai | SUPPORTED | Tablespace/data/temp core; optional FRA/archive/redo | E2E verified connection, principal, version and permission gate; collection blocked by four missing core object grants |
+
+Optional collectors can report partial visibility without invalidating complete
+core totals. Disabled binary logging, no PostgreSQL slots, disabled archiving,
+and unconfigured Oracle FRA are valid not-configured states. Thresholds live in
+Analyzer/runtime configuration, not in version profiles.
 
 ## Extending profiles
 
@@ -140,3 +175,22 @@ the version detector's `V_$VERSION` grant. It does not reference
 Support denotes a reviewed implementation, not live verification for every
 release. SQL Server 2008 R2 and MySQL 5.7 remain first-class routes despite
 the absence of live old-version servers in the current test environment.
+
+## Disk-growth support matrix
+
+| Database family | Support | Routed profile / compatibility | Evidence |
+|---|---|---|---|
+| SQL Server 2008 R2 | SUPPORTED | DBCC SQLPERF(LOGSPACE) and compatible file metadata | Unit/Registry tested; no live 2008 R2 E2E |
+| SQL Server 2012 | SUPPORTED | DBCC SQLPERF(LOGSPACE); AG evidence is optional | Unit/Registry tested; no live 2012 E2E |
+| SQL Server 2014–2019 | SUPPORTED | `sys.dm_db_log_space_usage`, `VIEW SERVER STATE` | Unit/Registry tested; no live old-version E2E |
+| SQL Server 2022 | SUPPORTED | `sys.dm_db_log_space_usage`, `VIEW SERVER PERFORMANCE STATE` | Local system E2E result recorded separately |
+| SQL Server 2025 | UNKNOWN | No inherited route | Fail closed |
+| MySQL 5.7 | SUPPORTED | `expire_logs_days`; schema totals; optional Top-N, FILES, InnoDB, binlog | Unit/Registry tested; no live 5.7 E2E |
+| MySQL 8.0 / 8.4 | SUPPORTED | `binlog_expire_logs_seconds`; optional Top-N, FILES, InnoDB, binlog | Unit/Registry tested; live 8.4 evidence recorded separately |
+| PostgreSQL 13–16 | SUPPORTED | Shared database-size, slot, archive bundle | Unit/Registry tested; live PG16 evidence recorded separately |
+| PostgreSQL 17–18 | SUPPORTED | Slot query includes `wal_status` and `safe_wal_size` | Unit/Registry tested; no live PG17/18 E2E |
+| Oracle 11gR2, 12c, 18c–26ai | SUPPORTED | Tablespace/datafile/temp core; FRA/archive/redo optional | Unit/Registry tested; Oracle 26ai requires the profile's manual core grants |
+
+`SUPPORTED`, `UNIT_TESTED`, `INTEGRATION_TESTED` and `E2E_VERIFIED` describe
+different evidence levels. No older release is described as live verified
+without an actual target run.

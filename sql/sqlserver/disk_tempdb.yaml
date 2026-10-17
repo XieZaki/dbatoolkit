@@ -5,3 +5,15 @@ timeout_seconds: 10
 max_rows: 200
 reviewed: true
 description: TempDB file allocation
+feature: disk-growth
+profile_role: optional
+version_families:
+- 2008r2
+- '2012'
+- '2014'
+- '2016'
+- '2017'
+- '2019'
+- '2022'
+runtime_variants:
+- default

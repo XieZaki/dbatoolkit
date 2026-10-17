@@ -18,6 +18,7 @@ class SqlMetadata:
     feature: str | None = None
     version_families: tuple[str, ...] = ()
     runtime_variants: tuple[str, ...] = ()
+    profile_role: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ class SqlScriptRegistry:
             "reviewed",
             "description",
         }
-        optional = {"feature", "version_families", "runtime_variants"}
+        optional = {"feature", "version_families", "runtime_variants", "profile_role"}
         if not isinstance(data, dict) or not expected <= set(data) or set(data) - expected - optional:
             raise ValidationError("SQL metadata fields are invalid")
         for key in ("name", "description", "database_type", "risk"):
@@ -68,6 +69,10 @@ class SqlScriptRegistry:
                                 or any(not isinstance(item, str) or not item for item in data[key])
                                 or len(set(data[key])) != len(data[key])):
                 raise ValidationError("SQL applicability metadata must be unique string lists")
+        if "profile_role" in data and data["profile_role"] not in {"required", "optional"}:
+            raise ValidationError("SQL profile_role must be required or optional")
+        if data.get("profile_role") and data.get("feature") != "disk-growth":
+            raise ValidationError("profile_role is currently supported only for disk-growth SQL")
         data = {**data, "version_families": tuple(data.get("version_families", ())),
                 "runtime_variants": tuple(data.get("runtime_variants", ()))}
         if self.formal and not data["reviewed"]:

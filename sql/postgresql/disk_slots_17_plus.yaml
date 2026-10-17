@@ -1,0 +1,15 @@
+name: disk_slots_17_plus
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 200
+reviewed: true
+description: PostgreSQL 17+ replication slot retention evidence, including wal_status
+  and safe_wal_size.
+feature: disk-growth
+version_families:
+- '17'
+- '18'
+runtime_variants:
+- default
+profile_role: optional

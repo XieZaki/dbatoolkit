@@ -64,6 +64,32 @@ def is_oracle_create_session_block(command: tuple[str, ...], returncode: int,
     )
 
 
+def is_expected_oracle_disk_permission_block(command: tuple[str, ...], returncode: int,
+                                             output: str) -> bool:
+    """Recognize only the documented local Oracle test account's missing core grants."""
+    if returncode == 0 or command != ("diagnose", "oraclefree", "disk-growth"):
+        return False
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return False
+    readiness = payload.get("permission_readiness")
+    expected_missing = {
+        "SELECT SYS.DBA_TABLESPACE_USAGE_METRICS",
+        "SELECT SYS.DBA_TABLESPACES",
+        "SELECT SYS.DBA_DATA_FILES",
+        "SELECT SYS.DBA_TEMP_FREE_SPACE",
+    }
+    return bool(
+        payload.get("error_type") == "MissingPermission"
+        and isinstance(readiness, dict)
+        and readiness.get("feature") == "disk-growth"
+        and readiness.get("status") == "MISSING"
+        and set(readiness.get("missing_required", ())) == expected_missing
+        and readiness.get("toolkit_executed") is False
+    )
+
+
 def test_real_cli_against_explicit_local_test_inventory() -> None:
     if os.environ.get("DBA_TOOLKIT_SYSTEM_TESTS") != "1":
         pytest.skip("set DBA_TOOLKIT_SYSTEM_TESTS=1 to opt into real local system tests")
@@ -141,15 +167,22 @@ def test_real_cli_against_explicit_local_test_inventory() -> None:
         expected_create_session_block = is_oracle_create_session_block(
             command, result.returncode, output
         )
+        expected_oracle_disk_permission_block = is_expected_oracle_disk_permission_block(
+            command, result.returncode, output
+        )
         outcomes.append({
             "command": list(command), "exit_code": result.returncode, "elapsed_ms": elapsed_ms,
             "output_bytes": len(output.encode("utf-8")),
             **({"expected_blocker": "ORA-01045 CREATE SESSION"}
                if expected_create_session_block else {}),
+            **({"expected_blocker": "Oracle disk-growth core grants missing"}
+               if expected_oracle_disk_permission_block else {}),
         })
         assert result.returncode == 0 or is_structured_incomplete_diagnosis(
             command, result.returncode, output
-        ) or expected_create_session_block, f"CLI command failed: {' '.join(command)}"
+        ) or expected_create_session_block or expected_oracle_disk_permission_block, (
+            f"CLI command failed: {' '.join(command)}"
+        )
         if expected_create_session_block:
             blocked_instances[command[1]] = "Skipped: ORA-01045 CREATE SESSION is missing"
 

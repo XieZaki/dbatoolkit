@@ -290,6 +290,51 @@ def _legacy_binding(db_type: DatabaseType, family: str, feature: str,
                           "legacy-compatible", variant)
 
 
+def _disk_growth_binding(
+    db_type: DatabaseType, family: str, profile_id: str, permission_id: str,
+    variant: str = "default", support: SupportState = SupportState.SUPPORTED,
+) -> ProfileBinding:
+    if support != SupportState.SUPPORTED:
+        return ProfileBinding(db_type, family, "disk-growth", support, "", "", "", "unverified", variant)
+    required = requirements_for_profile(permission_id).required
+    return ProfileBinding(db_type, family, "disk-growth", support, profile_id, permission_id,
+                          "disk_growth_normalized_v1", profile_id, variant, required)
+
+
+_DISK_GROWTH_BINDINGS: tuple[ProfileBinding, ...] = (
+    _disk_growth_binding(DatabaseType.SQLSERVER, "2008r2", "sqlserver_disk_2008r2",
+                         "sqlserver_disk_pre2014_permissions"),
+    _disk_growth_binding(DatabaseType.SQLSERVER, "2012", "sqlserver_disk_2012",
+                         "sqlserver_disk_pre2014_permissions"),
+    *(_disk_growth_binding(DatabaseType.SQLSERVER, family, "sqlserver_disk_2014_2019",
+                           "sqlserver_disk_2014_2019_permissions")
+      for family in ("2014", "2016", "2017", "2019")),
+    _disk_growth_binding(DatabaseType.SQLSERVER, "2022", "sqlserver_disk_2022",
+                         "sqlserver_disk_2022_permissions"),
+    _disk_growth_binding(DatabaseType.SQLSERVER, "2025", "", "", support=SupportState.UNKNOWN),
+    _disk_growth_binding(DatabaseType.MYSQL, "5.7", "mysql_disk_57", "mysql_disk_57_permissions"),
+    *(_disk_growth_binding(DatabaseType.MYSQL, "8.0", "mysql_disk_80",
+                           "mysql_disk_80_permissions", variant)
+      for variant in ("pre_8022", "8022_plus")),
+    _disk_growth_binding(DatabaseType.MYSQL, "8.4", "mysql_disk_84", "mysql_disk_84_permissions"),
+    *(_disk_growth_binding(DatabaseType.POSTGRESQL, family, "postgresql_disk_13_16",
+                           "postgresql_disk_13_18_permissions")
+      for family in ("13", "14", "15", "16")),
+    *(_disk_growth_binding(DatabaseType.POSTGRESQL, family, "postgresql_disk_17_18",
+                           "postgresql_disk_13_18_permissions")
+      for family in ("17", "18")),
+    _disk_growth_binding(DatabaseType.ORACLE, "11gr2", "oracle_disk_11gr2",
+                         "oracle_disk_11gr2_permissions"),
+    _disk_growth_binding(DatabaseType.ORACLE, "12c", "oracle_disk_12c_121",
+                         "oracle_disk_12c_121_permissions", "12_1"),
+    _disk_growth_binding(DatabaseType.ORACLE, "12c", "oracle_disk_12c_122",
+                         "oracle_disk_12c_122_permissions", "12_2_plus"),
+    *(_disk_growth_binding(DatabaseType.ORACLE, family, "oracle_disk_modern",
+                           "oracle_disk_modern_permissions")
+      for family in ("18c", "19c", "21c", "23ai", "26ai")),
+)
+
+
 # These are explicit foundation routes. They are deliberately sparse until
 # later phases migrate each feature's SQL, permissions and parser atomically.
 PROFILE_BINDINGS: tuple[ProfileBinding, ...] = (
@@ -306,7 +351,6 @@ PROFILE_BINDINGS: tuple[ProfileBinding, ...] = (
                    required_privileges=("VIEW SERVER PERFORMANCE STATE", "VIEW ANY DATABASE")),
     ProfileBinding(DatabaseType.SQLSERVER, "2025", "slow", SupportState.UNKNOWN,
                    "", "", "", "unverified"),
-    _legacy_binding(DatabaseType.SQLSERVER, "2022", "disk-growth"),
     _legacy_binding(DatabaseType.SQLSERVER, "2022", "plan"),
     ProfileBinding(DatabaseType.SQLSERVER, "2008r2", "replication", SupportState.UNSUPPORTED,
                    "", "", "", "unsupported", "default"),
@@ -345,7 +389,7 @@ PROFILE_BINDINGS: tuple[ProfileBinding, ...] = (
                                           "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
                                           "SELECT SYS.V_$TRANSACTION"))
       for family in ("18c", "19c", "21c", "23ai", "26ai")),
-) + tuple(
+) + _DISK_GROWTH_BINDINGS + tuple(
     ProfileBinding(DatabaseType.MYSQL, family, "replication", SupportState.SUPPORTED,
                    sql_id, permission_id, parser_id, profile_family, variant,
                    required_privileges)
@@ -441,6 +485,9 @@ class DiagnosticProfileResolver:
                 elif binding.feature == "slow":
                     from dba.slow_profiles import validate_slow_binding
                     errors.extend(validate_slow_binding(binding))
+                elif binding.feature == "disk-growth":
+                    from dba.disk_growth_profiles import validate_disk_binding
+                    errors.extend(validate_disk_binding(binding))
                 elif referenced != expected:
                     errors.append(f"cross-route or unknown profile reference: {key}")
                 if binding.feature == "replication":
@@ -466,7 +513,7 @@ class DiagnosticProfileResolver:
                 if binding.runtime_variant not in {"pre_8022", "8022_plus"}:
                     errors.append(f"invalid MySQL 8.0 variant: {key}")
             elif binding.db_type == DatabaseType.ORACLE and binding.version_family == "12c" \
-                    and binding.feature in {"replication", "slow"}:
+                    and binding.feature in {"replication", "slow", "disk-growth"}:
                 if binding.runtime_variant not in {"12_1", "12_2_plus"}:
                     errors.append(f"invalid Oracle 12c variant: {key}")
             elif binding.runtime_variant != "default":

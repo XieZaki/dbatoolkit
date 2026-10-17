@@ -25,6 +25,7 @@ from dba.credentials import (
     validate_alias,
 )
 from dba.disk_growth import diagnose_disk_growth
+from dba.disk_growth_profiles import validate_disk_profiles
 from dba.encrypted_credentials import (
     CredentialResolver,
     EncryptedFileCredentialStore,
@@ -683,6 +684,9 @@ def main(
             slow_errors = validate_slow_profiles(registry, PROFILE_RESOLVER.bindings)
             if slow_errors:
                 raise ValidationError("Slow profile registry invalid: " + "; ".join(slow_errors))
+            disk_errors = validate_disk_profiles(registry, PROFILE_RESOLVER.bindings)
+            if disk_errors:
+                raise ValidationError("Disk-growth profile registry invalid: " + "; ".join(disk_errors))
             warnings = inventory.version_family_warnings()
             validation_result = {"success": True, "instance_count": len(inventory.instances),
                                 "sql_script_count": len(scripts), "warnings": warnings}
@@ -823,6 +827,13 @@ def main(
                             slow_profile, slow_detection = resolve_profile_for_adapter(adapter, "slow")
                         except ProfileResolutionError:
                             slow_profile = None
+                    disk_profile = None
+                    disk_detection = None
+                    if "disk-growth" in requested:
+                        try:
+                            disk_profile, disk_detection = resolve_profile_for_adapter(adapter, "disk-growth")
+                        except ProfileResolutionError:
+                            disk_profile = None
                     supported = [feature for feature in requested if feature in definitions
                                  and feature_supported(instance.db_type, feature, server_version)]
                     if not requested:
@@ -830,9 +841,11 @@ def main(
                     observed = set(getattr(adapter, "permission_observations", set()))
                     rows = []
                     for feature in requested:
-                        if feature in {"replication", "slow"}:
-                            profile = replication_profile if feature == "replication" else slow_profile
-                            detection = replication_detection if feature == "replication" else slow_detection
+                        if feature in {"replication", "slow", "disk-growth"}:
+                            profile = (replication_profile if feature == "replication" else
+                                       slow_profile if feature == "slow" else disk_profile)
+                            detection = (replication_detection if feature == "replication" else
+                                         slow_detection if feature == "slow" else disk_detection)
                             if profile is None or profile.version_status == VersionStatus.MISMATCH:
                                 unknown_row: dict[str, Any] = {
                                     "feature": feature, "status": PermissionStatus.UNKNOWN.value,
@@ -910,8 +923,9 @@ def main(
                     if args.generate_grant or args.generate_revoke:
                         assert permission_credential is not None
                         selected_profile = (replication_profile if args.feature == "replication"
-                                            else slow_profile if args.feature == "slow" else None)
-                        if args.feature in {"replication", "slow"} and selected_profile is not None \
+                                            else slow_profile if args.feature == "slow"
+                                            else disk_profile if args.feature == "disk-growth" else None)
+                        if args.feature in {"replication", "slow", "disk-growth"} and selected_profile is not None \
                                 and selected_profile.version_status in {VersionStatus.VERIFIED,
                                                                         VersionStatus.UNVERIFIED} \
                                 and selected_profile.permission_profile_id:
@@ -929,7 +943,11 @@ def main(
                                     or slow_profile is None
                                     or slow_profile.version_status not in {VersionStatus.VERIFIED,
                                                                            VersionStatus.UNVERIFIED}
-                                    or not slow_profile.permission_profile_id):
+                                    or not slow_profile.permission_profile_id
+                                    or disk_profile is None
+                                    or disk_profile.version_status not in {VersionStatus.VERIFIED,
+                                                                           VersionStatus.UNVERIFIED}
+                                    or not disk_profile.permission_profile_id):
                                 generated = None
                             else:
                                 privileges: list[str] = []
@@ -940,6 +958,9 @@ def main(
                                         requirements_for_profile(slow_profile.permission_profile_id)
                                         if feature == "slow" and slow_profile is not None
                                         and slow_profile.permission_profile_id else
+                                        requirements_for_profile(disk_profile.permission_profile_id)
+                                        if feature == "disk-growth" and disk_profile is not None
+                                        and disk_profile.permission_profile_id else
                                         requirements_for(instance.db_type, feature, server_version)
                                     )
                                     for privilege in requirement.required:
@@ -973,6 +994,12 @@ def main(
                     version_verification = version_status(instance.version_family, detected)
                     slow_profile = PROFILE_RESOLVER.resolve(
                         instance.db_type, instance.version_family, detected, "slow"
+                    ) if instance.db_type in {
+                        DatabaseType.SQLSERVER, DatabaseType.MYSQL,
+                        DatabaseType.POSTGRESQL, DatabaseType.ORACLE,
+                    } else None
+                    disk_profile = PROFILE_RESOLVER.resolve(
+                        instance.db_type, instance.version_family, detected, "disk-growth"
                     ) if instance.db_type in {
                         DatabaseType.SQLSERVER, DatabaseType.MYSQL,
                         DatabaseType.POSTGRESQL, DatabaseType.ORACLE,
@@ -1019,6 +1046,16 @@ def main(
                                 "impact": "Version verification is required before assessing slow permissions.",
                             })
                             continue
+                        if feature == "disk-growth" and disk_profile is not None \
+                                and disk_profile.version_status != VersionStatus.VERIFIED:
+                            permission_rows.append({
+                                "feature": feature, "status": PermissionStatus.UNKNOWN.value,
+                                "support_state": disk_profile.support_state.value,
+                                "version_profile": asdict(disk_profile),
+                                "missing_required": (), "missing_optional": (),
+                                "impact": "Version verification is required before assessing disk-growth permissions.",
+                            })
+                            continue
                         if version_verification in {VersionStatus.MISMATCH, VersionStatus.UNVERIFIED,
                                                     VersionStatus.UNKNOWN}:
                             permission_rows.append({
@@ -1043,6 +1080,29 @@ def main(
                             permission_rows.append({"feature": feature, **assessment,
                                                     "support_state": slow_profile.support_state.value,
                                                     "version_profile": asdict(slow_profile),
+                                                    "required_privileges": requirement.required,
+                                                    "missing_reasons": privilege_reasons(
+                                                        requirement, assessment["missing_required"]
+                                                    ),
+                                                    **({"impact": requirement.impact}
+                                                       if assessment["status"] != PermissionStatus.READY else {})})
+                            continue
+                        if feature == "disk-growth" and disk_profile is not None:
+                            if disk_profile.support_state != SupportState.SUPPORTED \
+                                    or not disk_profile.permission_profile_id:
+                                permission_rows.append({
+                                    "feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
+                                    "support_state": disk_profile.support_state.value,
+                                    "version_profile": asdict(disk_profile),
+                                    "missing_required": (), "missing_optional": (),
+                                    "impact": "No reviewed disk-growth permission contract is available for this route.",
+                                })
+                                continue
+                            requirement = requirements_for_profile(disk_profile.permission_profile_id)
+                            assessment = assess_permissions(requirement, observed)
+                            permission_rows.append({"feature": feature, **assessment,
+                                                    "support_state": disk_profile.support_state.value,
+                                                    "version_profile": asdict(disk_profile),
                                                     "required_privileges": requirement.required,
                                                     "missing_reasons": privilege_reasons(
                                                         requirement, assessment["missing_required"]
@@ -1178,8 +1238,58 @@ def main(
                 elif args.command == "diagnose":
                     report: DiagnosticReport
                     if args.scenario == "disk-growth":
+                        profile, detection = resolve_profile_for_adapter(adapter, "disk-growth")
+                        if profile.version_status != VersionStatus.VERIFIED:
+                            raise ToolkitError(
+                                "VersionVerificationRequired",
+                                "Disk-growth diagnosis requires a declared version_family matching the detected server version.",
+                                permission_readiness={
+                                    "feature": "disk-growth", "status": PermissionStatus.UNKNOWN.value,
+                                    "version_detection": asdict(detection),
+                                    "version_profile": asdict(profile),
+                                },
+                            )
+                        if profile.support_state != SupportState.SUPPORTED \
+                                or not profile.permission_profile_id:
+                            raise ToolkitError(
+                                "FeatureUnsupported",
+                                "No verified disk-growth diagnostic profile is available for this database version.",
+                                permission_readiness={
+                                    "feature": "disk-growth", "status": PermissionStatus.UNSUPPORTED.value,
+                                    "version_profile": asdict(profile),
+                                },
+                            )
+                        requirement = requirements_for_profile(profile.permission_profile_id)
+                        assessment = assess_permissions(requirement, adapter.permission_observations)
+                        if assessment["status"] == PermissionStatus.MISSING:
+                            missing = assessment["missing_required"]
+                            grant = render_profile_sql(
+                                profile.permission_profile_id, instance.db_type,
+                                _grant_account(instance, adapter, permission_credential),
+                                instance.database, adapter.get_server_version(),
+                            )
+                            raise ToolkitError(
+                                "MissingPermission",
+                                "Required monitoring permissions are missing for disk-growth diagnosis.",
+                                permission_readiness={
+                                    "feature": "disk-growth", **assessment,
+                                    "version_profile": asdict(profile),
+                                    "missing_reasons": privilege_reasons(requirement, missing),
+                                    "impact": requirement.impact,
+                                    "suggested_grant": grant,
+                                    "toolkit_executed": False,
+                                    "dba_approval_required": True,
+                                },
+                            )
+                        cast(Any, adapter).disk_growth_profile = profile
                         report = diagnose_disk_growth(adapter)
                         output = {"success": not report.details["incomplete"], "report": asdict(report)}
+                        output["version_profile"] = asdict(profile)
+                        output["permission_readiness"] = {
+                            "status": assessment["status"].value,
+                            "missing_optional": assessment["missing_optional"],
+                            "data_visibility": report.details.get("data_visibility", "UNKNOWN"),
+                        }
                     elif args.scenario == "slow":
                         profile, detection = resolve_profile_for_adapter(adapter, "slow")
                         if profile.version_status != VersionStatus.VERIFIED:

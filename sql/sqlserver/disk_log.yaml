@@ -5,3 +5,13 @@ timeout_seconds: 10
 max_rows: 200
 reviewed: true
 description: Current log usage and reuse reason
+feature: disk-growth
+profile_role: required
+version_families:
+- '2014'
+- '2016'
+- '2017'
+- '2019'
+- '2022'
+runtime_variants:
+- default

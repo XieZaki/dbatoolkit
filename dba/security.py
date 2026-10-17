@@ -15,9 +15,9 @@ FORBIDDEN = frozenset(
 def check_sql(sql: str) -> None:
     """Conservative extra layer, never a substitute for database permissions.
 
-    Exact SHOW BINARY LOGS, SHOW GRANTS, SHOW REPLICA STATUS and SHOW SLAVE STATUS
-    statements are the only approved non-SELECT forms. The replication forms are
-    permitted only through their individually reviewed Registry scripts.
+    Exact SHOW BINARY LOGS, SHOW GRANTS, SHOW REPLICA STATUS, SHOW SLAVE STATUS,
+    and SQL Server DBCC SQLPERF(LOGSPACE) are the only approved non-SELECT forms.
+    Each is permitted only through its individually reviewed Registry script.
     Keywords in literals/comments are also rejected intentionally. Arbitrary SQL
     functions can have side effects: mandatory human review and monitoring grants
     remain necessary before any future execution.
@@ -25,7 +25,8 @@ def check_sql(sql: str) -> None:
     # Non-SELECT forms are a closed allowlist of fixed MySQL metadata statements.
     # Reject any suffix, comment, second statement or alternate SHOW form.
     if sql.strip().upper() in {
-        "SHOW BINARY LOGS", "SHOW GRANTS", "SHOW REPLICA STATUS", "SHOW SLAVE STATUS"
+        "SHOW BINARY LOGS", "SHOW GRANTS", "SHOW REPLICA STATUS", "SHOW SLAVE STATUS",
+        "DBCC SQLPERF(LOGSPACE)",
     }:
         return
     tokens = re.findall(r"[A-Za-z_][A-Za-z_0-9$]*", sql.upper())

@@ -5,3 +5,14 @@ timeout_seconds: 10
 max_rows: 200
 reviewed: true
 description: Current streaming replica state
+feature: disk-growth
+profile_role: optional
+version_families:
+- '13'
+- '14'
+- '15'
+- '16'
+- '17'
+- '18'
+runtime_variants:
+- default
