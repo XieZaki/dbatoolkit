@@ -358,13 +358,17 @@ PROFILE_BINDINGS: tuple[ProfileBinding, ...] = (
                    required_privileges)
     for family, variant, sql_id, permission_id, parser_id, profile_family, required_privileges in (
         ("11gr2", "default", "oracle11gr2_replication", "oracle11gr2_replication",
-         "oracle11gr2_replication", "oracle11gr2_replication", ("CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$MANAGED_STANDBY", "SELECT SYS.V_$ARCHIVE_DEST_STATUS")),
+         "oracle11gr2_replication", "oracle11gr2_replication",
+         requirements_for_profile("oracle11gr2_replication").required),
         ("12c", "12_1", "oracle12c_121_replication", "oracle12c_121_replication",
-         "oracle12c_121_replication", "oracle12c_121_replication", ("CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$MANAGED_STANDBY", "SELECT SYS.V_$ARCHIVE_DEST_STATUS")),
+         "oracle12c_121_replication", "oracle12c_121_replication",
+         requirements_for_profile("oracle12c_121_replication").required),
         ("12c", "12_2_plus", "oracle12c_122_replication", "oracle12c_122_replication",
-         "oracle12c_122_replication", "oracle12c_122_replication", ("CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$DATAGUARD_PROCESS", "SELECT SYS.V_$ARCHIVE_DEST_STATUS")),
+         "oracle12c_122_replication", "oracle12c_122_replication",
+         requirements_for_profile("oracle12c_122_replication").required),
         *( (family, "default", "oracle_modern_replication", "oracle_modern_replication",
-            "oracle_modern_replication", "oracle_modern_replication", ("CREATE SESSION", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$DATAGUARD_STATS", "SELECT SYS.V_$DATAGUARD_PROCESS", "SELECT SYS.V_$ARCHIVE_DEST_STATUS"))
+            "oracle_modern_replication", "oracle_modern_replication",
+            requirements_for_profile("oracle_modern_replication").required)
            for family in ("18c", "19c", "21c", "23ai", "26ai") ),
     )
 )

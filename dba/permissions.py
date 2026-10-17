@@ -177,8 +177,21 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
 
 ALL_FEATURES = ("slow", "plan", "disk-growth", "replication")
 
-# Bootstrap privilege used only by the fixed version detector. Kept separate
-# from feature grants because V$VERSION is not needed by every current module.
+# Oracle replication resolves its version only after connecting and completing
+# the common monitor preflight. Keep the full, fixed bootstrap contract in the
+# Permission Registry so offline grants cover the same path as runtime checks.
+ORACLE_COMMON_MONITOR_REQUIREMENTS: tuple[str, ...] = (
+    "CREATE SESSION",
+    "SELECT SYS.V_$INSTANCE",
+    "SELECT SYS.V_$VERSION",
+    "SELECT SYS.V_$DATABASE",
+    "SELECT SYS.V_$SESSION",
+    "SELECT SYS.V_$SQL",
+    "SELECT SYS.V_$TRANSACTION",
+)
+
+# Bootstrap privilege used by the fixed version detector. Other feature
+# profiles may include it through ORACLE_COMMON_MONITOR_REQUIREMENTS.
 VERSION_DETECTION_PRIVILEGES: dict[DatabaseType, tuple[str, ...]] = {
     DatabaseType.ORACLE: ("SELECT SYS.V_$VERSION",),
 }
@@ -328,19 +341,20 @@ _REPLICATION_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
 }
 
 for _profile_id, _objects in {
-    "oracle11gr2_replication": ("SYS.V_$VERSION", "SYS.V_$DATABASE", "SYS.V_$DATAGUARD_STATS",
-                                "SYS.V_$MANAGED_STANDBY", "SYS.V_$ARCHIVE_DEST_STATUS"),
-    "oracle12c_121_replication": ("SYS.V_$VERSION", "SYS.V_$DATABASE", "SYS.V_$DATAGUARD_STATS",
-                                  "SYS.V_$MANAGED_STANDBY", "SYS.V_$ARCHIVE_DEST_STATUS"),
-    "oracle12c_122_replication": ("SYS.V_$VERSION", "SYS.V_$DATABASE", "SYS.V_$DATAGUARD_STATS",
-                                  "SYS.V_$DATAGUARD_PROCESS", "SYS.V_$ARCHIVE_DEST_STATUS"),
-    "oracle_modern_replication": ("SYS.V_$VERSION", "SYS.V_$DATABASE", "SYS.V_$DATAGUARD_STATS",
-                                  "SYS.V_$DATAGUARD_PROCESS", "SYS.V_$ARCHIVE_DEST_STATUS"),
+    "oracle11gr2_replication": ("SYS.V_$DATAGUARD_STATS", "SYS.V_$MANAGED_STANDBY",
+                                "SYS.V_$ARCHIVE_DEST_STATUS"),
+    "oracle12c_121_replication": ("SYS.V_$DATAGUARD_STATS", "SYS.V_$MANAGED_STANDBY",
+                                  "SYS.V_$ARCHIVE_DEST_STATUS"),
+    "oracle12c_122_replication": ("SYS.V_$DATAGUARD_STATS", "SYS.V_$DATAGUARD_PROCESS",
+                                  "SYS.V_$ARCHIVE_DEST_STATUS"),
+    "oracle_modern_replication": ("SYS.V_$DATAGUARD_STATS", "SYS.V_$DATAGUARD_PROCESS",
+                                  "SYS.V_$ARCHIVE_DEST_STATUS"),
 }.items():
     _REPLICATION_PROFILE_REQUIREMENTS[_profile_id] = FeaturePermissions(
-        ("CREATE SESSION", *("SELECT " + item for item in _objects)), (),
+        (*ORACLE_COMMON_MONITOR_REQUIREMENTS, *("SELECT " + item for item in _objects)), (),
         "Data Guard role, lag, process, or archive destination evidence is unavailable.",
-        _objects,
+        (*tuple(item.removeprefix("SELECT ") for item in ORACLE_COMMON_MONITOR_REQUIREMENTS
+                if item.startswith("SELECT ")), *_objects),
     )
 
 

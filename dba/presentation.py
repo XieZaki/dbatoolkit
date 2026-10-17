@@ -153,6 +153,9 @@ def render_human(command: str, value: Any) -> str:
             vendor = runtime.get("vendor_error")
             if isinstance(vendor, dict):
                 lines.append(_line("Vendor Error", vendor.get("message") or vendor.get("vendor_code")))
+                lines.append(_line("Toolkit Classification", vendor.get("classification", "UNKNOWN")))
+                if vendor.get("guidance"):
+                    lines.append(_line("Vendor Guidance", vendor["guidance"]))
             if data.get("guidance"):
                 lines.extend(["", "Guidance", f"  {data['guidance']}"])
             row = next((item for item in data.get("features", [])

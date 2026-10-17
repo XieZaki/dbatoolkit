@@ -7,8 +7,10 @@ import yaml
 from dba.cli import main
 from dba.core import DatabaseType
 from dba.credentials import Credential, MockCredentialProvider
+from dba.database_errors import normalize_oracle_error
 from dba.errors import ToolkitError
 from dba.permissions import (
+    ORACLE_COMMON_MONITOR_REQUIREMENTS,
     REGISTRY,
     VERSION_DETECTION_PRIVILEGES,
     PermissionStatus,
@@ -177,8 +179,10 @@ def test_oracle_replication_permissions_render_static_guidance_when_preflight_fa
             raise ToolkitError(
                 "PreflightFailed", "Oracle monitor identity or version unavailable.",
                 database_error={"database_type": "oracle", "driver": "python-oracledb",
-                                "vendor_code": "ORA-01045", "sqlstate": None,
-                                "message": "ORA-01045: user lacks CREATE SESSION"},
+                                "vendor_code": "ORA-00942", "sqlstate": None,
+                                "message": 'ORA-00942: table or view "SYS"."V_$INSTANCE" does not exist',
+                                "classification": "MONITORING_OBJECT_UNAVAILABLE",
+                                "guidance": "Verify view existence and direct SELECT grant."},
             )
 
         def __exit__(self, *_args: object) -> None:
@@ -192,19 +196,27 @@ def test_oracle_replication_permissions_render_static_guidance_when_preflight_fa
     assert output["success"] is True
     assert output["features"][0]["status"] == "UNKNOWN"
     assert output["runtime_verification"]["status"] == "FAILED"
-    assert output["runtime_verification"]["vendor_error"]["vendor_code"] == "ORA-01045"
+    assert output["runtime_verification"]["vendor_error"]["vendor_code"] == "ORA-00942"
+    assert output["runtime_verification"]["vendor_error"]["classification"] == "MONITORING_OBJECT_UNAVAILABLE"
     assert "never-output" not in json.dumps(output)
     if declared_family == "26ai":
         row = output["features"][0]
         assert output["version_profile"]["version_status"] == "UNVERIFIED"
         assert "SELECT SYS.V_$DATAGUARD_PROCESS" in row["required_privileges"]
+        assert "SELECT SYS.V_$INSTANCE" in row["required_privileges"]
+        assert "GRANT SELECT ON SYS.V_$INSTANCE TO DBA_MONITOR" in row["reference_grant"]
+        assert "SELECT SYS.V_$SESSION" in row["required_privileges"]
+        assert "SELECT SYS.V_$SQL" in row["required_privileges"]
+        assert "SELECT SYS.V_$TRANSACTION" in row["required_privileges"]
         assert "GRANT SELECT ON SYS.V_$DATAGUARD_PROCESS TO DBA_MONITOR" in row["reference_grant"]
         assert "V_$MANAGED_STANDBY" not in row["required_privileges"]
         assert main(["--inventory", str(inventory), "permissions", "oracle", "--feature",
                      "replication"], provider=provider, driver=object()) == 0
         human = capsys.readouterr().out
         assert "Version Status" in human and "UNVERIFIED" in human
-        assert "Vendor Error" in human and "ORA-01045" in human
+        assert "Vendor Error" in human and "ORA-00942" in human
+        assert "MONITORING_OBJECT_UNAVAILABLE" in human
+        assert "Vendor Guidance" in human and "direct SELECT" in human
         assert "Reference Grants" in human
         assert "Toolkit did NOT execute this script." in human
     else:
@@ -231,4 +243,82 @@ def test_oracle_11gr2_offline_replication_grant_uses_legacy_objects_only() -> No
     assert "SELECT SYS.V_$MANAGED_STANDBY" in required
     assert "SELECT SYS.V_$DATAGUARD_PROCESS" not in required
     assert "V_$DATAGUARD_PROCESS" not in grant
+
+
+@pytest.mark.parametrize(("family", "profile_id", "feature_objects"), [
+    ("11gr2", "oracle11gr2_replication", ("SYS.V_$DATAGUARD_STATS", "SYS.V_$MANAGED_STANDBY",
+                                            "SYS.V_$ARCHIVE_DEST_STATUS")),
+    ("12c", "oracle12c_121_replication", ("SYS.V_$DATAGUARD_STATS", "SYS.V_$MANAGED_STANDBY",
+                                            "SYS.V_$ARCHIVE_DEST_STATUS")),
+    ("12c", "oracle12c_122_replication", ("SYS.V_$DATAGUARD_STATS", "SYS.V_$DATAGUARD_PROCESS",
+                                            "SYS.V_$ARCHIVE_DEST_STATUS")),
+    ("19c", "oracle_modern_replication", ("SYS.V_$DATAGUARD_STATS", "SYS.V_$DATAGUARD_PROCESS",
+                                            "SYS.V_$ARCHIVE_DEST_STATUS")),
+    ("23ai", "oracle_modern_replication", ("SYS.V_$DATAGUARD_STATS", "SYS.V_$DATAGUARD_PROCESS",
+                                             "SYS.V_$ARCHIVE_DEST_STATUS")),
+    ("26ai", "oracle_modern_replication", ("SYS.V_$DATAGUARD_STATS", "SYS.V_$DATAGUARD_PROCESS",
+                                             "SYS.V_$ARCHIVE_DEST_STATUS")),
+])
+def test_oracle_replication_profiles_include_bootstrap_version_and_feature_permissions(
+    family: str, profile_id: str, feature_objects: tuple[str, ...],
+) -> None:
+    detected = None
+    if family == "12c":
+        variant = "12_1" if profile_id.endswith("121_replication") else "12_2_plus"
+        detected = DetectedDatabaseVersion(
+            f"Oracle 12.{1 if variant == '12_1' else 2}.0.1", "12c", variant
+        )
+    profile = PROFILE_RESOLVER.resolve(DatabaseType.ORACLE, family, detected, "replication")
+    assert profile.permission_profile_id == profile_id
+    required = requirements_for_profile(profile_id).required
+    assert all(item in required for item in ORACLE_COMMON_MONITOR_REQUIREMENTS)
+    assert all("SELECT " + item in required for item in feature_objects)
+    if family == "11gr2" or (family == "12c" and profile.runtime_variant == "12_1"):
+        assert "SELECT SYS.V_$DATAGUARD_PROCESS" not in required
+    grant = render_profile_sql(profile_id, DatabaseType.ORACLE, "DBA_MONITOR")
+    assert "GRANT CREATE SESSION TO DBA_MONITOR" in grant
+    assert "GRANT SELECT ON SYS.V_$INSTANCE TO DBA_MONITOR" in grant
+    assert "GRANT SELECT ON SYS.V_$VERSION TO DBA_MONITOR" in grant
+    assert "SYSDBA" not in grant and "SELECT_CATALOG_ROLE" not in grant and " TO DBA;" not in grant
+
+
+def test_oracle_replication_contract_explicitly_covers_fixed_bootstrap_sql_dependencies() -> None:
+    # This is intentionally an explicit contract, not SQL-derived permission inference.
+    required = requirements_for_profile("oracle_modern_replication").required
+    audited_preflight_views = {
+        "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION", "SELECT SYS.V_$DATABASE",
+        "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL", "SELECT SYS.V_$TRANSACTION",
+    }
+    assert audited_preflight_views <= set(required)
+    assert VERSION_DETECTION_PRIVILEGES[DatabaseType.ORACLE][0] in required
+
+
+def test_oracle_replication_missing_bootstrap_object_is_isolated_but_full_grant_is_complete() -> None:
+    requirements = requirements_for_profile("oracle_modern_replication")
+    observed = tuple(item for item in requirements.required
+                     if item != "SELECT SYS.V_$INSTANCE")
+    status, missing = status_for(requirements, observed)
+    assert status == PermissionStatus.MISSING
+    assert missing == ("SELECT SYS.V_$INSTANCE",)
+    grant = render_profile_sql("oracle_modern_replication", DatabaseType.ORACLE, "DBA_MONITOR")
+    assert "GRANT SELECT ON SYS.V_$INSTANCE TO DBA_MONITOR" in grant
+    assert all(item.removeprefix("SELECT ") in grant for item in requirements.required
+               if item.startswith("SELECT "))
+
+
+@pytest.mark.parametrize(("message", "classification"), [
+    ('ORA-00942: table or view "SYS"."V_$INSTANCE" does not exist',
+     "MONITORING_OBJECT_UNAVAILABLE"),
+    ('ORA-00942: table or view "APP"."V_$INSTANCE" does not exist', "UNKNOWN"),
+    ('ORA-00942: table or view "APP"."CUSTOM_TABLE" does not exist', "UNKNOWN"),
+])
+def test_oracle_942_classifies_only_known_toolkit_monitoring_objects(
+    message: str, classification: str,
+) -> None:
+    error = normalize_oracle_error(RuntimeError(message))
+    assert error.vendor_code == "ORA-00942"
+    assert error.message == message
+    assert error.classification == classification
+    if classification != "UNKNOWN":
+        assert "direct SELECT" in (error.guidance or "")
 

@@ -143,5 +143,25 @@ def normalize_oracle_error(exc: Exception, secrets: tuple[str, ...] = ()) -> Dat
         code = f"ORA-{code_value:05d}" if type(code_value) is int else str(code_value)
     classification = "AUTHENTICATION_FAILED" if code == "ORA-01017" else "UNKNOWN"
     guidance = "Check the stored monitoring credential." if classification == "AUTHENTICATION_FAILED" else None
+    if code == "ORA-00942":
+        # ORA-00942 is ambiguous in general. Classify only when Oracle names a
+        # fixed monitoring object used by reviewed Toolkit SQL; the object may
+        # still be absent on that server version, so guidance remains qualified.
+        known_monitoring_objects = {
+            "V_$INSTANCE", "V_$VERSION", "V_$DATABASE", "V_$SESSION", "V_$SQL",
+            "V_$TRANSACTION", "V_$DATAGUARD_STATS", "V_$MANAGED_STANDBY",
+            "V_$DATAGUARD_PROCESS", "V_$ARCHIVE_DEST_STATUS", "V_$LOCK",
+            "V_$LOCKED_OBJECT", "V_$PROCESS", "V_$SESSION_WAIT",
+            "V_$RECOVERY_FILE_DEST", "V_$RECOVERY_AREA_USAGE", "V_$ARCHIVED_LOG",
+            "V_$LOG_HISTORY",
+        }
+        normalized = message.replace('"', "").replace("'", "").upper()
+        if any(re.search(rf"(?<![A-Z0-9_$.])(?:SYS\.)?{re.escape(name)}(?![A-Z0-9_$])", normalized)
+               for name in known_monitoring_objects):
+            classification = "MONITORING_OBJECT_UNAVAILABLE"
+            guidance = (
+                "Ask the DBA to verify that the named Toolkit monitoring view exists for this "
+                "Oracle version and that the monitor account has direct SELECT on its SYS.V_$ object."
+            )
     return DatabaseErrorDetail("oracle", "python-oracledb", code, None, message,
                                classification, guidance)
