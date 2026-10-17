@@ -261,6 +261,7 @@ def test_interrupt_closes_connection() -> None:
     assert driver.connection.closed
 
 
+@pytest.mark.integration
 def test_pg_cli_connection_collect_and_diagnose(tmp_path: Path,
                                                 capsys: pytest.CaptureFixture[str]) -> None:
     inventory = tmp_path / "inventory.yaml"

@@ -87,6 +87,7 @@ def test_replication_permission_registry_and_sql_alignment(db_type: DatabaseType
                for script in scripts if "replication" in script.metadata.name)
 
 
+@pytest.mark.regression
 def test_mysql_multichannel_threads_lag_errors_gtid_and_backlog() -> None:
     adapter = _FakeAdapter(DatabaseType.MYSQL, "8.4.1", {
         "replication_server_info": _result("replication_server_info", ({"server_uuid": "node-a",
@@ -110,6 +111,7 @@ def test_mysql_multichannel_threads_lag_errors_gtid_and_backlog() -> None:
     assert adapter.calls == ["replication_server_info", "replication_status"]
 
 
+@pytest.mark.regression
 def test_mysql_null_lag_and_configured_delay_are_not_false_healthy_lag() -> None:
     adapter = _FakeAdapter(DatabaseType.MYSQL, "8.0.21", {
         "replication_server_info": _result("replication_server_info", ({"read_only": 1},)),
@@ -165,6 +167,7 @@ def test_postgresql_standby_without_receiver_is_disconnected_and_timestamp_is_co
     assert any(item.kind == "replay_timestamp_age" and item.severity == "INFO" for item in report.lag)
 
 
+@pytest.mark.regression
 def test_postgresql_unconfigured_is_not_critical() -> None:
     adapter = _FakeAdapter(DatabaseType.POSTGRESQL, "15.8", {
         "replication_node": _result("replication_node", ({"in_recovery": False,
@@ -180,6 +183,7 @@ def test_postgresql_unconfigured_is_not_critical() -> None:
     assert not any(issue.severity in {"HIGH", "CRITICAL"} for issue in report.issues)
 
 
+@pytest.mark.regression
 def test_sqlserver_ag_role_and_queue_units_and_old_version_unsupported() -> None:
     adapter = _FakeAdapter(DatabaseType.SQLSERVER, "16.0.4305.5", {
         "replication_ag": _result("replication_ag", ({"ag_name": "ag-a",
@@ -200,6 +204,7 @@ def test_sqlserver_ag_role_and_queue_units_and_old_version_unsupported() -> None
     assert not old.calls
 
 
+@pytest.mark.regression
 def test_sqlserver_no_ag_is_not_configured() -> None:
     adapter = _FakeAdapter(DatabaseType.SQLSERVER, "15.0.4312", {
         "replication_ag": _result("replication_ag", ()),
@@ -209,6 +214,7 @@ def test_sqlserver_no_ag_is_not_configured() -> None:
     assert report.summary.overall == "HEALTHY"
 
 
+@pytest.mark.regression
 def test_oracle_primary_no_data_guard_and_standby_vendor_error() -> None:
     primary = _FakeAdapter(DatabaseType.ORACLE, "23.0.0", {
         "replication_database": _result("replication_database", ({"database_role": "PRIMARY",

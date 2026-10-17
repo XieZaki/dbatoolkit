@@ -307,6 +307,7 @@ def test_no_reference_when_snapshot_missing_root_or_cycle() -> None:
     assert not any(f.reference_commands for f in rac.findings)
 
 
+@pytest.mark.integration
 def test_cli_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     instance, _, _, driver = fixture()
 

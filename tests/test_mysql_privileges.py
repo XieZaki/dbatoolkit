@@ -18,6 +18,7 @@ def classify(*grants: str, roles: str = "NONE"):
     return classify_mysql_grants(grants, ACCOUNT, roles)
 
 
+@pytest.mark.regression
 def test_global_select_is_non_privileged_and_maps_only_read_capability() -> None:
     security, observed = classify("GRANT SELECT ON *.* TO `dba_monitor`@`%`")
     assert security["classification"] == "NON_PRIVILEGED"

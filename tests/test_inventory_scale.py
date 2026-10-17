@@ -67,6 +67,7 @@ def test_default_tags_are_normalized_per_entry(tmp_path: Path) -> None:
     assert inventory.get("one").tags is not inventory.get("two").tags
 
 
+@pytest.mark.regression
 def test_duplicate_id_includes_both_sources_and_cli_validate(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

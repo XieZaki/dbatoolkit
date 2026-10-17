@@ -260,6 +260,7 @@ def test_linux_keyring_probe_requires_live_backend_access(
     assert store.available() is accessible
 
 
+@pytest.mark.regression
 def test_credentials_cli_never_prints_password(capsys: pytest.CaptureFixture[str]) -> None:
     store = FakeStore({"shared": Credential("monitor", PASSWORD)})
     assert main(["credentials", "list"], credential_store=store) == 0

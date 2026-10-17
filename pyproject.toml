@@ -50,7 +50,17 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--basetemp=.tmp/pytest"
+addopts = "--basetemp=.tmp/pytest --strict-markers"
+markers = [
+    "unit: deterministic function or component tests using fakes and temporary files",
+    "integration: multiple Toolkit components composed with fake drivers or local files",
+    "system: opt-in tests that invoke the real CLI against explicitly approved local-test inventory",
+    "regression: tests that preserve a previously fixed defect or security boundary",
+    "mysql: database-specific coverage for MySQL",
+    "postgresql: database-specific coverage for PostgreSQL",
+    "sqlserver: database-specific coverage for SQL Server",
+    "oracle: database-specific coverage for Oracle",
+]
 
 [tool.mypy]
 python_version = "3.11"

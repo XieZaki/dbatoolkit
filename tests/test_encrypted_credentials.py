@@ -66,6 +66,7 @@ def test_encrypted_store_format_randomness_roundtrip_and_secret_absence(tmp_path
 
 
 @pytest.mark.skipif(not crypto_available(), reason="cryptography and argon2-cffi are not installed")
+@pytest.mark.regression
 def test_wrong_password_ciphertext_and_header_tampering_fail_closed(tmp_path: Path) -> None:
     path = tmp_path / "credentials.enc"
     _store(path).initialize(MASTER)
@@ -235,6 +236,7 @@ def test_file_lock_rejects_concurrent_update(tmp_path: Path, monkeypatch: pytest
                 pass
 
 
+@pytest.mark.regression
 def test_encrypted_provider_does_not_fallback_when_store_is_corrupt(tmp_path: Path) -> None:
     from dba.encrypted_credentials import CredentialResolver
 

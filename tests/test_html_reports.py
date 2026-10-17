@@ -168,7 +168,7 @@ def test_displayed_sql_obeys_report_character_policy() -> None:
     assert "x" * 100 not in page
 
 
-@pytest.mark.parametrize("session_count", [100, 500, 1000])
+@pytest.mark.parametrize("session_count", [20, 50, 100, 500, 1000, 5000])
 def test_default_human_report_budget_for_high_session_counts(session_count: int) -> None:
     from dba.reporting import DEFAULT_HUMAN_REPORT_POLICY, render_bounded
 

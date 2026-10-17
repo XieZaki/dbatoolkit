@@ -231,6 +231,7 @@ def test_real_driver_path_selects_odbc_preference(
         assert f"DRIVER={{{selected}}}" in driver.calls[0]["connection_string"]
 
 
+@pytest.mark.regression
 def test_driver17_honors_explicit_tls_settings(
     instance: DatabaseInstance, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -405,6 +406,7 @@ def test_explicit_high_risk_error_has_trigger_reason(adapter: SQLServerAdapter, 
     }
 
 
+@pytest.mark.regression
 def test_public_inherited_execute_on_system_object_is_unknown_not_privileged(
     adapter: SQLServerAdapter, driver: FakeDriver
 ) -> None:
@@ -729,6 +731,7 @@ def test_cli_other_database_and_disabled(
     assert not driver.calls
 
 
+@pytest.mark.integration
 def test_cli_check_and_status_human_and_json(
     instance: DatabaseInstance, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

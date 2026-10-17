@@ -4,6 +4,8 @@ import json
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from dba.database_errors import (
     normalize_mysql_error,
     normalize_oracle_error,
@@ -34,6 +36,7 @@ def test_mysql_known_codes_and_unknown_are_not_guessed() -> None:
         assert normalize_mysql_error(Exception(code, "vendor evidence")).classification == classification
 
 
+@pytest.mark.regression
 def test_vendor_error_secret_redaction_preserves_nonsecret_evidence() -> None:
     detail = normalize_mysql_error(
         Exception(1045, f"Access denied for user 'monitor' (PWD={SECRET})"), (SECRET,)
@@ -82,6 +85,8 @@ def test_oracle_error_extracts_ora_code_and_message() -> None:
     assert "invalid username/password" in detail.message
 
 
+@pytest.mark.integration
+@pytest.mark.regression
 def test_human_and_json_output_preserve_vendor_message_and_redact_secret() -> None:
     data = {
         "success": False, "error_type": "ConnectionFailed", "database_id": "mysql84",

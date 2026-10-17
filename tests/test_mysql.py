@@ -277,6 +277,7 @@ def test_newer_mysql_version_requires_same_capability_probes() -> None:
     assert "blocking" in driver.connection.executed
 
 
+@pytest.mark.regression
 def test_global_select_is_non_privileged_but_permission_readiness_is_missing() -> None:
     target, driver = adapter()
     driver.connection.results["monitor_grants"] = [{
@@ -295,6 +296,7 @@ def test_global_select_is_non_privileged_but_permission_readiness_is_missing() -
     "GRANT ALL PRIVILEGES ON *.* TO `toolkit_monitor`@`%`",
     "GRANT SELECT ON *.* TO `toolkit_monitor`@`%` WITH GRANT OPTION",
 ])
+@pytest.mark.regression
 def test_mysql_high_risk_grant_reports_trigger(grant: str) -> None:
     target, driver = adapter()
     driver.connection.results["monitor_grants"] = [{"Grants": grant}]
@@ -486,6 +488,7 @@ def test_missing_replication_permission_has_structured_preflight_guidance() -> N
     assert error.permission_readiness["toolkit_executed"] is False
 
 
+@pytest.mark.regression
 def test_streaming_cursor_is_closed_before_connection_on_truncation() -> None:
     driver = FakeDriver()
     driver.cursors = SimpleNamespace(SSCursor=FakeCursor)
@@ -500,6 +503,7 @@ def test_streaming_cursor_is_closed_before_connection_on_truncation() -> None:
     assert driver.connection.closed
 
 
+@pytest.mark.regression
 def test_permission_query_failure_closes_cursor_before_connection() -> None:
     driver = FakeDriver()
     target, _ = adapter(driver)
@@ -593,6 +597,7 @@ def test_high_concurrency_uses_statements_and_interrupt_closes() -> None:
     assert driver.connection.closed
 
 
+@pytest.mark.integration
 def test_mysql_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     inventory = tmp_path / "inventory.yaml"
     inventory.write_text(yaml.safe_dump({"databases": [
@@ -618,6 +623,8 @@ def test_mysql_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert json.loads(capsys.readouterr().out)["success"] and report.exists()
 
 
+@pytest.mark.integration
+@pytest.mark.regression
 def test_replication_cli_explains_missing_replication_client_without_traceback(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
