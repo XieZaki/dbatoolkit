@@ -61,6 +61,10 @@ ROOT = Path(__file__).resolve().parents[1]
     (DatabaseType.ORACLE, "Oracle Database 19c Release 19.0.0.0.0", "19c", None),
     (DatabaseType.ORACLE, "Oracle Database 23ai Release 23.0.0.0.0", "23ai", None),
     (DatabaseType.ORACLE, "Oracle Database 26ai Release 23.26.0.0.0", "26ai", None),
+    (DatabaseType.ORACLE,
+     "Oracle AI Database 26ai Enterprise Edition Release 23.26.1.0.0", "26ai", None),
+    (DatabaseType.ORACLE,
+     "Oracle Database 26 AI Enterprise Edition Release 23.26.0.0.0", "26ai", None),
     (DatabaseType.ORACLE, "Oracle Database 24x Release 24.0.0.0.0", None, None),
     (DatabaseType.ORACLE, "not a version banner", None, None),
 ])
@@ -103,6 +107,94 @@ class FakeExecutor:
         now = datetime.now(timezone.utc)
         return CollectorResult("version-test", script.metadata.name, now, now, 0.1,
                                (self.row,), 1, False, True)
+
+
+class RowsExecutor:
+    def __init__(
+        self, rows: tuple[dict[str, Any], ...], *, success: bool = True,
+        error_type: str | None = None, database_error: dict[str, Any] | None = None,
+    ) -> None:
+        self.rows = rows
+        self.success = success
+        self.error_type = error_type
+        self.database_error = database_error
+        self.script: SqlScript | None = None
+
+    def execute_readonly(self, script: SqlScript) -> CollectorResult:
+        self.script = script
+        now = datetime.now(timezone.utc)
+        return CollectorResult(
+            "version-test", script.metadata.name, now, now, 0.1, self.rows,
+            len(self.rows), False, self.success, self.error_type,
+            "Oracle version query failed." if not self.success else None,
+            self.database_error,
+        )
+
+
+def test_oracle_version_query_filters_database_product_banner_and_limits_rows() -> None:
+    registry = SqlScriptRegistry(ROOT / "sql")
+    script = registry.get("version_detect", DatabaseType.ORACLE)
+    normalized_sql = " ".join(script.text.upper().split())
+    assert "FROM V$VERSION" in normalized_sql
+    assert "UPPER(BANNER) LIKE 'ORACLE%DATABASE%RELEASE%'" in normalized_sql
+    assert "ROWNUM = 1" in normalized_sql
+    assert "BANNER_FULL" not in normalized_sql
+    assert script.metadata.reviewed is True
+    assert script.metadata.risk == "READ_ONLY"
+    assert script.metadata.max_rows == 2
+
+    # V$VERSION contains component rows as well as the one product row. The
+    # fixed SQL predicate must identify a database release banner and cap it.
+    banners = (
+        "PL/SQL Release 23.0.0.0.0 - Production",
+        "CORE 23.0.0.0.0 Production",
+        "TNS for Linux: Version 23.0.0.0.0 - Production",
+        "NLSRTL Version 23.0.0.0.0 - Production",
+        "Oracle AI Database 26ai Enterprise Edition Release 23.26.1.0.0",
+    )
+    product_rows = tuple(
+        {"raw_version": banner}
+        for banner in banners
+        if "oracle" in banner.casefold()
+        and "database" in banner.casefold()
+        and "release" in banner.casefold()
+    )[:1]
+    executor = RowsExecutor(product_rows)
+    detected = detect_database_version(DatabaseType.ORACLE, registry, executor)
+    assert executor.script is not None and executor.script.metadata.name == "version_detect"
+    assert detected.detected is not None
+    assert detected.detected.raw_version == banners[-1]
+    assert detected.detected.normalized_family == "26ai"
+
+
+def test_oracle_version_detection_zero_product_rows_is_incomplete() -> None:
+    registry = SqlScriptRegistry(ROOT / "sql")
+    executor = RowsExecutor(())
+    detected = detect_database_version(DatabaseType.ORACLE, registry, executor)
+    assert detected.detected is None
+    assert detected.error_type == "VersionDetectionIncomplete"
+
+
+def test_oracle_version_detection_rejects_multiple_unexpected_rows() -> None:
+    registry = SqlScriptRegistry(ROOT / "sql")
+    executor = RowsExecutor((
+        {"raw_version": "Oracle Database 19c Enterprise Edition Release 19.0.0.0.0"},
+        {"raw_version": "Oracle AI Database 26ai Enterprise Edition Release 23.26.1.0.0"},
+    ))
+    detected = detect_database_version(DatabaseType.ORACLE, registry, executor)
+    assert detected.detected is None
+    assert detected.error_type == "VersionDetectionIncomplete"
+    assert "exactly one row" in (detected.error_message or "")
+
+
+def test_oracle_version_detection_preserves_vendor_query_error() -> None:
+    registry = SqlScriptRegistry(ROOT / "sql")
+    executor = RowsExecutor((), success=False, error_type="CapabilityUnavailable",
+                            database_error={"vendor_code": "ORA-00942"})
+    detected = detect_database_version(DatabaseType.ORACLE, registry, executor)
+    assert detected.detected is None
+    assert detected.error_type == "CapabilityUnavailable"
+    assert detected.database_error == {"vendor_code": "ORA-00942"}
 
 
 @pytest.mark.integration

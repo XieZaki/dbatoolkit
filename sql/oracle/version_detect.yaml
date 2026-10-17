@@ -4,4 +4,4 @@ risk: READ_ONLY
 timeout_seconds: 5
 max_rows: 2
 reviewed: true
-description: Read-only Oracle release detection using V$VERSION; requires direct SELECT on SYS.V_$VERSION.
+description: Read-only Oracle product release detection using the 11gR2-compatible BANNER field; filters database product banners and caps SQL output at one row; requires direct SELECT on SYS.V_$VERSION.
