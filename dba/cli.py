@@ -106,6 +106,16 @@ def _account_security(adapter: Any) -> dict[str, Any]:
     return {"classification": "NON_PRIVILEGED", "evidence_source": "monitor_preflight"}
 
 
+def _database_error_payload(error: object) -> dict[str, Any] | None:
+    if isinstance(error, dict):
+        return error
+    to_dict = getattr(error, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
 class _InjectedCredentialProvider(CredentialProvider):
     """Use only the explicitly injected store; never auto-resolve another backend."""
 
@@ -1214,6 +1224,67 @@ def main(
         return 130
     except (OSError, ValidationError, UnicodeError, ToolkitError) as exc:
         # YAML/OS exceptions may contain supplied content: emit only safe categories.
+        if (args.command == "permissions" and args.feature == "replication"
+                and instance_for_hint is not None
+                and instance_for_hint.db_type == DatabaseType.ORACLE
+                and isinstance(exc, ToolkitError)
+                and exc.error_type in {"DriverUnavailable", "PreflightFailed", "PreflightDenied", "ConnectionFailed",
+                                      "ConnectionTimeout", "QueryFailed", "QueryTimeout",
+                                      "CapabilityUnavailable"}):
+            profile = PROFILE_RESOLVER.resolve(
+                DatabaseType.ORACLE, instance_for_hint.version_family, None, "replication"
+            )
+            error_payload = _database_error_payload(exc.database_error)
+            feature_row: dict[str, Any] = {
+                "feature": "replication",
+                "status": PermissionStatus.UNKNOWN.value,
+                "support_state": profile.support_state.value,
+                "version_profile": asdict(profile),
+                "missing_required": (),
+                "missing_optional": (),
+                "runtime_verification": "FAILED",
+            }
+            if profile.support_state == SupportState.SUPPORTED and profile.permission_profile_id:
+                requirement = requirements_for_profile(profile.permission_profile_id)
+                feature_row.update({
+                    "required_privileges": requirement.required,
+                    "impact": requirement.impact,
+                    "reference_grant": render_profile_sql(
+                        profile.permission_profile_id, DatabaseType.ORACLE,
+                        permission_credential.username if permission_credential else "DBA_MONITOR",
+                        instance_for_hint.database,
+                    ),
+                })
+                guidance = "Runtime verification failed; permissions are UNKNOWN. Review this declared-family reference grant."
+            else:
+                feature_row["impact"] = (
+                    "Permission guidance is unavailable without a declared canonical Oracle version_family."
+                )
+                guidance = "Add a canonical version_family to Inventory or restore Oracle connectivity; no profile was guessed."
+            offline_output: dict[str, Any] = {
+                "success": True,
+                "database_id": instance_for_hint.id,
+                "account": permission_credential.username if permission_credential else None,
+                "features": [feature_row],
+                "version_profile": asdict(profile),
+                "runtime_verification": {
+                    "status": "FAILED",
+                    "classification": "VERSION_OR_IDENTITY_UNVERIFIED",
+                    "error_type": exc.error_type,
+                    "message": str(exc),
+                    "vendor_error": error_payload,
+                },
+                "guidance": guidance,
+                "toolkit_executes_grants": False,
+            }
+            _emit(args, "permissions", redact(offline_output))
+            logger.warning("Oracle permission profile rendered without verified runtime identity/version.",
+                           extra={"event": {"module": "permissions", "database_id": instance_for_hint.id,
+                                            "version_status": profile.version_status.value,
+                                            "error_type": exc.error_type,
+                                            "vendor_code": error_payload.get("vendor_code")
+                                            if error_payload else None}})
+            return 0
         detail = (
             str(exc)
             if isinstance(exc, (ValidationError, ToolkitError))
@@ -1234,10 +1305,11 @@ def main(
             failure["privilege_classification"] = exc.permission_readiness.get("account_security")
         database_error = getattr(exc, "database_error", None)
         if database_error is not None:
-            vendor_payload = database_error.to_dict()
-            failure["error"] = vendor_payload
-            failure["database_type"] = vendor_payload.get("database_type")
-            failure["driver"] = vendor_payload.get("driver")
+            vendor_payload = _database_error_payload(database_error)
+            if vendor_payload is not None:
+                failure["error"] = vendor_payload
+                failure["database_type"] = vendor_payload.get("database_type")
+                failure["driver"] = vendor_payload.get("driver")
         if instance_for_hint is not None:
             failure["database_id"] = instance_for_hint.id
             failure["target"] = f"{instance_for_hint.host}:{instance_for_hint.port}"

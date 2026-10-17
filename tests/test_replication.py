@@ -9,6 +9,7 @@ import pytest
 
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
+from dba.errors import ToolkitError
 from dba.incident import build_incident_summary
 from dba.permissions import (
     REGISTRY,
@@ -40,10 +41,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _result(name: str, rows: tuple[dict[str, Any], ...], *, success: bool = True,
-            error: str | None = None) -> CollectorResult:
+            error: str | None = None,
+            database_error: dict[str, Any] | None = None) -> CollectorResult:
     now = datetime.now(timezone.utc)
     return CollectorResult("replica", name, now, now, 0.1, rows, len(rows), False,
-                           success, None if success else "QueryDenied", error)
+                           success, None if success else "QueryDenied", error, database_error)
 
 
 class _FakeAdapter:
@@ -402,6 +404,63 @@ def test_mysql_57_replication_uses_legacy_aliases_and_complete_empty_snapshot() 
     )
 
 
+@pytest.mark.parametrize(("version", "status_name"), [
+    ("8.0.21", "replication_status_legacy"),
+    ("8.0.22", "replication_status"),
+    ("8.4.11", "replication_status"),
+])
+def test_mysql_successful_empty_status_is_complete_not_configured(
+    version: str, status_name: str,
+) -> None:
+    adapter = _FakeAdapter(DatabaseType.MYSQL, version, {
+        "replication_server_info": _result("replication_server_info", ({"read_only": 0},)),
+        status_name: _result(status_name, ()),
+    }, _mysql_permissions())
+    report = diagnose_replication(adapter)
+    assert status_name in adapter.calls
+    assert report.summary.status == "NOT_CONFIGURED"
+    assert report.summary.overall == "HEALTHY"
+    assert report.summary.data_completeness == "COMPLETE"
+    assert report.summary.transport_status == "NOT_CONFIGURED"
+    assert report.summary.apply_status == "NOT_CONFIGURED"
+    assert report.members == ()
+    assert report.issues == ()
+    assert "Not applicable because replication is not configured." in render_replication_summary(
+        report, report_path=None
+    )
+
+
+def test_mysql_replica_status_query_failure_is_incomplete_and_preserves_vendor_evidence() -> None:
+    vendor_error = {"database_type": "mysql", "driver": "PyMySQL", "vendor_code": 1142,
+                    "message": "SELECT command denied; user=test denied"}
+    adapter = _FakeAdapter(DatabaseType.MYSQL, "8.4.11", {
+        "replication_server_info": _result("replication_server_info", ({"read_only": 0},)),
+        "replication_status": _result("replication_status", (), success=False,
+                                       error="Query failed", database_error=vendor_error),
+    }, _mysql_permissions())
+    report = diagnose_replication(adapter)
+    assert report.summary.status == "UNKNOWN"
+    assert report.summary.overall == "UNKNOWN"
+    assert report.summary.data_completeness == "INCOMPLETE"
+    assert report.summary.transport_status == "UNKNOWN"
+    assert "REQUIRED_EVIDENCE_MISSING" in {issue.code for issue in report.issues}
+    failed = next(sample for sample in report.details["samples"]
+                  if sample["collector"] == "replication_status")
+    assert failed["success"] is False
+    assert failed["vendor_error"] == vendor_error
+
+
+def test_singleton_replication_limits_allow_one_row_without_truncation() -> None:
+    registry = SqlScriptRegistry(ROOT / "sql")
+    for database_type, script_name in (
+        (DatabaseType.MYSQL, "replication_server_info"),
+        (DatabaseType.POSTGRESQL, "replication_receiver"),
+        (DatabaseType.ORACLE, "replication_database"),
+    ):
+        script = registry.get(script_name, database_type)
+        assert script.metadata.max_rows >= 2
+
+
 def test_oracle_11gr2_uses_legacy_data_guard_bundle_and_grants() -> None:
     adapter = _FakeAdapter(DatabaseType.ORACLE, "Oracle Database 11g Release 11.2.0.4.0", {
         "replication_database": _result("replication_database", ({"database_role": "PRIMARY"},)),
@@ -433,6 +492,22 @@ def test_version_mismatch_blocks_replication_before_feature_sql() -> None:
     assert adapter.calls == ["version_detect"]
 
 
+def test_oracle_unverified_profile_stops_before_feature_sql() -> None:
+    adapter = _FakeAdapter(DatabaseType.ORACLE, "Oracle Database 26ai 26.0.0.0.0", {},
+                           _oracle_permissions())
+    calls: list[str] = []
+
+    def failed_version_probe(script: SimpleNamespace) -> CollectorResult:
+        calls.append(script.metadata.name)
+        return _result(script.metadata.name, (), success=False,
+                       error="ORA-01045: monitor session cannot verify version")
+
+    adapter.execute_readonly = failed_version_probe  # type: ignore[method-assign]
+    with pytest.raises(ToolkitError, match="verified version family"):
+        diagnose_replication(adapter)
+    assert calls == ["version_detect"]
+
+
 def test_unconfigured_postgresql_primary_is_healthy_with_sender_capacity() -> None:
     adapter = _FakeAdapter(DatabaseType.POSTGRESQL, "16.4", {
         "replication_node": _result("replication_node", ({"in_recovery": False,
@@ -446,6 +521,7 @@ def test_unconfigured_postgresql_primary_is_healthy_with_sender_capacity() -> No
     assert report.summary.status == "NOT_CONFIGURED"
     assert report.summary.overall == "HEALTHY"
     assert report.summary.data_completeness == "COMPLETE"
+    assert report.details["permission_readiness"]["account_security"]["classification"] == "NON_PRIVILEGED"
 
 
 def test_unknown_sqlserver_2025_replication_route_fails_closed() -> None:

@@ -139,6 +139,30 @@ def render_human(command: str, value: Any) -> str:
                 lines.append(_line(f"{row['feature']} optional", ", ".join(row["missing_optional"])))
             if row.get("impact") and row.get("status") in {"PARTIAL", "MISSING", "UNKNOWN"}:
                 lines.append(_line(f"{row['feature']} impact", row["impact"]))
+        runtime = data.get("runtime_verification")
+        version = data.get("version_profile")
+        if runtime:
+            lines.extend(["", "Version",
+                          _line("Declared Family", (version or {}).get("declared_version_family")),
+                          _line("Detected Version", (version or {}).get("detected_version") or "UNKNOWN"),
+                          _line("Detected Family", (version or {}).get("detected_version_family") or "UNKNOWN"),
+                          _line("Version Status", (version or {}).get("version_status")),
+                          "", "Runtime Verification", _line("Status", runtime.get("status")),
+                          _line("Classification", runtime.get("classification")),
+                          _line("Reason", runtime.get("message"))])
+            vendor = runtime.get("vendor_error")
+            if isinstance(vendor, dict):
+                lines.append(_line("Vendor Error", vendor.get("message") or vendor.get("vendor_code")))
+            if data.get("guidance"):
+                lines.extend(["", "Guidance", f"  {data['guidance']}"])
+            row = next((item for item in data.get("features", [])
+                        if item.get("feature") == "replication"), {})
+            if row.get("required_privileges"):
+                lines.extend(["", "Required Permissions",
+                              *[f"  {item}" for item in row["required_privileges"]]])
+            if row.get("reference_grant"):
+                lines.extend(["", "Reference Grants", row["reference_grant"],
+                              "Toolkit did NOT execute this script."])
         if data.get("generated_sql"):
             lines.extend(["", "Generated SQL", data["generated_sql"],
                           "Toolkit did NOT execute this script."])

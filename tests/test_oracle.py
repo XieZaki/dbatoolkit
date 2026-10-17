@@ -176,6 +176,21 @@ def test_driver_error_redaction_and_cleanup() -> None:
     assert driver.connection.closed
 
 
+def test_preflight_failure_preserves_sanitized_vendor_error() -> None:
+    adapter, driver = adapter_for_test()
+    driver.connection.fail["preflight"] = RuntimeError(
+        "ORA-01045: user lacks CREATE SESSION; password=TOPSECRET"
+    )
+    with pytest.raises(ToolkitError) as caught:
+        adapter.connect()
+    assert caught.value.error_type == "PreflightFailed"
+    assert isinstance(caught.value.database_error, dict)
+    assert caught.value.database_error["vendor_code"] == "ORA-01045"
+    assert "ORA-01045" in caught.value.database_error["message"]
+    assert "TOPSECRET" not in repr(caught.value.database_error)
+    assert driver.connection.closed
+
+
 def test_preflight_rejects_privileged_role_and_missing_view() -> None:
     adapter, driver = adapter_for_test()
     driver.connection.data["preflight_privileges"] = [{"kind": "ROLE", "privilege_name": "DBA"}]

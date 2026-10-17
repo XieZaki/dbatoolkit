@@ -170,7 +170,10 @@ class OracleAdapter(Adapter):
 
     def _preflight(self) -> None:
         result = self._run(self.registry.get("preflight", DatabaseType.ORACLE))
-        if not result.success or result.truncated or len(result.rows) != 1:
+        if not result.success:
+            raise ToolkitError("PreflightFailed", "Oracle monitor identity or version unavailable.",
+                               database_error=result.database_error)
+        if result.truncated or len(result.rows) != 1:
             raise ToolkitError("PreflightFailed", "Oracle monitor identity or version unavailable.")
         row = result.rows[0]
         version = row.get("server_version")
@@ -185,7 +188,10 @@ class OracleAdapter(Adapter):
             raise ToolkitError("PreflightFailed", "Oracle RAC capability could not be determined.")
         self.rac_enabled = row["rac_mode"] == "YES"
         privileges = self._run(self.registry.get("preflight_privileges", DatabaseType.ORACLE))
-        if not privileges.success or privileges.truncated:
+        if not privileges.success:
+            raise ToolkitError("PreflightFailed", "Oracle role and privilege inventory is incomplete.",
+                               database_error=privileges.database_error)
+        if privileges.truncated:
             raise ToolkitError("PreflightFailed", "Oracle role and privilege inventory is incomplete.")
         allowed_system = {"CREATE SESSION"}
         for grant in privileges.rows:
@@ -195,7 +201,10 @@ class OracleAdapter(Adapter):
             if kind == "SYSTEM" and name not in allowed_system:
                 raise ToolkitError("PrivilegedAccount", "Oracle monitoring account has a non-monitor system privilege.")
         object_grants = self._run(self.registry.get("preflight_object_grants", DatabaseType.ORACLE))
-        if not object_grants.success or object_grants.truncated:
+        if not object_grants.success:
+            raise ToolkitError("PreflightFailed", "Oracle object grant inventory is incomplete.",
+                               database_error=object_grants.database_error)
+        if object_grants.truncated:
             raise ToolkitError("PreflightFailed", "Oracle object grant inventory is incomplete.")
         if any(row.get("privilege") not in {"SELECT", "READ"} or row.get("grantable") != "NO"
                for row in object_grants.rows):
@@ -218,7 +227,10 @@ class OracleAdapter(Adapter):
         )
         self.preflight_checks["version_detection_view"] = version_object in granted_views
         owned = self._run(self.registry.get("preflight_owned_objects", DatabaseType.ORACLE))
-        if not owned.success or owned.truncated or len(owned.rows) != 1:
+        if not owned.success:
+            raise ToolkitError("PreflightFailed", "Oracle owned object inventory is incomplete.",
+                               database_error=owned.database_error)
+        if owned.truncated or len(owned.rows) != 1:
             raise ToolkitError("PreflightFailed", "Oracle owned object inventory is incomplete.")
         if owned.rows[0].get("owned_objects") != 0:
             raise ToolkitError("PrivilegedAccount", "Oracle monitoring account owns database objects.")
@@ -227,7 +239,8 @@ class OracleAdapter(Adapter):
             sample = self._run(self.registry.get(name, DatabaseType.ORACLE))
             if not sample.success:
                 raise ToolkitError("PreflightDenied",
-                                   f"Missing Oracle monitoring capability: {name}; ask DBA to review SELECT on required SYS.V_$ views.")
+                                   f"Missing Oracle monitoring capability: {name}; ask DBA to review SELECT on required SYS.V_$ views.",
+                                   database_error=sample.database_error)
             self.preflight_checks[name] = True
         optional_views = {"probe_lock": "V_$LOCK", "probe_locked_object": "V_$LOCKED_OBJECT",
                           "probe_wait": "V_$SESSION_WAIT", "probe_process": "V_$PROCESS"}
@@ -306,6 +319,7 @@ class OracleAdapter(Adapter):
         started = time.monotonic()
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
+        database_error: dict[str, Any] | None = None
         truncated = False
         error: ToolkitError | None = None
         authorized = False
@@ -347,6 +361,14 @@ class OracleAdapter(Adapter):
             if error is not None:
                 rows = ()
                 truncated = False
+                if error.database_error is not None:
+                    to_dict = getattr(error.database_error, "to_dict", None)
+                    if callable(to_dict):
+                        payload = to_dict()
+                        if isinstance(payload, dict):
+                            database_error = payload
+                    elif isinstance(error.database_error, dict):
+                        database_error = error.database_error
                 self._close()
             details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated}
             if authorized:
@@ -358,7 +380,8 @@ class OracleAdapter(Adapter):
         return CollectorResult(self.instance.id, script_name, started_at,
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,
                                rows, len(rows), truncated, error is None,
-                               error.error_type if error else None, str(error) if error else None)
+                               error.error_type if error else None, str(error) if error else None,
+                               database_error)
 
     def get_server_version(self) -> str:
         if not self._ready:

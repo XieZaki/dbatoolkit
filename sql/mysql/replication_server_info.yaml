@@ -2,7 +2,7 @@ name: replication_server_info
 database_type: mysql
 risk: READ_ONLY
 timeout_seconds: 5
-max_rows: 1
+max_rows: 2
 reviewed: true
 description: Reviewed read-only MySQL local replication and role settings.
 feature: replication

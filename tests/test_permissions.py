@@ -7,15 +7,19 @@ import yaml
 from dba.cli import main
 from dba.core import DatabaseType
 from dba.credentials import Credential, MockCredentialProvider
+from dba.errors import ToolkitError
 from dba.permissions import (
     REGISTRY,
     VERSION_DETECTION_PRIVILEGES,
     PermissionStatus,
+    render_profile_sql,
     render_sql,
     requirements_for,
+    requirements_for_profile,
     scan_registry_objects,
     status_for,
 )
+from dba.versioning import PROFILE_RESOLVER, DetectedDatabaseVersion, VersionStatus
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -148,4 +152,83 @@ def test_generate_permissions_cli_is_offline_text_only(tmp_path: Path, capsys: p
     assert output["features"][0]["status"] == "UNKNOWN"
     assert "GRANT pg_monitor" in output["generated_sql"]
     assert "REVOKE" not in output["generated_sql"]
+
+
+@pytest.mark.parametrize("declared_family", ["26ai", None])
+def test_oracle_replication_permissions_render_static_guidance_when_preflight_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    declared_family: str | None,
+) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    database: dict[str, object] = {
+        "id": "oracle", "name": "Oracle test", "db_type": "oracle",
+        "host": "127.0.0.1", "port": 1521, "service_name": "FREEPDB1",
+        "credential_alias": "oracle-monitor", "enabled": True,
+    }
+    if declared_family is not None:
+        database["version_family"] = declared_family
+    inventory.write_text(yaml.safe_dump({"databases": [database]}), encoding="utf-8")
+
+    class FailedPreflightAdapter:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> object:
+            raise ToolkitError(
+                "PreflightFailed", "Oracle monitor identity or version unavailable.",
+                database_error={"database_type": "oracle", "driver": "python-oracledb",
+                                "vendor_code": "ORA-01045", "sqlstate": None,
+                                "message": "ORA-01045: user lacks CREATE SESSION"},
+            )
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr("dba.cli.OracleAdapter", FailedPreflightAdapter)
+    provider = MockCredentialProvider({"oracle-monitor": Credential("DBA_MONITOR", "never-output")})
+    assert main(["--inventory", str(inventory), "permissions", "oracle", "--feature",
+                 "replication", "--json"], provider=provider, driver=object()) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["success"] is True
+    assert output["features"][0]["status"] == "UNKNOWN"
+    assert output["runtime_verification"]["status"] == "FAILED"
+    assert output["runtime_verification"]["vendor_error"]["vendor_code"] == "ORA-01045"
+    assert "never-output" not in json.dumps(output)
+    if declared_family == "26ai":
+        row = output["features"][0]
+        assert output["version_profile"]["version_status"] == "UNVERIFIED"
+        assert "SELECT SYS.V_$DATAGUARD_PROCESS" in row["required_privileges"]
+        assert "GRANT SELECT ON SYS.V_$DATAGUARD_PROCESS TO DBA_MONITOR" in row["reference_grant"]
+        assert "V_$MANAGED_STANDBY" not in row["required_privileges"]
+        assert main(["--inventory", str(inventory), "permissions", "oracle", "--feature",
+                     "replication"], provider=provider, driver=object()) == 0
+        human = capsys.readouterr().out
+        assert "Version Status" in human and "UNVERIFIED" in human
+        assert "Vendor Error" in human and "ORA-01045" in human
+        assert "Reference Grants" in human
+        assert "Toolkit did NOT execute this script." in human
+    else:
+        assert output["version_profile"]["version_status"] == "UNKNOWN"
+        assert output["features"][0]["support_state"] == "UNKNOWN"
+        assert "reference_grant" not in output["features"][0]
+
+
+def test_oracle_runtime_mismatch_does_not_resolve_static_permission_grant() -> None:
+    profile = PROFILE_RESOLVER.resolve(
+        DatabaseType.ORACLE, "19c", DetectedDatabaseVersion("Oracle 26.0", "26ai"),
+        "replication",
+    )
+    assert profile.version_status == VersionStatus.MISMATCH
+    assert profile.permission_profile_id is None
+
+
+def test_oracle_11gr2_offline_replication_grant_uses_legacy_objects_only() -> None:
+    profile = PROFILE_RESOLVER.resolve(DatabaseType.ORACLE, "11gr2", None, "replication")
+    assert profile.version_status == VersionStatus.UNVERIFIED
+    assert profile.permission_profile_id == "oracle11gr2_replication"
+    required = requirements_for_profile(profile.permission_profile_id).required
+    grant = render_profile_sql(profile.permission_profile_id, DatabaseType.ORACLE, "DBA_MONITOR")
+    assert "SELECT SYS.V_$MANAGED_STANDBY" in required
+    assert "SELECT SYS.V_$DATAGUARD_PROCESS" not in required
+    assert "V_$DATAGUARD_PROCESS" not in grant
 

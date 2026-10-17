@@ -17,6 +17,7 @@ from dba.permissions import (
 )
 from dba.replication_collectors import (
     REPLICATION_PARSER_CONTRACTS,
+    REPLICATION_SQL_PROFILES,
     ReplicationEvidence,
     collect_replication_evidence,
 )
@@ -188,9 +189,14 @@ def _issue(code: str, severity: str, message: str, *, vendor_message: Any = None
 
 def _mysql(evidence: ReplicationEvidence, policy: ReplicationPolicy) -> dict[str, Any]:
     server = next(iter(_rows(evidence, "replication_server_info")), {})
-    channels = list(_rows(evidence, "replication_status")) or list(_rows(evidence, "replication_status_legacy"))
+    profile_scripts = REPLICATION_SQL_PROFILES.get(evidence.profile.sql_profile_id or "", ())
+    status_name = next((name for name in profile_scripts
+                        if name in {"replication_status", "replication_status_legacy"}), None)
+    status_sample = next((sample for sample in evidence.samples
+                          if sample.collector_name == status_name), None)
+    channels = list(status_sample.rows) if status_sample and status_sample.success else []
     read_only = _bool(_value(server, "read_only"))
-    status_query_ok = _sample_ok(evidence, "replication_status", "replication_status_legacy")
+    status_query_ok = bool(status_sample and status_sample.success and not status_sample.truncated)
     role = "REPLICA" if channels else "PRIMARY" if read_only is False else "UNKNOWN"
     members: list[ReplicationMember] = []
     lag: list[ReplicationLag] = []
@@ -598,8 +604,14 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
     actions = tuple(ReplicationAction(action_text.get(issue.code, issue.message)) for issue in issues
                     if issue.severity in {"WARNING", "HIGH", "CRITICAL"})
     missing = readiness["missing_required"]
+    account_security = getattr(adapter, "privilege_classification", None)
+    if not isinstance(account_security, dict) or account_security.get("classification") not in {
+        "NON_PRIVILEGED", "PRIVILEGED", "UNKNOWN",
+    }:
+        account_security = {"classification": "NON_PRIVILEGED",
+                            "evidence_source": "monitor_preflight"}
     permission = {"status": readiness["status"].value,
-                  "account_security": getattr(adapter, "privilege_classification", None),
+                  "account_security": account_security,
                   "missing_required": missing,
                   "missing_optional": readiness["missing_optional"],
                   "available": readiness["available"],
