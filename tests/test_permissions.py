@@ -9,6 +9,7 @@ from dba.core import DatabaseType
 from dba.credentials import Credential, MockCredentialProvider
 from dba.permissions import (
     REGISTRY,
+    VERSION_DETECTION_PRIVILEGES,
     PermissionStatus,
     render_sql,
     requirements_for,
@@ -102,6 +103,8 @@ def test_registry_sql_scanner_stays_aligned() -> None:
     for database_type, objects in scanned.items():
         declared = {item.lower() for definition in REGISTRY[database_type].values()
                     for item in definition.objects}
+        declared.update(item.removeprefix("SELECT ").lower() for item in
+                        VERSION_DETECTION_PRIVILEGES.get(database_type, ()))
         assert objects <= declared
     assert "show binary logs" in scanned[DatabaseType.MYSQL]
 
@@ -125,6 +128,8 @@ def test_permission_registry_preflight_alignment() -> None:
     for view in ("V_$INSTANCE", "V_$DATABASE", "V_$SESSION", "V_$SQL", "V_$TRANSACTION"):
         assert view in oracle
         assert f"SELECT SYS.{view}" in REGISTRY[DatabaseType.ORACLE]["slow"].required
+    assert VERSION_DETECTION_PRIVILEGES[DatabaseType.ORACLE] == ("SELECT SYS.V_$VERSION",)
+    assert "version_detection_view" in oracle
 
 
 def test_generate_permissions_cli_is_offline_text_only(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -91,15 +91,17 @@ def fixture() -> tuple[DatabaseInstance, SqlScriptRegistry, MockCredentialProvid
     instance = DatabaseInstance("oracle-test", "Oracle Test", DatabaseType.ORACLE,
                                 "example.invalid", 1521, "oracle-monitor", service_name="FREEPDB1")
     registry = SqlScriptRegistry(ROOT / "sql")
-    names = OracleAdapter.REQUIRED
+    names = (*OracleAdapter.REQUIRED, "version_detect")
     sql_names = {registry.get(name, DatabaseType.ORACLE).text: name for name in names}
     data: dict[str, list[dict[str, Any]]] = {
         "preflight": [{"server_version": "19.0.0.0.0", "inst_id": 1, "rac_mode": "NO",
                        "monitor_user": "MONITOR"}],
+        "version_detect": [{"raw_version": "Oracle Database 19c Enterprise Edition "
+                                           "Release 19.0.0.0.0 - Production"}],
         "preflight_privileges": [{"kind": "SYSTEM", "privilege_name": "CREATE SESSION"}],
         "preflight_object_grants": [
             {"owner": "SYS", "table_name": name, "privilege": "SELECT", "grantable": "NO"}
-            for name in ("V_$INSTANCE", "V_$DATABASE", "V_$SESSION", "V_$SQL",
+            for name in ("V_$INSTANCE", "V_$DATABASE", "V_$VERSION", "V_$SESSION", "V_$SQL",
                          "V_$TRANSACTION", "V_$LOCK", "V_$LOCKED_OBJECT",
                          "V_$PROCESS", "V_$SESSION_WAIT")],
         "preflight_owned_objects": [{"owned_objects": 0}],
@@ -137,6 +139,18 @@ def test_oracle_connect_collect_and_close() -> None:
     assert driver.connection.closed
     assert all(cursor.closed for cursor in driver.connection.cursors)
     assert "TOPSECRET" not in repr(adapter)
+
+
+def test_version_view_is_reported_as_detection_capability_without_auto_grant() -> None:
+    adapter, driver = adapter_for_test()
+    driver.connection.data["preflight_object_grants"] = [
+        row for row in driver.connection.data["preflight_object_grants"]
+        if row["table_name"] != "V_$VERSION"
+    ]
+    with adapter:
+        assert adapter.preflight_checks["version_detection_view"] is False
+        assert "SELECT SYS.V_$VERSION" not in adapter.permission_observations
+        assert adapter.get_server_version().startswith("19.")
 
 
 def test_sid_target_and_invalid_targets() -> None:

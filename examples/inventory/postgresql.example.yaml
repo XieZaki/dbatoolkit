@@ -2,6 +2,7 @@ databases:
   - id: example-postgresql
     name: Example PostgreSQL
     db_type: postgresql
+    version_family: "16"
     host: 198.51.100.10
     port: 5432
     database: exampledb

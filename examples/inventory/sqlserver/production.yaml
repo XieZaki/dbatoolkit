@@ -1,6 +1,7 @@
 # Example only. Copy and review before use; do not load examples in production.
 defaults:
   db_type: sqlserver
+  version_family: "2022"
   port: 1433
   environment: test
   credential_alias: sqlserver-monitor-example

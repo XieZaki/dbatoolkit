@@ -1,0 +1,4 @@
+SELECT BANNER AS raw_version
+FROM V$VERSION
+WHERE BANNER LIKE 'Oracle Database%'
+  AND ROWNUM = 1;

@@ -27,6 +27,7 @@ class CheckResult:
     status: str
     warnings: tuple[str, ...] = ()
     account_security: dict[str, Any] | None = None
+    version_profile: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,15 @@ def render_human(command: str, value: Any) -> str:
                  _line("Status", data["connection"].get("status")),
                  _line("TLS", data["connection"].get("tls")), "", "Account Security",
                  _line("Classification", (data.get("account_security") or {}).get("classification")),
+                 "", "Version",
+                 _line("Declared Family", (data.get("version_profile") or {}).get(
+                     "declared_version_family")),
+                 _line("Detected Version", (data.get("version_profile") or {}).get(
+                     "detected_version")),
+                 _line("Detected Family", (data.get("version_profile") or {}).get(
+                     "detected_version_family")),
+                 _line("Version Status", (data.get("version_profile") or {}).get(
+                     "version_status")),
                  "", "Permission Readiness",
                  "  Feature             Status", "  " + "-" * 25]
         lines.extend(f"  {row['feature']:<20}{row['status']}" for row in data["permissions"])
@@ -87,6 +97,13 @@ def render_human(command: str, value: Any) -> str:
         if data.get("warnings"):
             lines.extend(["", "Warnings"])
             lines.extend(f"  {i}. {warning}" for i, warning in enumerate(data["warnings"], 1))
+        detection_error = (data.get("version_profile") or {}).get("version_detection_error")
+        if detection_error:
+            lines.extend(["", "Version Detection", _line("Error", detection_error.get("error_type")),
+                          _line("Detail", detection_error.get("message"))])
+            if detection_error.get("required_detection_privilege"):
+                lines.append(_line("Required Privilege",
+                                   detection_error["required_detection_privilege"]))
         return "\n".join(lines)
     if command == "status":
         database = data["database"]

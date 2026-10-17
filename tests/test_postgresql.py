@@ -68,7 +68,10 @@ class FakeConnection:
         self.rollbacks = 0
         self.executed: list[str] = []
         self.cursors: list[FakeCursor] = []
-        self.results: dict[str, list[dict[str, Any]]] = {"preflight": [dict(PREFLIGHT)]}
+        self.results: dict[str, list[dict[str, Any]]] = {
+            "preflight": [dict(PREFLIGHT)],
+            "version_detect": [{"raw_version": "16.4", "server_version_num": 160004}],
+        }
         self.failures: dict[str, BaseException] = {}
 
     def cursor(self) -> FakeCursor:

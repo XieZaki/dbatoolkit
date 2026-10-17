@@ -7,6 +7,7 @@ import yaml
 
 from dba.connection import ConnectionConfigError, validate_connection_options
 from dba.core import DatabaseInstance, DatabaseType
+from dba.versioning import canonical_version_families, validate_version_family
 
 
 class ValidationError(ValueError):
@@ -114,7 +115,18 @@ class Inventory:
             elif key == "db_type":
                 if not isinstance(value, str) or value not in {t.value for t in DatabaseType}:
                     raise ValidationError(f"{source}: {where}: Unsupported db_type")
-            elif value is None and key not in {"id", "name", "db_type", "host", "credential_alias"}:
+            elif key == "version_family":
+                if value is None:
+                    continue
+                if not isinstance(value, str):
+                    raise ValidationError(
+                        f"{source}: {where}: version_family must be a quoted string"
+                    )
+                if not value.strip():
+                    raise ValidationError(f"{source}: {where}: version_family must not be empty")
+            elif value is None and key not in {
+                "id", "name", "db_type", "host", "credential_alias", "version_family"
+            }:
                 continue
             elif not isinstance(value, str) or not value.strip():
                 raise ValidationError(f"{source}: {where}: {key} must be a nonempty string")
@@ -166,6 +178,13 @@ class Inventory:
                     )
                 try:
                     materialized = {**entry, "db_type": DatabaseType(entry["db_type"])}
+                    if materialized.get("version_family") is not None:
+                        try:
+                            validate_version_family(
+                                materialized["db_type"], materialized["version_family"]
+                            )
+                        except ValueError as exc:
+                            raise ValidationError(f"{source}: {where}: {exc}") from None
                     materialized["connection"] = validate_connection_options(
                         materialized["db_type"], materialized.get("connection", {})
                     )
@@ -174,11 +193,22 @@ class Inventory:
                     instance = DatabaseInstance(**materialized)
                 except ConnectionConfigError as exc:
                     raise ValidationError(f"{source}: {where}: {exc}") from None
+                except ValidationError:
+                    raise
                 except ValueError as exc:
                     raise ValidationError(f"{source}: {where}: Unsupported db_type") from exc
                 sources[database_id] = source
                 instances.append(instance)
         return cls(instances, sources)
+
+    def version_family_warnings(self) -> tuple[str, ...]:
+        return tuple(
+            f"Version family not declared for {instance.id}. Detected version can be used "
+            f"temporarily, but add version_family: \"<canonical>\". Supported values: "
+            f"{', '.join(canonical_version_families(instance.db_type))}."
+            for instance in self.instances
+            if instance.version_family is None and canonical_version_families(instance.db_type)
+        )
 
     def filter(
         self, db_type: str | None = None, environment: str | None = None,

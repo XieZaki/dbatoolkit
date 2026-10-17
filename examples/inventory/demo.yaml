@@ -2,6 +2,7 @@ databases:
   - id: demo-sqlserver
     name: SQL Server offline example
     db_type: sqlserver
+    version_family: "2022"
     host: sqlserver.example.invalid
     port: 1433
     database: null
@@ -18,6 +19,7 @@ databases:
   - id: demo-postgresql
     name: PostgreSQL offline example
     db_type: postgresql
+    version_family: "16"
     host: postgresql.example.invalid
     port: 5432
     environment: development
@@ -26,6 +28,7 @@ databases:
   - id: demo-mysql
     name: MySQL offline example
     db_type: mysql
+    version_family: "8.4"
     host: mysql.example.invalid
     port: 3306
     environment: development
@@ -34,6 +37,7 @@ databases:
   - id: demo-oracle
     name: Oracle offline example
     db_type: oracle
+    version_family: "23ai"
     host: oracle.example.invalid
     port: 1521
     service_name: EXAMPLE

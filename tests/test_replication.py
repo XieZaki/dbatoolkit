@@ -12,6 +12,7 @@ from dba.core import DatabaseInstance, DatabaseType
 from dba.incident import build_incident_summary
 from dba.permissions import (
     REGISTRY,
+    VERSION_DETECTION_PRIVILEGES,
     PermissionStatus,
     assess_permissions,
     render_sql,
@@ -81,6 +82,8 @@ def test_replication_permission_registry_and_sql_alignment(db_type: DatabaseType
     assert "replication" in REGISTRY[db_type]
     scanned = scan_registry_objects(ROOT / "sql")
     declared = {name.lower() for item in REGISTRY[db_type].values() for name in item.objects}
+    declared.update(item.removeprefix("SELECT ").lower() for item in
+                    VERSION_DETECTION_PRIVILEGES.get(db_type, ()))
     assert scanned[db_type] <= declared
     scripts = SqlScriptRegistry(ROOT / "sql").validate()
     assert all(script.metadata.risk == "READ_ONLY" and script.metadata.reviewed

@@ -177,6 +177,12 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
 
 ALL_FEATURES = ("slow", "plan", "disk-growth", "replication")
 
+# Bootstrap privilege used only by the fixed version detector. Kept separate
+# from feature grants because V$VERSION is not needed by every current module.
+VERSION_DETECTION_PRIVILEGES: dict[DatabaseType, tuple[str, ...]] = {
+    DatabaseType.ORACLE: ("SELECT SYS.V_$VERSION",),
+}
+
 
 def features_for(database_type: DatabaseType) -> tuple[str, ...]:
     return tuple(feature for feature in ALL_FEATURES if feature in REGISTRY.get(database_type, {}))

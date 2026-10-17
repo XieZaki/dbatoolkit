@@ -2,6 +2,7 @@ databases:
   - id: example-mysql
     name: Example MySQL
     db_type: mysql
+    version_family: "8.4"
     host: 203.0.113.10
     port: 3306
     database: exampledb

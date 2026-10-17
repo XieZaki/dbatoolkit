@@ -125,6 +125,7 @@ class FakeConnection:
                 {"session_id": 53, "elapsed_ms": 59999, "sql_text": "SELECT 2"},
             ],
             "version_probe": [{"toolkit_probe": 1}],
+            "version_detect": [{"raw_version": "16.0.1000.6"}],
         }
 
     def cursor(self) -> FakeCursor:
@@ -748,6 +749,7 @@ def test_cli_check_and_status_human_and_json(
                 provider=MemoryCredentialProvider(), driver=FakeDriver()) == 0
     human = capsys.readouterr().out
     assert "DBA Toolkit Check" in human and not human.lstrip().startswith("{")
+    assert "Version Status" in human and "AUTO_DETECTED" in human
     assert TEST_CREDENTIAL not in human
     assert main([*common, "status", instance.id, "--json"],
                 provider=MemoryCredentialProvider(), driver=FakeDriver()) == 0
@@ -755,6 +757,24 @@ def test_cli_check_and_status_human_and_json(
     assert current["success"] and current["active_requests"] == 2
     assert current["long_running"] == 1
     assert current["database_states"] == {"ONLINE": 1}
+
+
+@pytest.mark.regression
+def test_check_version_mismatch_suppresses_permission_readiness(
+    instance: DatabaseInstance, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "inventory.yaml"
+    entry = {**asdict(instance), "db_type": "sqlserver", "version_family": "2019"}
+    path.write_text(yaml.safe_dump({"databases": [entry]}), encoding="utf-8")
+    assert main(["--inventory", str(path), "--sql-root", str(ROOT / "sql"),
+                 "check", instance.id, "--json"],
+                provider=MemoryCredentialProvider(), driver=FakeDriver()) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["version_profile"]["declared_version_family"] == "2019"
+    assert result["version_profile"]["detected_version_family"] == "2022"
+    assert result["version_profile"]["version_status"] == "MISMATCH"
+    assert result["status"] == "VERSION_MISMATCH"
+    assert all(row["status"] in {"UNKNOWN", "UNSUPPORTED"} for row in result["permissions"])
 
 
 def test_check_permission_error_includes_review_only_grant(

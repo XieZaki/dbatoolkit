@@ -2,6 +2,7 @@ databases:
   - id: example-oracle
     name: Example Oracle
     db_type: oracle
+    version_family: "23ai"
     host: 192.0.2.20
     port: 1521
     service_name: EXAMPLE

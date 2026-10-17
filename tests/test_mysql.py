@@ -69,6 +69,7 @@ class FakeConnection:
         self.scripts = scripts
         self.results: dict[str, list[dict[str, Any]]] = {
             "preflight": [dict(PREFLIGHT)],
+            "version_detect": [{"raw_version": "8.0.44"}],
             "monitor_grants": [
                 {"Grants for toolkit_monitor@%":
                  "GRANT PROCESS ON *.* TO `toolkit_monitor`@`%`"},

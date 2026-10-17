@@ -20,6 +20,7 @@ from dba.database_errors import normalize_oracle_error
 from dba.errors import ToolkitError
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
+from dba.permissions import VERSION_DETECTION_PRIVILEGES
 from dba.registry import SqlScript, SqlScriptRegistry
 from dba.settings import OracleSettings
 
@@ -56,7 +57,7 @@ def load_driver() -> Driver:
 
 def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:
     # Never pass through a driver exception: it can contain a DSN or credentials.
-    detail = normalize_oracle_error(exc, (secret,)) if phase == "Connection" else None
+    detail = normalize_oracle_error(exc, (secret,))
     number = getattr(exc, "code", None)
     if exc.args:
         number = getattr(exc.args[0], "code", number)
@@ -212,6 +213,10 @@ class OracleAdapter(Adapter):
         self.permission_observations.add("CREATE SESSION")
         self.permission_observations.update("SELECT SYS." + view for view in required_views)
         self.permission_observations.update("SELECT SYS." + view for view in granted_views)
+        version_object = VERSION_DETECTION_PRIVILEGES[DatabaseType.ORACLE][0].removeprefix(
+            "SELECT SYS."
+        )
+        self.preflight_checks["version_detection_view"] = version_object in granted_views
         owned = self._run(self.registry.get("preflight_owned_objects", DatabaseType.ORACLE))
         if not owned.success or owned.truncated or len(owned.rows) != 1:
             raise ToolkitError("PreflightFailed", "Oracle owned object inventory is incomplete.")

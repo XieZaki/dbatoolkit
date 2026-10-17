@@ -2,6 +2,7 @@ databases:
   - id: example-sqlserver
     name: Example SQL Server
     db_type: sqlserver
+    version_family: "2022"
     host: 192.0.2.10
     port: 1433
     database: master

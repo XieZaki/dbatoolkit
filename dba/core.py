@@ -42,6 +42,7 @@ class DatabaseInstance:
     group: str | None = None
     tags: list[str] = field(default_factory=list)
     connection: dict[str, Any] = field(default_factory=dict)
+    version_family: str | None = None
 
 
 @dataclass(frozen=True)

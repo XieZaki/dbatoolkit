@@ -73,6 +73,13 @@ from dba.settings import MySQLSettings, OracleSettings, PostgreSQLSettings, SQLS
 from dba.slow import diagnose_slow
 from dba.sqlserver import SQLServerAdapter
 from dba.sqlserver_collectors import COLLECTORS
+from dba.versioning import (
+    DEFAULT_VERSION_DETECTOR,
+    PROFILE_RESOLVER,
+    VersionStatus,
+    build_version_profile,
+    version_status,
+)
 
 
 class _CachedCredentialProvider(CredentialProvider):
@@ -625,12 +632,18 @@ def main(
             _emit(args, "show", redact({**asdict(shown), "effective_connection": effective}))
         elif args.command == "validate":
             scripts = SqlScriptRegistry(args.sql_root).validate()
+            profile_errors = PROFILE_RESOLVER.validate()
+            if profile_errors:
+                raise ValidationError("Version profile registry invalid: " + "; ".join(profile_errors))
+            warnings = inventory.version_family_warnings()
             validation_result = {"success": True, "instance_count": len(inventory.instances),
-                                "sql_script_count": len(scripts)}
+                                "sql_script_count": len(scripts), "warnings": warnings}
             if args.json:
                 _emit(args, "validate", validation_result)
             else:
                 print(f"Validation OK: {len(inventory.instances)} instances, {len(scripts)} SQL scripts")
+                for warning in warnings:
+                    print(f"WARNING: {warning}")
         elif args.command in {"test-connection", "collect", "diagnose", "permissions", "check", "status"}:
             instance = inventory.get(args.database_id)
             instance_for_hint = instance
@@ -768,6 +781,32 @@ def main(
                               "features": rows, "generated_sql": generated,
                               "toolkit_executes_grants": False}
                 elif args.command == "check":
+                    detection = DEFAULT_VERSION_DETECTOR.detect(
+                        instance.db_type, adapter.registry, adapter
+                    )
+                    detected = detection.detected
+                    version_verification = version_status(instance.version_family, detected)
+                    version_profile = build_version_profile(
+                        instance.db_type, instance.version_family, detected,
+                        error_type=detection.error_type,
+                        error_message=detection.error_message,
+                        database_error=detection.database_error,
+                    )
+                    version_warnings: list[str] = []
+                    if instance.version_family is None and detected and detected.normalized_family:
+                        version_warnings.append(
+                            f"Version family not declared for {instance.id}; add "
+                            f'version_family: "{detected.normalized_family}" to Inventory.'
+                        )
+                    if version_verification == VersionStatus.MISMATCH:
+                        version_warnings.append(
+                            "Declared and detected database version families differ. "
+                            "Permission readiness is UNKNOWN; correct Inventory before diagnosis."
+                        )
+                    elif version_verification in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN}:
+                        version_warnings.append(
+                            "Database version could not be verified; permission readiness is UNKNOWN."
+                        )
                     runtime = database_runtime_status(instance.db_type)
                     runtime_packages = runtime_info()
                     python_component = runtime_packages["python"]
@@ -778,6 +817,14 @@ def main(
                     for feature in ALL_FEATURES:
                         if feature not in definitions:
                             permission_rows.append({"feature": feature, "status": "UNSUPPORTED"})
+                            continue
+                        if version_verification in {VersionStatus.MISMATCH, VersionStatus.UNVERIFIED,
+                                                    VersionStatus.UNKNOWN}:
+                            permission_rows.append({
+                                "feature": feature, "status": "UNKNOWN",
+                                "missing_required": (), "missing_optional": (),
+                                "impact": "Version verification is required before assessing permissions.",
+                            })
                             continue
                         requirement = requirements_for(
                             instance.db_type, feature, adapter.get_server_version()
@@ -803,7 +850,11 @@ def main(
                         )
                     states = {row["status"] for row in permission_rows
                               if row["status"] != "UNSUPPORTED"}
-                    if "MISSING" in states:
+                    if version_verification == VersionStatus.MISMATCH:
+                        overall = "VERSION_MISMATCH"
+                    elif version_verification in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN}:
+                        overall = "VERSION_UNVERIFIED"
+                    elif "MISSING" in states:
                         overall = "PARTIAL" if "READY" in states else "MISSING"
                     elif "PARTIAL" in states:
                         overall = "PARTIAL"
@@ -811,7 +862,10 @@ def main(
                         overall = RuntimeStatus.READY_WITH_WARNING.value
                     else:
                         overall = RuntimeStatus.READY.value
-                    warnings = tuple([str(runtime["warning"])] if runtime.get("warning") else [])
+                    warnings = tuple(
+                        ([str(runtime["warning"])] if runtime.get("warning") else [])
+                        + version_warnings
+                    )
                     check_result = CheckResult(
                         {"id": instance.id, "db_type": instance.db_type.value,
                          "environment": instance.environment},
@@ -823,7 +877,7 @@ def main(
                          "backend": getattr(active_provider, "last_backend", None)
                          or "Provided Credential Provider", "status": "READY"},
                         effective, tuple(permission_rows), overall, warnings,
-                        _account_security(adapter),
+                        _account_security(adapter), version_profile,
                     )
                     output = asdict(check_result) | {"success": overall in {
                         "READY", "READY_WITH_WARNING", "PARTIAL"

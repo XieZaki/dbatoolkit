@@ -18,6 +18,7 @@ All test files must use only declared markers (`--strict-markers` is enabled). D
 | Area | Unit | Integration | System | Regression | Main coverage / current boundary |
 |---|---|---|---|---|---|
 | Inventory | Yes | Partial | Yes | Yes | `test_inventory_scale.py`, `test_toolkit.py`; CLI validation uses the active local Inventory but system DB commands require a safe label. |
+| Version profiles | Yes | Yes | Optional | Yes | `test_versioning.py`; normalization, strict YAML values, detection through reviewed Registry scripts, status and atomic resolver bindings. No live version matrix is claimed by unit tests. |
 | Credential providers, session, JIT | Yes | Partial | Partial | Yes | `test_connection_credentials.py`, `test_credential_session.py`, `test_jit_credentials.py`; system tests use existing OS/secure-store credentials and never pass passwords through environment variables. |
 | Encrypted credential store | Yes | Partial | Partial | Yes | `test_encrypted_credentials.py`; corruption, tamper, wrong password, rekey, atomic update, and fail-closed paths. |
 | Runtime and deployment | Yes | Partial | Yes | Partial | `test_runtime.py`; platform behavior is simulated on the current host, not claimed as real Linux validation. |
