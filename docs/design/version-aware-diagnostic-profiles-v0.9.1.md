@@ -283,17 +283,26 @@ Extend existing SQL Registry metadata with ID, database type, feature, family/va
 
 For MySQL replication, Phase B is gated on the explicit safety-policy reconciliation in §6; the router may select only exact reviewed Registry scripts already permitted by the reconciled project policy.
 
-### Phase C — Permissions
+### Phase C — Permissions and slow migration (implemented)
 
-Bind complete module permission profiles by family/variant, align preflight, add forbidden-permission validation, batched readiness summary and mismatch/offline behavior. Preserve text-only GRANT. Keep module-wide REVOKE out of new profile guidance.
+Slow is migrated as one atomic SQL/permission/parser/support route per family
+and runtime variant. Required/optional collector contracts are declared with
+the slow SQL profile. Disk-growth and plan remain on their legacy paths.
+Preserve text-only GRANT/REVOKE generation and fail closed on AUTO_DETECTED,
+UNVERIFIED, MISMATCH, or UNKNOWN diagnosis routes.
 
-### Phase D — Parser contracts
+### Phase D — Parser contracts (implemented for slow)
 
-Add shared parser contracts and field alias maps. Split semantic parser implementations only when meaning or record shape truly changes. Add lightweight evidence visibility in common results.
+Slow uses shared normalized field aliases and retains raw evidence. Split
+semantic parser implementations only when meaning or record shape truly
+changes. Slow report visibility reflects required and optional sample quality.
 
-### Phase E — Migration and tests
+### Phase E — Remaining migrations and tests
 
-Migrate slow/disk-growth/replication and SQL Server plan incrementally, update examples and docs, run unit/integration/regression tests, then opt-in representative Docker E2E. Record actual evidence levels and provide an Inventory migration warning. Do not auto-edit local Inventory.
+Disk-growth and SQL Server plan remain future migrations. Update examples and
+docs, run unit/integration/regression tests, then opt-in representative Docker
+E2E. Record actual evidence levels and provide an Inventory migration warning.
+Do not auto-edit local Inventory.
 
 ## 17. Maintenance workflow and complexity limits
 

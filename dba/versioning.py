@@ -1,8 +1,8 @@
 """Version-aware diagnostic profile foundation.
 
 This module owns the canonical family vocabulary, normalization, verification
-state and the single atomic profile resolver. Bindings in this phase are
-explicit legacy placeholders; they do not route feature SQL yet.
+state and the single atomic profile resolver. Bindings atomically route
+feature SQL, permissions and parser contracts.
 """
 
 from __future__ import annotations
@@ -293,34 +293,58 @@ def _legacy_binding(db_type: DatabaseType, family: str, feature: str,
 # These are explicit foundation routes. They are deliberately sparse until
 # later phases migrate each feature's SQL, permissions and parser atomically.
 PROFILE_BINDINGS: tuple[ProfileBinding, ...] = (
-    _legacy_binding(DatabaseType.SQLSERVER, "2008r2", "slow"),
-    _legacy_binding(DatabaseType.SQLSERVER, "2012", "slow"),
-    _legacy_binding(DatabaseType.SQLSERVER, "2014", "slow"),
-    _legacy_binding(DatabaseType.SQLSERVER, "2016", "slow"),
-    _legacy_binding(DatabaseType.SQLSERVER, "2017", "slow"),
-    _legacy_binding(DatabaseType.SQLSERVER, "2019", "slow"),
-    _legacy_binding(DatabaseType.SQLSERVER, "2022", "slow"),
-    _legacy_binding(DatabaseType.SQLSERVER, "2025", "slow"),
+    ProfileBinding(DatabaseType.SQLSERVER, "2008r2", "slow", SupportState.SUPPORTED,
+                   "sqlserver_2008r2_slow", "sqlserver_slow_legacy", "sqlserver_slow",
+                   "sqlserver_slow_legacy", required_privileges=("VIEW SERVER STATE", "VIEW ANY DATABASE")),
+    *(ProfileBinding(DatabaseType.SQLSERVER, family, "slow", SupportState.SUPPORTED,
+                     "sqlserver_shared_slow", "sqlserver_slow_legacy", "sqlserver_slow",
+                     "sqlserver_slow_shared", required_privileges=("VIEW SERVER STATE", "VIEW ANY DATABASE"))
+      for family in ("2012", "2014", "2016", "2017", "2019")),
+    ProfileBinding(DatabaseType.SQLSERVER, "2022", "slow", SupportState.SUPPORTED,
+                   "sqlserver_shared_slow", "sqlserver_slow_2022", "sqlserver_slow",
+                   "sqlserver_slow_shared",
+                   required_privileges=("VIEW SERVER PERFORMANCE STATE", "VIEW ANY DATABASE")),
+    ProfileBinding(DatabaseType.SQLSERVER, "2025", "slow", SupportState.UNKNOWN,
+                   "", "", "", "unverified"),
     _legacy_binding(DatabaseType.SQLSERVER, "2022", "disk-growth"),
     _legacy_binding(DatabaseType.SQLSERVER, "2022", "plan"),
     ProfileBinding(DatabaseType.SQLSERVER, "2008r2", "replication", SupportState.UNSUPPORTED,
                    "", "", "", "unsupported", "default"),
-    _legacy_binding(DatabaseType.MYSQL, "5.7", "slow"),
-    _legacy_binding(DatabaseType.MYSQL, "8.0", "slow", "pre_8022"),
-    _legacy_binding(DatabaseType.MYSQL, "8.0", "slow", "8022_plus"),
-    _legacy_binding(DatabaseType.MYSQL, "8.4", "slow"),
-    _legacy_binding(DatabaseType.POSTGRESQL, "13", "slow"),
-    _legacy_binding(DatabaseType.POSTGRESQL, "14", "slow"),
-    _legacy_binding(DatabaseType.POSTGRESQL, "15", "slow"),
-    _legacy_binding(DatabaseType.POSTGRESQL, "16", "slow"),
-    _legacy_binding(DatabaseType.POSTGRESQL, "17", "slow"),
-    _legacy_binding(DatabaseType.POSTGRESQL, "18", "slow"),
-    _legacy_binding(DatabaseType.ORACLE, "12c", "slow"),
-    _legacy_binding(DatabaseType.ORACLE, "18c", "slow"),
-    _legacy_binding(DatabaseType.ORACLE, "19c", "slow"),
-    _legacy_binding(DatabaseType.ORACLE, "21c", "slow"),
-    _legacy_binding(DatabaseType.ORACLE, "23ai", "slow"),
-    _legacy_binding(DatabaseType.ORACLE, "26ai", "slow"),
+    ProfileBinding(DatabaseType.MYSQL, "5.7", "slow", SupportState.SUPPORTED,
+                   "mysql57_slow", "mysql57_slow", "mysql_slow", "mysql_slow_legacy",
+                   required_privileges=("PROCESS", "SELECT performance_schema")),
+    *(ProfileBinding(DatabaseType.MYSQL, "8.0", "slow", SupportState.SUPPORTED,
+                     "mysql80_slow", "mysql80_slow", "mysql_slow", "mysql_slow_modern",
+                     variant, ("PROCESS", "SELECT performance_schema"))
+      for variant in ("pre_8022", "8022_plus")),
+    ProfileBinding(DatabaseType.MYSQL, "8.4", "slow", SupportState.SUPPORTED,
+                   "mysql84_slow", "mysql84_slow", "mysql_slow", "mysql_slow_modern",
+                   required_privileges=("PROCESS", "SELECT performance_schema")),
+    *(ProfileBinding(DatabaseType.POSTGRESQL, family, "slow", SupportState.SUPPORTED,
+                     "pg13_18_slow", "pg13_18_slow", "postgresql_slow", "pg13_18_slow",
+                     required_privileges=("pg_monitor", "CONNECT"))
+      for family in ("13", "14", "15", "16", "17", "18")),
+    ProfileBinding(DatabaseType.ORACLE, "11gr2", "slow", SupportState.SUPPORTED,
+                   "oracle11gr2_slow", "oracle11gr2_slow", "oracle_slow", "oracle11gr2_slow",
+                   required_privileges=("CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION",
+                                        "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
+                                        "SELECT SYS.V_$TRANSACTION")),
+    ProfileBinding(DatabaseType.ORACLE, "12c", "slow", SupportState.SUPPORTED,
+                   "oracle12c_121_slow", "oracle12c_121_slow", "oracle_slow", "oracle12c_121_slow",
+                   "12_1", ("CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION",
+                            "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
+                            "SELECT SYS.V_$TRANSACTION")),
+    ProfileBinding(DatabaseType.ORACLE, "12c", "slow", SupportState.SUPPORTED,
+                   "oracle12c_122_slow", "oracle12c_122_slow", "oracle_slow", "oracle12c_122_slow",
+                   "12_2_plus", ("CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION",
+                                 "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
+                                 "SELECT SYS.V_$TRANSACTION")),
+    *(ProfileBinding(DatabaseType.ORACLE, family, "slow", SupportState.SUPPORTED,
+                     "oracle_modern_slow", "oracle_modern_slow", "oracle_slow", "oracle_modern_slow",
+                     required_privileges=("CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION",
+                                          "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
+                                          "SELECT SYS.V_$TRANSACTION"))
+      for family in ("18c", "19c", "21c", "23ai", "26ai")),
 ) + tuple(
     ProfileBinding(DatabaseType.MYSQL, family, "replication", SupportState.SUPPORTED,
                    sql_id, permission_id, parser_id, profile_family, variant,
@@ -414,9 +438,20 @@ class DiagnosticProfileResolver:
                 elif binding.feature == "replication":
                     if any(item.startswith("legacy:") for item in referenced):
                         errors.append(f"cross-route or unknown profile reference: {key}")
+                elif binding.feature == "slow":
+                    from dba.slow_profiles import validate_slow_binding
+                    errors.extend(validate_slow_binding(binding))
                 elif referenced != expected:
                     errors.append(f"cross-route or unknown profile reference: {key}")
                 if binding.feature == "replication":
+                    try:
+                        permission = requirements_for_profile(binding.permission_profile_id)
+                    except ValueError:
+                        errors.append(f"missing permission profile: {key}")
+                    else:
+                        if tuple(permission.required) != binding.required_privileges:
+                            errors.append(f"route permission contract mismatch: {key}")
+                elif binding.feature == "slow":
                     try:
                         permission = requirements_for_profile(binding.permission_profile_id)
                     except ValueError:
@@ -431,7 +466,7 @@ class DiagnosticProfileResolver:
                 if binding.runtime_variant not in {"pre_8022", "8022_plus"}:
                     errors.append(f"invalid MySQL 8.0 variant: {key}")
             elif binding.db_type == DatabaseType.ORACLE and binding.version_family == "12c" \
-                    and binding.feature == "replication":
+                    and binding.feature in {"replication", "slow"}:
                 if binding.runtime_variant not in {"12_1", "12_2_plus"}:
                     errors.append(f"invalid Oracle 12c variant: {key}")
             elif binding.runtime_variant != "default":

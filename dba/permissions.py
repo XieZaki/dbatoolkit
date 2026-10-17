@@ -136,6 +136,8 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
                                      "performance_schema.events_waits_current", "performance_schema.data_lock_waits",
                                      "performance_schema.data_locks", "performance_schema.setup_consumers",
                                      "performance_schema.global_status", "information_schema.innodb_trx",
+                                     "information_schema.processlist", "information_schema.innodb_lock_waits",
+                                     "information_schema.innodb_locks",
                                      "information_schema.user_privileges", "information_schema.schema_privileges",
                                      "information_schema.table_privileges", "information_schema.column_privileges",
                                      "information_schema.schemata", "show grants"),
@@ -377,6 +379,44 @@ _REPLICATION_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
         version_constraints=("SQL Server 2022",)),
 }
 
+
+_SLOW_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
+    "sqlserver_slow_legacy": FeaturePermissions(
+        ("VIEW SERVER STATE", "VIEW ANY DATABASE"), ("VIEW SERVER PERFORMANCE STATE",),
+        "Cross-session activity and request SQL may be unavailable.",
+        REGISTRY[DatabaseType.SQLSERVER]["slow"].objects,
+        permission_reasons=(("VIEW SERVER STATE", "Required by reviewed session, request, connection and transaction DMV queries."),
+                            ("VIEW ANY DATABASE", "Required for reliable database-name visibility."),
+                            ("VIEW SERVER PERFORMANCE STATE", "Optional newer SQL Server performance-state visibility.")),
+        version_constraints=("SQL Server 2008 R2-2019: VIEW SERVER STATE",)),
+    "sqlserver_slow_2022": FeaturePermissions(
+        ("VIEW SERVER PERFORMANCE STATE", "VIEW ANY DATABASE"), ("VIEW SERVER STATE",),
+        "Cross-session activity and request SQL may be unavailable.",
+        REGISTRY[DatabaseType.SQLSERVER]["slow"].objects,
+        permission_reasons=(("VIEW SERVER PERFORMANCE STATE", "Required by the reviewed SQL Server 2022 performance DMV route."),
+                            ("VIEW ANY DATABASE", "Required for reliable database-name visibility."),
+                            ("VIEW SERVER STATE", "Optional legacy server-state visibility.")),
+        version_constraints=("SQL Server 2022: VIEW SERVER PERFORMANCE STATE",)),
+    "mysql57_slow": REGISTRY[DatabaseType.MYSQL]["slow"],
+    "mysql80_slow": REGISTRY[DatabaseType.MYSQL]["slow"],
+    "mysql84_slow": REGISTRY[DatabaseType.MYSQL]["slow"],
+    "pg13_18_slow": REGISTRY[DatabaseType.POSTGRESQL]["slow"],
+    **{
+        profile: FeaturePermissions(
+            ORACLE_COMMON_MONITOR_REQUIREMENTS,
+            ("SELECT SYS.V_$LOCK", "SELECT SYS.V_$LOCKED_OBJECT"),
+            "Optional lock evidence may be unavailable.",
+            ("SYS.V_$INSTANCE", "SYS.V_$VERSION", "SYS.V_$DATABASE", "SYS.V_$SESSION",
+             "SYS.V_$SQL", "SYS.V_$TRANSACTION", "SYS.V_$LOCK", "SYS.V_$LOCKED_OBJECT",
+             ),
+            permission_reasons=tuple((item, "Optional evidence path; the reviewed session-based slow report remains available.")
+                                     for item in ("SELECT SYS.V_$LOCK", "SELECT SYS.V_$LOCKED_OBJECT",
+                                                  )),
+        )
+        for profile in ("oracle11gr2_slow", "oracle12c_121_slow", "oracle12c_122_slow", "oracle_modern_slow")
+    },
+}
+
 for _profile_id, _objects in {
     "oracle11gr2_replication": ("SYS.V_$DATAGUARD_STATS", "SYS.V_$MANAGED_STANDBY",
                                 "SYS.V_$ARCHIVE_DEST_STATUS"),
@@ -400,7 +440,10 @@ def requirements_for_profile(profile_id: str) -> FeaturePermissions:
     try:
         return _REPLICATION_PROFILE_REQUIREMENTS[profile_id]
     except KeyError:
-        raise ValueError("Resolved profile has no replication permission definition") from None
+        try:
+            return _SLOW_PROFILE_REQUIREMENTS[profile_id]
+        except KeyError:
+            raise ValueError("Resolved profile has no permission definition") from None
 
 
 def render_profile_sql(profile_id: str, database_type: DatabaseType, account: str | OraclePrincipal,

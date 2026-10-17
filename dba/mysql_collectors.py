@@ -9,6 +9,7 @@ from dba.collectors import Collector, CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.errors import ToolkitError
 from dba.mysql import MySQLAdapter
+from dba.slow_profiles import normalize_slow_result, profile_for_adapter, script_for_slow
 
 
 def host_ip(raw: object) -> str | None:
@@ -34,13 +35,17 @@ class MySQLCollector(Collector):
     def collect(self, instance: DatabaseInstance) -> CollectorResult:
         if instance != self.adapter.instance or instance.db_type != DatabaseType.MYSQL:
             raise ToolkitError("InstanceMismatch", "Collector and adapter must refer to the same instance.")
-        name = self.adapter.statement_script if self.script_name == "active_requests" else self.script_name
+        name = script_for_slow(self.adapter, self.script_name, self.script_name)
+        if self.script_name == "active_requests" and name == self.script_name:
+            name = self.adapter.statement_script
         script = self.adapter.registry.get(name, DatabaseType.MYSQL)
         result = self.adapter.execute_readonly(script)
         if self.script_name in {"active_sessions", "active_requests", "transactions"} and result.success:
             result = replace(result, rows=tuple({**row, "host_ip": host_ip(row.get("host_raw"))}
                                                 for row in result.rows))
-        return replace(result, collector_name=self.script_name)
+        result = replace(result, collector_name=self.script_name)
+        profile = profile_for_adapter(self.adapter)
+        return normalize_slow_result(profile, result) if profile else result
 
 
 class ServerInfoCollector(MySQLCollector):

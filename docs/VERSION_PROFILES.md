@@ -1,9 +1,10 @@
 # Version Profiles (V0.9.1 Phase B)
 
-Phase A added version declaration and detection. Phase B migrates replication
-only: SQL bundles, complete permission requirements, parser aliases and support
-state are selected together by the immutable `DiagnosticProfileResolver`.
-Slow, disk-growth and plan remain on their existing paths.
+Phase A added version declaration and detection. Phase B migrated replication;
+Phase C migrates `slow`. Slow SQL, permission requirements, parser aliases,
+required/optional collectors and support state are selected together by the
+immutable `DiagnosticProfileResolver`. Disk-growth and plan remain on their
+existing paths.
 
 ## Inventory declaration
 
@@ -65,10 +66,18 @@ account and permission summary. It does not persist detected versions.
 
 The central `DiagnosticProfileResolver` returns a frozen profile containing the
 SQL bundle, permission profile, parser contract and support state from one
-binding. Replication requires declared and detected families to match before
-any feature SQL runs. `AUTO_DETECTED`, `UNVERIFIED`, `MISMATCH`, and unknown
-variants fail closed for diagnosis. Permission output may show a declared
-reference profile as unverified; it does not claim readiness.
+binding. Replication and slow require declared and detected families to match
+before any version-specific feature SQL runs. `AUTO_DETECTED`, `UNVERIFIED`,
+`MISMATCH`, and unknown variants fail closed for diagnosis. `check` and
+`permissions` report permission readiness as UNKNOWN without verified version
+evidence. An unverified declared family may be used only for reference grant
+guidance, never to claim readiness.
+
+Slow SQL selection is profile-owned; collectors do not branch on database
+version. Required collector failures stop diagnosis. Optional failures retain
+available evidence and set `data_visibility` to `PARTIAL`; truncation on
+required evidence marks the report incomplete. Long-running thresholds remain
+in Analyzer/runtime configuration, not version profiles.
 
 ## Extending profiles
 
@@ -112,3 +121,22 @@ versions remain UNKNOWN. The legacy route uses `V_$DATABASE`,
 `V_$DATAGUARD_STATS`, `V_$MANAGED_STANDBY`, and `V_$ARCHIVE_DEST_STATUS`, plus
 the version detector's `V_$VERSION` grant. It does not reference
 `V_$DATAGUARD_PROCESS`.
+
+## Slow support matrix
+
+| Database family | Support | Routed profile | Compatibility evidence |
+|---|---|---|---|
+| SQL Server 2008 R2 | SUPPORTED | Legacy session DMV + shared request/transaction SQL | Static reviewed SQL and Fake Adapter regression; not live-verified |
+| SQL Server 2012–2019 | SUPPORTED | Shared SQL Server slow bundle | Static reviewed SQL and Fake Adapter regression; not live-verified for every family |
+| SQL Server 2022 | SUPPORTED | Shared bundle, 2022 permission contract | Representative local runtime target; confirm current result with system suite |
+| SQL Server 2025 | UNKNOWN | No executable profile | Fail closed pending review |
+| MySQL 5.7 | SUPPORTED | PROCESSLIST + legacy InnoDB lock views | Static SQL and Fake Adapter regression; not live-verified |
+| MySQL 8.0, 8.4 | SUPPORTED | Performance Schema and 8.x lock views | Static SQL and Fake Adapter regression; not live-verified for every minor family |
+| PostgreSQL 13–18 | SUPPORTED | Shared `pg_stat_activity` / lock bundle | Static SQL and Fake Adapter regression; not live-verified across all majors |
+| Oracle 11gR2 | SUPPORTED | Legacy-compatible `V$SESSION`/`V$SQL` bundle | Static SQL and Fake Adapter regression; NOT E2E VERIFIED |
+| Oracle 12c 12.1, 12.2+ | SUPPORTED | Explicit 12c runtime variants | Static SQL and Fake Adapter regression; not live-verified |
+| Oracle 18c, 19c, 21c, 23ai, 26ai | SUPPORTED | Shared modern-family bundle | Static SQL and Fake Adapter regression; verify current 26ai E2E separately |
+
+Support denotes a reviewed implementation, not live verification for every
+release. SQL Server 2008 R2 and MySQL 5.7 remain first-class routes despite
+the absence of live old-version servers in the current test environment.

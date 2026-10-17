@@ -16,6 +16,12 @@ from dba.postgresql_collectors import (
     TransactionsCollector,
 )
 from dba.settings import PostgreSQLSettings
+from dba.slow_profiles import (
+    collection_completeness,
+    optional_collectors_for_adapter,
+    profile_for_adapter,
+    required_collectors_for_adapter,
+)
 
 
 @dataclass(frozen=True)
@@ -75,7 +81,10 @@ def blocking_graph(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult, ...],
-                      settings: PostgreSQLSettings, version: str) -> PostgreSQLSlowReport:
+                      settings: PostgreSQLSettings, version: str,
+                      required_collectors: tuple[str, ...] =
+                      ("active_sessions", "long_running", "transactions", "blocking"),
+                      optional_collectors: tuple[str, ...] = ()) -> PostgreSQLSlowReport:
     by_name = {result.collector_name: result for result in results}
 
     def rows(name: str) -> list[dict[str, Any]]:
@@ -101,9 +110,7 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                    "idle_in_transaction_sessions": len(idle)}
     quality = [f"{r.collector_name}: {'failed' if not r.success else 'truncated' if r.truncated else 'ok'}"
                for r in results]
-    incomplete = any(not r.success or r.truncated for r in results) or any(
-        name not in by_name for name in ("active_sessions", "long_running", "transactions", "blocking")
-    )
+    incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
     findings: list[Finding] = []
     if blocked_pids:
         findings.append(Finding("BLOCKING", Severity.CRITICAL,
@@ -204,7 +211,7 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                 "top_queries": top_queries, "long_running": long[:settings.slow_top_n],
                 "blocking_graph": graph, "roots": roots, "idle_transactions": idle_details,
                 "sessions": sessions, "active_requests": active, "transactions": transactions,
-                "quality": quality, "incomplete": incomplete,
+                "quality": quality, "incomplete": incomplete, "data_visibility": visibility,
                 "samples": [{"collector": r.collector_name, "started_at": r.started_at,
                              "finished_at": r.finished_at, "row_count": r.row_count,
                              "truncated": r.truncated, "success": r.success,
@@ -214,14 +221,19 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
 def diagnose_slow(adapter: PostgreSQLAdapter) -> PostgreSQLSlowReport:
     version = adapter.get_server_version()
     results: list[CollectorResult] = []
+    routed = profile_for_adapter(adapter) is not None
+    required = set(required_collectors_for_adapter(
+        adapter, ("active_sessions", "long_running", "transactions", "blocking")
+    ))
+    fatal = required if routed else {"active_sessions", "blocking"}
     for collector in (ActiveSessionsCollector, LongRunningCollector,
                       TransactionsCollector, BlockingCollector):
-        if results and not results[-1].success:
-            break
         result = collector(adapter).collect(adapter.instance)
         results.append(result)
-        if not result.success and collector in (ActiveSessionsCollector, BlockingCollector):
+        if not result.success and result.collector_name in fatal:
             raise ToolkitError(result.error_type or "QueryFailed",
                                result.error_message or "Required sample unavailable.")
+        if not result.success:
+            break
     return build_slow_report(adapter.instance, tuple(results), adapter.settings,
-                             version)
+                             version, tuple(required), optional_collectors_for_adapter(adapter))

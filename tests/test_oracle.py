@@ -435,7 +435,7 @@ def test_cli_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     provider = TestProvider()
     inventory = tmp_path / "inventory.yaml"
     inventory.write_text(yaml.safe_dump({"databases": [{
-        **asdict(instance), "db_type": "oracle"}]}), encoding="utf-8")
+        **asdict(instance), "db_type": "oracle", "version_family": "19c"}]}), encoding="utf-8")
     prefix = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql")]
     assert main([*prefix, "test-connection", instance.id, "--json"], provider=provider, driver=driver) == 0
     assert json.loads(capsys.readouterr().out)["version"].startswith("19")

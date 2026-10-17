@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from dba.collectors import Collector, CollectorResult
 from dba.core import DatabaseInstance
 from dba.errors import ToolkitError
+from dba.slow_profiles import normalize_slow_result, profile_for_adapter, script_for_slow
 from dba.sqlserver import SQLServerAdapter
 
 
@@ -19,8 +20,11 @@ class SQLServerCollector(Collector):
             raise ToolkitError(
                 "InstanceMismatch", "Collector and adapter must refer to the same instance."
             )
-        result = self.adapter.execute_readonly(self.adapter.script_for(self.script_name))
-        return replace(result, collector_name=self.script_name)
+        name = script_for_slow(self.adapter, self.script_name, self.script_name)
+        result = self.adapter.execute_readonly(self.adapter.script_for(name))
+        result = replace(result, collector_name=self.script_name)
+        profile = profile_for_adapter(self.adapter)
+        return normalize_slow_result(profile, result) if profile else result
 
 
 class ServerInfoCollector(SQLServerCollector):

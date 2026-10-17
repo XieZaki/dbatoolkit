@@ -271,7 +271,7 @@ def test_pg_cli_connection_collect_and_diagnose(tmp_path: Path,
     inventory.write_text(yaml.safe_dump({"databases": [
         {"id": "pg", "name": "PG", "db_type": "postgresql", "host": "test.invalid",
          "port": 5432, "credential_alias": "monitor", "database": "postgres",
-         "environment": "development"}]}), encoding="utf-8")
+             "environment": "development", "version_family": "16"}]}), encoding="utf-8")
     settings = tmp_path / "runtime.yaml"
     settings.write_text(yaml.safe_dump({"postgresql": {"sslmode": "disable"}}), encoding="utf-8")
     common = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql"),

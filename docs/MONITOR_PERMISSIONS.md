@@ -64,3 +64,26 @@ UNKNOWN. MySQL uses only `REPLICATION CLIENT`. Oracle's 11gR2 requirements are
 grant to `V_$DATAGUARD_PROCESS`. All generated statements remain manual-review
 text and are never executed.
 
+## Version-aware slow permissions
+
+`dba permissions <id> --feature slow` resolves the declared and detected
+version before assessing the slow profile. Slow required grants are bound to
+the same route as its SQL and parser; optional grants are reported separately
+and affect visibility only. A declared but unverified family can produce
+reference SQL with readiness `UNKNOWN`; a mismatch or auto-detected-only
+version does not receive a grant script.
+
+| Database family | Required | Optional / impact |
+|---|---|---|
+| SQL Server 2008 R2–2019 | `VIEW SERVER STATE`, `VIEW ANY DATABASE` | `VIEW SERVER PERFORMANCE STATE`; newer performance evidence may be unavailable |
+| SQL Server 2022 | `VIEW SERVER PERFORMANCE STATE`, `VIEW ANY DATABASE` | `VIEW SERVER STATE` |
+| MySQL 5.7 / 8.0 / 8.4 | `PROCESS`, `SELECT performance_schema` | Cross-account sessions require PROCESS; 5.7 uses legacy InnoDB lock views |
+| PostgreSQL 13–18 | `pg_monitor`, `CONNECT` | None declared; visibility follows monitoring-role behavior |
+| Oracle 11gR2 / 12c / 18c+ | `CREATE SESSION` and direct SELECT on `SYS.V_$INSTANCE`, `SYS.V_$VERSION`, `SYS.V_$DATABASE`, `SYS.V_$SESSION`, `SYS.V_$SQL`, `SYS.V_$TRANSACTION` | `SYS.V_$LOCK`, `SYS.V_$LOCKED_OBJECT`; these enable the advanced lock evidence query. Current wait fields come from `V_$SESSION`; process/session-wait probes are not slow grants |
+
+Oracle's common bootstrap objects are part of every slow profile, including
+version detection and common preflight. Optional views add lock, process, or
+extended wait evidence; missing optional grants lower visibility while the
+session-based diagnosis can continue. No slow profile requires sysadmin,
+CONTROL SERVER, SUPERUSER, root, DBA, SELECT_CATALOG_ROLE, or SYSDBA.
+

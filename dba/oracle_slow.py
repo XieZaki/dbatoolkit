@@ -6,6 +6,7 @@ from typing import Any
 
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DiagnosticReport, Finding, ReferenceCommand, Severity
+from dba.errors import ToolkitError
 from dba.logging import redact
 from dba.oracle import OracleAdapter
 from dba.oracle_collectors import (
@@ -16,6 +17,12 @@ from dba.oracle_collectors import (
     TransactionsCollector,
 )
 from dba.settings import OracleSettings
+from dba.slow_profiles import (
+    collection_completeness,
+    optional_collectors_for_adapter,
+    profile_for_adapter,
+    required_collectors_for_adapter,
+)
 
 
 @dataclass(frozen=True)
@@ -90,7 +97,10 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                       settings: OracleSettings, version: str,
                       *, rac_global_snapshot: bool = False,
                       rac_enabled: bool = False,
-                      lock_evidence: bool = True) -> OracleSlowReport:
+                      lock_evidence: bool = True,
+                      required_collectors: tuple[str, ...] =
+                      ("active_sessions", "active_requests", "transactions", "blocking"),
+                      optional_collectors: tuple[str, ...] = ()) -> OracleSlowReport:
     by_name = {result.collector_name: result for result in results}
 
     def rows(name: str) -> list[dict[str, Any]]:
@@ -109,10 +119,10 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     graph = blocking_graph(edges, sessions)
     quality = [f"{r.collector_name}: {'failed' if not r.success else 'truncated' if r.truncated else 'ok'}"
                for r in results]
-    required = {"active_sessions", "active_requests", "transactions", "blocking"}
-    incomplete = (any(not r.success or r.truncated for r in results)
-                  or not required <= set(by_name)
-                  or (rac_enabled and not rac_global_snapshot))
+    incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
+    if not lock_evidence:
+        visibility = "PARTIAL"
+    incomplete = incomplete or (rac_enabled and not rac_global_snapshot)
     if rac_enabled and not rac_global_snapshot:
         quality.append("RAC global snapshot unavailable; remote blockers may be missing")
     if not lock_evidence:
@@ -243,7 +253,7 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                else "unavailable: optional V$LOCK/V$LOCKED_OBJECT grants missing",
                "roots": roots, "transactions": transactions, "idle_transactions": idle,
                "sessions": sessions, "active_requests": requests,
-               "quality": quality, "incomplete": incomplete,
+               "quality": quality, "incomplete": incomplete, "data_visibility": visibility,
                "rac_global_snapshot": rac_global_snapshot,
                "rac_enabled": rac_enabled,
                "samples": [{"collector": r.collector_name, "started_at": r.started_at,
@@ -258,12 +268,23 @@ def diagnose_slow(adapter: OracleAdapter) -> OracleSlowReport:
     collectors = (ActiveSessionsCollector, ActiveRequestsCollector, TransactionsCollector,
                   BlockingCollector, PreviousSQLCollector)
     results: list[CollectorResult] = []
+    routed = profile_for_adapter(adapter) is not None
+    required = set(required_collectors_for_adapter(
+        adapter, ("active_sessions", "active_requests", "transactions", "blocking")
+    ))
+    fatal = required if routed else set()
     for collector in collectors:
-        if results and not results[-1].success:
+        result = collector(adapter).collect(adapter.instance)
+        results.append(result)
+        if not result.success and result.collector_name in fatal:
+            raise ToolkitError(result.error_type or "QueryFailed",
+                               result.error_message or "Required sample unavailable.")
+        if not result.success:
             break
-        results.append(collector(adapter).collect(adapter.instance))
     return build_slow_report(adapter.instance, tuple(results), adapter.settings,
                              adapter.get_server_version(),
                              rac_global_snapshot=adapter.capabilities["rac_global_snapshot"],
                              rac_enabled=adapter.rac_enabled,
-                             lock_evidence=adapter.capabilities["lock_evidence"])
+                             lock_evidence=adapter.capabilities["lock_evidence"],
+                             required_collectors=tuple(required),
+                             optional_collectors=optional_collectors_for_adapter(adapter))

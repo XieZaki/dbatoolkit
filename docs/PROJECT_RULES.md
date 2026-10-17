@@ -87,5 +87,6 @@
 - Database adapters consume resolved credentials and do not implement credential-storage-specific logic.
 - Debug and exception output follow the same secret-redaction rules as normal output.
 - Replication diagnosis is observational only and reads metadata from the single Inventory-selected instance; it must not connect to discovered peers.
+- Slow diagnosis resolves SQL, complete permission requirements, parser contract, support state, runtime variant, and required/optional collector slots atomically through `DiagnosticProfileResolver`. Slow SQL changes must update Permission Registry, Preflight, profile metadata, and consistency tests together; no Collector may branch on server version.
 - DBA Toolkit must never automatically promote, fail over, restart, reset, reconfigure, resynchronize, or repair database replication.
 - Replication lag must not be converted between bytes and time unless supported by explicit reliable rate evidence; a single snapshot cannot establish a trend.

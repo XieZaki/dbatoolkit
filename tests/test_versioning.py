@@ -216,13 +216,13 @@ def test_registry_detector_normalizer_status_resolver_integration(
     assert executor.script is not None and executor.script.metadata.reviewed
     profile = PROFILE_RESOLVER.resolve(db_type, family, result.detected, "slow")
     assert profile.version_status == VersionStatus.VERIFIED
-    assert profile.support_state == SupportState.UNKNOWN
-    route_prefix = (
-        f"legacy:{db_type.value}:{family}:slow:{result.detected.variant_key or 'default'}"
-    )
-    assert profile.sql_profile_id == f"{route_prefix}:sql"
-    assert profile.permission_profile_id == f"{route_prefix}:permission"
-    assert profile.parser_contract_id == f"{route_prefix}:parser"
+    expected_support = SupportState.UNKNOWN if db_type == DatabaseType.SQLSERVER and family == "2025" \
+        else SupportState.SUPPORTED
+    assert profile.support_state == expected_support
+    if expected_support == SupportState.SUPPORTED:
+        assert profile.sql_profile_id and not profile.sql_profile_id.startswith("legacy:")
+        assert profile.permission_profile_id and not profile.permission_profile_id.startswith("legacy:")
+        assert profile.parser_contract_id and not profile.parser_contract_id.startswith("legacy:")
     assert profile.runtime_config_state == RuntimeConfigState.UNKNOWN
     assert profile.data_visibility == DataVisibility.UNKNOWN
     assert isinstance(DEFAULT_VERSION_DETECTOR, RegistryVersionDetector)
@@ -237,12 +237,9 @@ def test_mysql_minor_variant_selects_one_atomic_binding() -> None:
     )
     assert pre.runtime_variant == "pre_8022"
     assert current.runtime_variant == "8022_plus"
-    assert pre.sql_profile_id == "legacy:mysql:8.0:slow:pre_8022:sql"
-    assert current.sql_profile_id == "legacy:mysql:8.0:slow:8022_plus:sql"
-    assert pre.permission_profile_id == "legacy:mysql:8.0:slow:pre_8022:permission"
-    assert current.permission_profile_id == "legacy:mysql:8.0:slow:8022_plus:permission"
-    assert pre.parser_contract_id == "legacy:mysql:8.0:slow:pre_8022:parser"
-    assert current.parser_contract_id == "legacy:mysql:8.0:slow:8022_plus:parser"
+    assert pre.sql_profile_id == current.sql_profile_id == "mysql80_slow"
+    assert pre.permission_profile_id == current.permission_profile_id == "mysql80_slow"
+    assert pre.parser_contract_id == current.parser_contract_id == "mysql_slow"
 
 
 def test_profile_mismatch_unknown_and_unsupported_never_fallback() -> None:
@@ -287,7 +284,7 @@ def test_static_registry_rejects_duplicate_dangling_and_forbidden_metadata() -> 
     duplicate = DiagnosticProfileResolver((valid, valid))
     assert any("duplicate" in error for error in duplicate.validate())
     dangling = DiagnosticProfileResolver((replace(valid, sql_profile_id="missing"),))
-    assert any("cross-route or unknown profile reference" in error for error in dangling.validate())
+    assert any("unknown slow SQL profile" in error for error in dangling.validate())
     forbidden = DiagnosticProfileResolver((replace(valid, required_privileges=("sysadmin",)),))
     assert any("forbidden privilege" in error for error in forbidden.validate())
     invalid_variant = DiagnosticProfileResolver((replace(

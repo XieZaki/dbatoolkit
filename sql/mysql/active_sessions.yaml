@@ -5,3 +5,11 @@ timeout_seconds: 10
 max_rows: 2000
 reviewed: true
 description: Current foreground connection and transaction snapshot.
+feature: slow
+version_families:
+- '8.0'
+- '8.4'
+runtime_variants:
+- default
+- pre_8022
+- 8022_plus

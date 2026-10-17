@@ -17,6 +17,12 @@ from dba.mysql_collectors import (
 )
 from dba.postgresql_slow import blocking_graph
 from dba.settings import MySQLSettings
+from dba.slow_profiles import (
+    collection_completeness,
+    optional_collectors_for_adapter,
+    profile_for_adapter,
+    required_collectors_for_adapter,
+)
 
 
 @dataclass(frozen=True)
@@ -42,7 +48,10 @@ def _descendants(root: int, children: dict[int, set[int]]) -> set[int]:
 
 def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult, ...],
                       settings: MySQLSettings, version: str,
-                      statement_script: str = "active_requests") -> MySQLSlowReport:
+                      statement_script: str = "active_requests",
+                      required_collectors: tuple[str, ...] =
+                      ("active_sessions", "active_requests", "transactions", "blocking"),
+                      optional_collectors: tuple[str, ...] = ()) -> MySQLSlowReport:
     by_name = {result.collector_name: result for result in results}
 
     def rows(name: str) -> list[dict[str, Any]]:
@@ -71,9 +80,8 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
         quality.append("active_requests: current wait detail unavailable" if
                        statement_script == "active_requests_no_waits" else
                        "active_requests: thread fallback; statement timer, rows and wait detail unavailable")
-    incomplete = limited or any(not r.success or r.truncated for r in results) or any(
-        name not in by_name for name in ("active_sessions", "active_requests", "transactions", "blocking")
-    )
+    incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
+    incomplete = incomplete or limited
     concurrency = {"total_connections": len(sessions), "active_statements": len(requests),
                    "running_statements": len(requests) - len(waiting),
                    "waiting_statements": len(waiting), "blocked_sessions": len(blocked_pids),
@@ -175,7 +183,7 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                 "blocking_graph": graph, "roots": roots, "transactions": transactions,
                 "idle_transactions": idle_details, "sessions": sessions,
                 "active_requests": requests,
-                "quality": quality, "incomplete": incomplete,
+                "quality": quality, "incomplete": incomplete, "data_visibility": visibility,
                 "samples": [{"collector": r.collector_name, "started_at": r.started_at,
                              "finished_at": r.finished_at, "row_count": r.row_count,
                              "truncated": r.truncated, "success": r.success,
@@ -185,14 +193,20 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
 def diagnose_slow(adapter: MySQLAdapter) -> MySQLSlowReport:
     version = adapter.get_server_version()
     results: list[CollectorResult] = []
+    routed = profile_for_adapter(adapter) is not None
+    required = set(required_collectors_for_adapter(
+        adapter, ("active_sessions", "active_requests", "transactions", "blocking")
+    ))
+    fatal = required if routed else {"active_sessions", "blocking"}
     for collector in (ActiveSessionsCollector, ActiveRequestsCollector,
                       TransactionsCollector, BlockingCollector):
-        if results and not results[-1].success:
-            break
         result = collector(adapter).collect(adapter.instance)
         results.append(result)
-        if not result.success and collector in (ActiveSessionsCollector, BlockingCollector):
+        if not result.success and result.collector_name in fatal:
             raise ToolkitError(result.error_type or "QueryFailed",
                                result.error_message or "Required sample unavailable.")
+        if not result.success:
+            break
     return build_slow_report(adapter.instance, tuple(results), adapter.settings,
-                             version, adapter.statement_script)
+                             version, adapter.statement_script, tuple(required),
+                             optional_collectors_for_adapter(adapter))

@@ -4,4 +4,16 @@ risk: READ_ONLY
 timeout_seconds: 10
 max_rows: 5000
 reviewed: true
-description: Connection source and most recent batch; unavailable text remains NULL, no SQL Server 2014 input-buffer dependency.
+description: Connection source and most recent batch; unavailable text remains NULL,
+  no SQL Server 2014 input-buffer dependency.
+feature: slow
+version_families:
+- 2008r2
+- '2012'
+- '2014'
+- '2016'
+- '2017'
+- '2019'
+- '2022'
+runtime_variants:
+- default

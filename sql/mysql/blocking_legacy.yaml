@@ -1,0 +1,15 @@
+name: blocking_legacy
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2000
+reviewed: true
+description: MySQL 5.7 InnoDB lock wait evidence using legacy INFORMATION_SCHEMA lock
+  views.
+feature: slow
+version_families:
+- '5.7'
+runtime_variants:
+- default
+- pre_8022
+- 8022_plus

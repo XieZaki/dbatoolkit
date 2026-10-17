@@ -337,7 +337,7 @@ def test_missing_slow_permission_returns_exact_identity_reference_grant(
         "id": "mysql84", "name": "MySQL", "db_type": "mysql",
         "host": "127.0.0.1", "port": 3306, "database": "app",
         "credential_alias": "mysql-monitor", "enabled": True,
-        "environment": "test",
+        "environment": "test", "version_family": "8.0",
     }]}), encoding="utf-8")
     driver = FakeDriver()
     driver.connection.results["preflight"] = [{**PREFLIGHT, "monitor_user": "dba_monitor@%"}]
@@ -367,7 +367,7 @@ def test_check_keeps_account_security_and_permission_readiness_separate(
         "id": "mysql84", "name": "MySQL", "db_type": "mysql",
         "host": "127.0.0.1", "port": 3306, "database": "app",
         "credential_alias": "mysql-monitor", "enabled": True,
-        "environment": "test",
+        "environment": "test", "version_family": "8.0",
     }]}), encoding="utf-8")
     driver = FakeDriver()
     driver.connection.results["preflight"] = [{**PREFLIGHT, "monitor_user": "dba_monitor@%"}]
@@ -382,6 +382,34 @@ def test_check_keeps_account_security_and_permission_readiness_separate(
     assert "Account Security" in rendered and "NON_PRIVILEGED" in rendered
     assert "Permission Readiness" in rendered and "slow" in rendered
     assert "MISSING" in rendered and "PROCESS" in rendered
+
+
+def test_permissions_slow_uses_atomic_version_profile(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    inventory.write_text(yaml.safe_dump({"databases": [{
+        "id": "mysql80", "name": "MySQL 8", "db_type": "mysql",
+        "host": "127.0.0.1", "port": 3306, "database": "app",
+        "credential_alias": "mysql-monitor", "enabled": True,
+        "environment": "test", "version_family": "8.0",
+    }]}), encoding="utf-8")
+    driver = FakeDriver()
+    driver.connection.results["preflight"] = [{**PREFLIGHT, "monitor_user": "dba_monitor@%"}]
+    driver.connection.results["monitor_grants"] = [{
+        "Grants": "GRANT SELECT ON *.* TO `dba_monitor`@`%`"
+    }]
+    code = main(["--inventory", str(inventory), "permissions", "mysql80",
+                 "--feature", "slow", "--json"],
+                provider=MemoryCredentialProvider(), driver=driver)
+    payload = json.loads(capsys.readouterr().out)
+    slow = next(row for row in payload["features"] if row["feature"] == "slow")
+    assert code == 0
+    assert slow["status"] == "MISSING"
+    assert slow["required_privileges"] == ["PROCESS", "SELECT performance_schema"]
+    assert slow["version_profile"]["sql_profile_id"] == "mysql80_slow"
+    assert slow["version_profile"]["permission_profile_id"] == "mysql80_slow"
+    assert slow["version_profile"]["parser_contract_id"] == "mysql_slow"
 
 
 def test_failed_show_grants_preserves_sanitized_vendor_error() -> None:
@@ -624,7 +652,7 @@ def test_mysql_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     inventory.write_text(yaml.safe_dump({"databases": [
         {"id": "my", "name": "MySQL", "db_type": "mysql", "host": "test.invalid",
          "port": 3306, "database": "test", "credential_alias": "monitor",
-         "environment": "development"}]}), encoding="utf-8")
+         "environment": "development", "version_family": "8.0"}]}), encoding="utf-8")
     settings = tmp_path / "runtime.yaml"
     settings.write_text(yaml.safe_dump({"mysql": {"ssl_enabled": False}}), encoding="utf-8")
     common = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql"),

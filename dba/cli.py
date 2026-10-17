@@ -75,6 +75,7 @@ from dba.reporting import HtmlReportRenderer, build_report_model, render_bounded
 from dba.runtime import RuntimeStatus, database_runtime_status, doctor, runtime_info
 from dba.settings import MySQLSettings, OracleSettings, PostgreSQLSettings, SQLServerSettings
 from dba.slow import diagnose_slow
+from dba.slow_profiles import validate_slow_profiles
 from dba.sqlserver import SQLServerAdapter
 from dba.sqlserver_collectors import COLLECTORS
 from dba.versioning import (
@@ -679,6 +680,9 @@ def main(
             if replication_errors:
                 raise ValidationError("Replication profile registry invalid: "
                                        + "; ".join(replication_errors))
+            slow_errors = validate_slow_profiles(registry, PROFILE_RESOLVER.bindings)
+            if slow_errors:
+                raise ValidationError("Slow profile registry invalid: " + "; ".join(slow_errors))
             warnings = inventory.version_family_warnings()
             validation_result = {"success": True, "instance_count": len(inventory.instances),
                                 "sql_script_count": len(scripts), "warnings": warnings}
@@ -812,6 +816,13 @@ def main(
                             )
                         except ProfileResolutionError:
                             replication_profile = None
+                    slow_profile = None
+                    slow_detection = None
+                    if "slow" in requested:
+                        try:
+                            slow_profile, slow_detection = resolve_profile_for_adapter(adapter, "slow")
+                        except ProfileResolutionError:
+                            slow_profile = None
                     supported = [feature for feature in requested if feature in definitions
                                  and feature_supported(instance.db_type, feature, server_version)]
                     if not requested:
@@ -819,19 +830,20 @@ def main(
                     observed = set(getattr(adapter, "permission_observations", set()))
                     rows = []
                     for feature in requested:
-                        if feature == "replication":
-                            profile = replication_profile
+                        if feature in {"replication", "slow"}:
+                            profile = replication_profile if feature == "replication" else slow_profile
+                            detection = replication_detection if feature == "replication" else slow_detection
                             if profile is None or profile.version_status == VersionStatus.MISMATCH:
                                 unknown_row: dict[str, Any] = {
                                     "feature": feature, "status": PermissionStatus.UNKNOWN.value,
                                     "support_state": SupportState.UNKNOWN.value,
-                                    "impact": "No unambiguous verified replication permission profile is available.",
+                                    "impact": f"No unambiguous verified {feature} permission profile is available.",
                                 }
-                                if replication_detection and replication_detection.error_type:
+                                if detection and detection.error_type:
                                     unknown_row["version_detection_error"] = {
-                                        "error_type": replication_detection.error_type,
-                                        "message": replication_detection.error_message,
-                                        "database_error": replication_detection.database_error,
+                                        "error_type": detection.error_type,
+                                        "message": detection.error_message,
+                                        "database_error": detection.database_error,
                                     }
                                 rows.append(unknown_row)
                                 continue
@@ -847,7 +859,8 @@ def main(
                                              "impact": "No reviewed permission profile is available for this route."})
                                 continue
                             requirement = requirements_for_profile(profile.permission_profile_id)
-                            if profile.version_status in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN}:
+                            if profile.version_status in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN,
+                                                          VersionStatus.AUTO_DETECTED, VersionStatus.MISMATCH}:
                                 replication_assessment: Any = {
                                     "status": PermissionStatus.UNKNOWN,
                                     "missing_required": (), "missing_optional": (),
@@ -862,14 +875,16 @@ def main(
                                    "missing_reasons": privilege_reasons(
                                        requirement, replication_assessment["missing_required"]
                                    )}
-                            if (profile.version_status == VersionStatus.UNVERIFIED
-                                    and replication_detection and replication_detection.error_type):
+                            if (profile.version_status in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN}
+                                    and detection and detection.error_type):
                                 row["version_detection_error"] = {
-                                    "error_type": replication_detection.error_type,
-                                    "message": replication_detection.error_message,
-                                    "database_error": replication_detection.database_error,
+                                    "error_type": detection.error_type,
+                                    "message": detection.error_message,
+                                    "database_error": detection.database_error,
                                 }
-                            if replication_assessment["status"] != PermissionStatus.READY:
+                            if (replication_assessment["status"] != PermissionStatus.READY
+                                    and profile.version_status in {VersionStatus.VERIFIED,
+                                                                   VersionStatus.UNVERIFIED}):
                                 row["impact"] = requirement.impact
                                 row["reference_grant"] = render_profile_sql(
                                     profile.permission_profile_id, instance.db_type,
@@ -894,18 +909,27 @@ def main(
                     generated: str | None = None
                     if args.generate_grant or args.generate_revoke:
                         assert permission_credential is not None
-                        if args.feature == "replication" and replication_profile is not None \
-                                and replication_profile.permission_profile_id:
+                        selected_profile = (replication_profile if args.feature == "replication"
+                                            else slow_profile if args.feature == "slow" else None)
+                        if args.feature in {"replication", "slow"} and selected_profile is not None \
+                                and selected_profile.version_status in {VersionStatus.VERIFIED,
+                                                                        VersionStatus.UNVERIFIED} \
+                                and selected_profile.permission_profile_id:
                             generated = render_profile_sql(
-                                replication_profile.permission_profile_id, instance.db_type,
+                                selected_profile.permission_profile_id, instance.db_type,
                                 _grant_account(instance, adapter, permission_credential),
                                 instance.database, server_version,
                                 revoke=args.generate_revoke,
                             )
                         elif args.feature is None:
                             if (replication_profile is None
-                                    or replication_profile.version_status == VersionStatus.MISMATCH
-                                    or not replication_profile.permission_profile_id):
+                                    or replication_profile.version_status not in {VersionStatus.VERIFIED,
+                                                                                 VersionStatus.UNVERIFIED}
+                                    or not replication_profile.permission_profile_id
+                                    or slow_profile is None
+                                    or slow_profile.version_status not in {VersionStatus.VERIFIED,
+                                                                           VersionStatus.UNVERIFIED}
+                                    or not slow_profile.permission_profile_id):
                                 generated = None
                             else:
                                 privileges: list[str] = []
@@ -913,6 +937,9 @@ def main(
                                     requirement = (
                                         requirements_for_profile(replication_profile.permission_profile_id)
                                         if feature == "replication" else
+                                        requirements_for_profile(slow_profile.permission_profile_id)
+                                        if feature == "slow" and slow_profile is not None
+                                        and slow_profile.permission_profile_id else
                                         requirements_for(instance.db_type, feature, server_version)
                                     )
                                     for privilege in requirement.required:
@@ -944,6 +971,12 @@ def main(
                     )
                     detected = detection.detected
                     version_verification = version_status(instance.version_family, detected)
+                    slow_profile = PROFILE_RESOLVER.resolve(
+                        instance.db_type, instance.version_family, detected, "slow"
+                    ) if instance.db_type in {
+                        DatabaseType.SQLSERVER, DatabaseType.MYSQL,
+                        DatabaseType.POSTGRESQL, DatabaseType.ORACLE,
+                    } else None
                     version_profile = build_version_profile(
                         instance.db_type, instance.version_family, detected,
                         error_type=detection.error_type,
@@ -976,6 +1009,16 @@ def main(
                         if feature not in definitions:
                             permission_rows.append({"feature": feature, "status": "UNSUPPORTED"})
                             continue
+                        if feature == "slow" and slow_profile is not None \
+                                and slow_profile.version_status != VersionStatus.VERIFIED:
+                            permission_rows.append({
+                                "feature": feature, "status": PermissionStatus.UNKNOWN.value,
+                                "support_state": slow_profile.support_state.value,
+                                "version_profile": asdict(slow_profile),
+                                "missing_required": (), "missing_optional": (),
+                                "impact": "Version verification is required before assessing slow permissions.",
+                            })
+                            continue
                         if version_verification in {VersionStatus.MISMATCH, VersionStatus.UNVERIFIED,
                                                     VersionStatus.UNKNOWN}:
                             permission_rows.append({
@@ -983,6 +1026,29 @@ def main(
                                 "missing_required": (), "missing_optional": (),
                                 "impact": "Version verification is required before assessing permissions.",
                             })
+                            continue
+                        if feature == "slow" and slow_profile is not None:
+                            if slow_profile.support_state != SupportState.SUPPORTED \
+                                    or not slow_profile.permission_profile_id:
+                                permission_rows.append({
+                                    "feature": "slow", "status": PermissionStatus.UNKNOWN.value,
+                                    "support_state": slow_profile.support_state.value,
+                                    "version_profile": asdict(slow_profile),
+                                    "missing_required": (), "missing_optional": (),
+                                    "impact": "No reviewed slow permission contract is available for this route.",
+                                })
+                                continue
+                            requirement = requirements_for_profile(slow_profile.permission_profile_id)
+                            assessment = assess_permissions(requirement, observed)
+                            permission_rows.append({"feature": feature, **assessment,
+                                                    "support_state": slow_profile.support_state.value,
+                                                    "version_profile": asdict(slow_profile),
+                                                    "required_privileges": requirement.required,
+                                                    "missing_reasons": privilege_reasons(
+                                                        requirement, assessment["missing_required"]
+                                                    ),
+                                                    **({"impact": requirement.impact}
+                                                       if assessment["status"] != PermissionStatus.READY else {})})
                             continue
                         requirement = requirements_for(
                             instance.db_type, feature, adapter.get_server_version()
@@ -1012,6 +1078,8 @@ def main(
                         overall = "VERSION_MISMATCH"
                     elif version_verification in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN}:
                         overall = "VERSION_UNVERIFIED"
+                    elif "UNKNOWN" in states:
+                        overall = "PARTIAL"
                     elif "MISSING" in states:
                         overall = "PARTIAL" if "READY" in states else "MISSING"
                     elif "PARTIAL" in states:
@@ -1113,39 +1181,62 @@ def main(
                         report = diagnose_disk_growth(adapter)
                         output = {"success": not report.details["incomplete"], "report": asdict(report)}
                     elif args.scenario == "slow":
-                        if isinstance(adapter, MySQLAdapter):
-                            requirement = requirements_for(
-                                instance.db_type, "slow", adapter.get_server_version()
+                        profile, detection = resolve_profile_for_adapter(adapter, "slow")
+                        if profile.version_status != VersionStatus.VERIFIED:
+                            raise ToolkitError(
+                                "VersionVerificationRequired",
+                                "Slow diagnosis requires a declared version_family matching the detected server version.",
+                                permission_readiness={
+                                    "feature": "slow", "status": PermissionStatus.UNKNOWN.value,
+                                    "version_detection": asdict(detection),
+                                    "version_profile": asdict(profile),
+                                },
                             )
-                            assessment = assess_permissions(
-                                requirement, adapter.permission_observations
+                        if profile.support_state != SupportState.SUPPORTED \
+                                or not profile.permission_profile_id:
+                            raise ToolkitError(
+                                "FeatureUnsupported",
+                                "No verified slow diagnostic profile is available for this database version.",
+                                permission_readiness={
+                                    "feature": "slow", "status": PermissionStatus.UNSUPPORTED.value,
+                                    "version_profile": asdict(profile),
+                                },
                             )
-                            if assessment["status"] == PermissionStatus.MISSING:
-                                missing = assessment["missing_required"]
-                                grant = render_privileges_sql(
-                                    instance.db_type, missing,
-                                    _grant_account(instance, adapter, permission_credential),
-                                    instance.database,
-                                    adapter.get_server_version(),
-                                )
-                                raise ToolkitError(
-                                    "MissingPermission",
-                                    "Required monitoring permissions are missing for slow diagnosis.",
-                                    permission_readiness={
-                                        "feature": "slow", **assessment,
-                                        "missing_reasons": privilege_reasons(requirement, missing),
-                                        "impact": requirement.impact,
-                                        "account_security": adapter.privilege_classification,
-                                        "suggested_grant": grant,
-                                        "toolkit_executed": False,
-                                        "dba_approval_required": True,
-                                    },
-                                )
+                        cast(Any, adapter).slow_profile = profile
+                        requirement = requirements_for_profile(profile.permission_profile_id)
+                        assessment = assess_permissions(requirement, adapter.permission_observations)
+                        if assessment["status"] == PermissionStatus.MISSING:
+                            missing = assessment["missing_required"]
+                            grant = render_privileges_sql(
+                                instance.db_type, missing,
+                                _grant_account(instance, adapter, permission_credential),
+                                instance.database, adapter.get_server_version(),
+                            )
+                            raise ToolkitError(
+                                "MissingPermission",
+                                "Required monitoring permissions are missing for slow diagnosis.",
+                                permission_readiness={
+                                    "feature": "slow", **assessment,
+                                    "version_profile": asdict(profile),
+                                    "missing_reasons": privilege_reasons(requirement, missing),
+                                    "impact": requirement.impact,
+                                    "account_security": getattr(adapter, "privilege_classification", None),
+                                    "suggested_grant": grant,
+                                    "toolkit_executed": False,
+                                    "dba_approval_required": True,
+                                },
+                            )
                         report = (diagnose_oracle_slow(adapter) if isinstance(adapter, OracleAdapter)
                                   else diagnose_mysql_slow(adapter) if isinstance(adapter, MySQLAdapter)
                                   else diagnose_pg_slow(adapter) if isinstance(adapter, PostgreSQLAdapter)
                                   else diagnose_slow(adapter))
                         output = {"success": not report.details["incomplete"], "report": asdict(report)}
+                        output["version_profile"] = asdict(profile)
+                        output["permission_readiness"] = {
+                            "status": assessment["status"].value,
+                            "missing_optional": assessment["missing_optional"],
+                            "data_visibility": report.details.get("data_visibility", "UNKNOWN"),
+                        }
                     elif args.scenario == "replication":
                         report = diagnose_replication(adapter)
                         severities = {"INFO": 0, "WARNING": 1, "HIGH": 2, "CRITICAL": 3}

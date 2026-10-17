@@ -265,6 +265,7 @@ def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Non
                         "host": "test.invalid",
                         "port": 1433,
                         "credential_alias": "monitor",
+                        "version_family": "2022",
                     }
                 ]
             }
@@ -294,6 +295,7 @@ def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Non
     assert set(driver.connection.executed) <= {
         "monitor_capabilities",
         "monitor_permissions",
+        "version_detect",
         "server_info",
         "database_status",
         "active_sessions",

@@ -84,3 +84,10 @@ tests assert a PostgreSQL standalone primary is healthy/not configured when
 all required evidence is available, and that MySQL zero-channel results remain
 complete. No feature SQL executes for unsupported, auto-detected-only,
 unverified, unknown, or mismatched routes.
+
+V0.9.1 Phase C adds slow profile coverage for SQL Server 2008 R2 through 2022
+(2025 remains UNKNOWN), MySQL 5.7/8.0/8.4, PostgreSQL 13–18, and Oracle 11gR2,
+12c variants and 18c–26ai. Tests verify SQL/permission/parser alignment,
+MySQL 5.7 legacy lock views, normalized evidence aliases, required versus
+optional collector failures and fail-closed version gating. These tests use
+Fake Adapters and do not replace live E2E verification.

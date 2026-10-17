@@ -158,7 +158,8 @@ def test_multifile_inventory_preserves_slow_diagnose(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     directory = tmp_path / "inventory"
-    write_inventory(directory / "sqlserver/production.yaml", [item("test")], DEFAULTS)
+    write_inventory(directory / "sqlserver/production.yaml",
+                    [{**item("test"), "version_family": "2022"}], DEFAULTS)
     driver = FakeDriver()
     driver.connection.results.update(transactions=[], connections=[])
     report = tmp_path / "slow.html"

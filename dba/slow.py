@@ -16,6 +16,12 @@ from dba.core import (
 from dba.errors import ToolkitError
 from dba.logging import redact
 from dba.settings import SQLServerSettings
+from dba.slow_profiles import (
+    collection_completeness,
+    optional_collectors_for_adapter,
+    profile_for_adapter,
+    required_collectors_for_adapter,
+)
 from dba.sqlserver import SQLServerAdapter
 from dba.sqlserver_collectors import (
     ActiveRequestsCollector,
@@ -119,6 +125,8 @@ def build_slow_report(
     results: tuple[CollectorResult, ...],
     settings: SQLServerSettings,
     version: str = "unavailable",
+    required_collectors: tuple[str, ...] = ("active_requests", "active_sessions", "transactions", "connections"),
+    optional_collectors: tuple[str, ...] = (),
 ) -> SlowReport:
     if instance.db_type != DatabaseType.SQLSERVER:
         raise ToolkitError("NotImplemented", "Not implemented for this database type.")
@@ -330,10 +338,9 @@ def build_slow_report(
                 "结合 wait_type 和阻塞链解释当前等待，不据单次快照推断资源根因。",
             )
         )
-    incomplete = any(r.truncated or not r.success for r in results) or any(
-        n not in by_name
-        for n in ("active_requests", "active_sessions", "transactions", "connections")
-    )
+    incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
+    if visibility == "PARTIAL":
+        quality.append("Optional evidence is unavailable or truncated; visibility is partial.")
     if incomplete:
         findings.append(
             Finding(
@@ -363,6 +370,7 @@ def build_slow_report(
                 "sources": connections,
                 "quality": quality,
                 "incomplete": incomplete,
+                "data_visibility": visibility,
                 "samples": [
                     {
                         "collector": r.collector_name,
@@ -383,6 +391,11 @@ def build_slow_report(
 def diagnose_slow(adapter: SQLServerAdapter) -> SlowReport:
     version = adapter.get_server_version()
     results: list[CollectorResult] = []
+    routed = profile_for_adapter(adapter) is not None
+    required = set(required_collectors_for_adapter(
+        adapter, ("active_requests", "active_sessions", "transactions", "connections")
+    ))
+    fatal = required if routed else {"active_requests", "active_sessions"}
     # Essential samples first. Optional DMV failure retains the useful snapshot;
     # the adapter still closes on failure, so no subsequent query uses that handle.
     for collector in (
@@ -391,13 +404,14 @@ def diagnose_slow(adapter: SQLServerAdapter) -> SlowReport:
         TransactionsCollector,
         ConnectionsCollector,
     ):
-        if results and not results[-1].success:
-            break
         result = collector(adapter).collect(adapter.instance)
         results.append(result)
-        if not result.success and collector in (ActiveRequestsCollector, ActiveSessionsCollector):
+        if not result.success and result.collector_name in fatal:
             raise ToolkitError(
                 result.error_type or "QueryFailed",
                 result.error_message or "Required sample unavailable.",
             )
-    return build_slow_report(adapter.instance, tuple(results), adapter.settings, version)
+        if not result.success:
+            break
+    return build_slow_report(adapter.instance, tuple(results), adapter.settings, version,
+                             tuple(required), optional_collectors_for_adapter(adapter))

@@ -5,3 +5,16 @@ timeout_seconds: 10
 max_rows: 1000
 reviewed: true
 description: Reviewed bounded Oracle transactions monitoring query.
+feature: slow
+version_families:
+- 11gr2
+- 12c
+- 18c
+- 19c
+- 21c
+- 23ai
+- 26ai
+runtime_variants:
+- default
+- '12_1'
+- 12_2_plus

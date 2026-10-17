@@ -4,4 +4,18 @@ risk: READ_ONLY
 timeout_seconds: 10
 max_rows: 1000
 reviewed: true
-description: Reviewed single-instance blocking relationships without optional lock views.
+description: Reviewed single-instance blocking relationships without optional lock
+  views.
+feature: slow
+version_families:
+- 11gr2
+- 12c
+- 18c
+- 19c
+- 21c
+- 23ai
+- 26ai
+runtime_variants:
+- default
+- '12_1'
+- 12_2_plus

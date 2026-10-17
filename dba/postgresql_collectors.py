@@ -8,6 +8,7 @@ from dba.collectors import Collector, CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.errors import ToolkitError
 from dba.postgresql import PostgreSQLAdapter
+from dba.slow_profiles import normalize_slow_result, profile_for_adapter, script_for_slow
 
 
 class PostgreSQLCollector(Collector):
@@ -19,8 +20,11 @@ class PostgreSQLCollector(Collector):
     def collect(self, instance: DatabaseInstance) -> CollectorResult:
         if instance != self.adapter.instance or instance.db_type != DatabaseType.POSTGRESQL:
             raise ToolkitError("InstanceMismatch", "Collector and adapter must refer to the same instance.")
-        script = self.adapter.registry.get(self.script_name, DatabaseType.POSTGRESQL)
-        return replace(self.adapter.execute_readonly(script), collector_name=self.script_name)
+        name = script_for_slow(self.adapter, self.script_name, self.script_name)
+        script = self.adapter.registry.get(name, DatabaseType.POSTGRESQL)
+        result = replace(self.adapter.execute_readonly(script), collector_name=self.script_name)
+        profile = profile_for_adapter(self.adapter)
+        return normalize_slow_result(profile, result) if profile else result
 
 
 class ServerInfoCollector(PostgreSQLCollector):
