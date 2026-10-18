@@ -86,6 +86,14 @@ core totals. A configured-off feature such as binary logging or archiving is
 reported as `NOT_CONFIGURED`/`NOT_APPLICABLE`. Thresholds remain in the Analyzer
 and are not version-profile settings.
 
+Permission readiness, evidence completeness, and database health are separate
+outputs. `PARTIAL` permission readiness means the required contract is satisfied
+and optional context is unavailable. Optional-only gaps make data completeness
+`PARTIAL`, but do not by themselves make storage health `DEGRADED` or `UNKNOWN`.
+Health is `UNKNOWN` only when required core evidence is incomplete; otherwise it
+is based on observed storage findings. Successful queries returning zero rows,
+including Oracle `V$TRANSACTION`, are valid evidence and are not missing.
+
 ### Disk-growth support matrix
 
 `SUPPORTED`, test coverage, and live verification are separate claims. In this
@@ -107,7 +115,7 @@ real servers unless separately recorded.
 | PostgreSQL 17–18 | SUPPORTED | Slot query includes `wal_status` and `safe_wal_size` | Unit/Fake integration; no live major-version matrix |
 | Oracle 11gR2 | SUPPORTED | Tablespace/data/temp core with legacy-compatible views | Unit/Fake integration; no live legacy instance |
 | Oracle 12c–23ai | SUPPORTED | Tablespace/data/temp core; optional FRA/archive/redo | Unit/Fake integration; no live instance in this run |
-| Oracle 26ai | SUPPORTED | Tablespace/data/temp core; optional FRA/archive/redo | E2E verified connection, principal, version and permission gate; collection blocked by four missing core object grants |
+| Oracle 26ai | SUPPORTED | Tablespace/data/temp core; optional FRA/archive/redo | E2E verified connection, principal, version and required permission gate; optional FRA/archive/redo grants may remain absent |
 
 Optional collectors can report partial visibility without invalidating complete
 core totals. Disabled binary logging, no PostgreSQL slots, disabled archiving,

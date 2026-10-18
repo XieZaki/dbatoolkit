@@ -142,10 +142,16 @@ def render_human(command: str, value: Any) -> str:
         for row in data.get("features", []):
             if row.get("missing_required"):
                 lines.append(_line(f"{row['feature']} missing", ", ".join(row["missing_required"])))
+            if row.get("required_privileges"):
+                lines.extend([_line(f"{row['feature']} required permissions", ""),
+                              *[f"  {item}" for item in row["required_privileges"]]])
             if row.get("missing_optional"):
                 lines.append(_line(f"{row['feature']} optional", ", ".join(row["missing_optional"])))
             if row.get("impact") and row.get("status") in {"PARTIAL", "MISSING", "UNKNOWN"}:
                 lines.append(_line(f"{row['feature']} impact", row["impact"]))
+            if row.get("reference_grant"):
+                lines.extend([_line(f"{row['feature']} reference grants", ""),
+                              row["reference_grant"], "Toolkit did NOT execute this script."])
         runtime = data.get("runtime_verification")
         version = data.get("version_profile")
         if runtime:
@@ -358,6 +364,12 @@ def render_incident_summary(value: IncidentSummary | dict[str, Any], verbose: bo
     lines = ["Incident Summary", "-" * 42, "", "Snapshot",
              _line("Time", snapshot),
              _line("Data Completeness", data.get("data_completeness"))]
+    if data.get("required_evidence_status") != "NOT_APPLICABLE":
+        lines.extend([_line("Required Evidence", data.get("required_evidence_status")),
+                      _line("Optional Evidence", data.get("optional_evidence_status"))])
+        if data.get("unavailable_optional_evidence"):
+            lines.append(_line("Unavailable Optional Evidence",
+                               ", ".join(data["unavailable_optional_evidence"])))
     if data.get("missing_evidence"):
         lines.append(_line("Missing Evidence", ", ".join(data["missing_evidence"])))
     lines.extend(["", "Overall", _line("Status", data.get("status")),
@@ -415,8 +427,14 @@ def render_incident_summary(value: IncidentSummary | dict[str, Any], verbose: bo
                       "", "Safety", "  Toolkit did NOT execute this command.",
                       "  DBA approval is required."])
     else:
-        lines.append("  No session termination command generated.")
-        if data.get("data_completeness") != "COMPLETE":
+        if data.get("required_evidence_status") != "NOT_APPLICABLE":
+            lines.append("  No automatic or destructive remediation generated.")
+        else:
+            lines.append("  No session termination command generated.")
+        if data.get("required_evidence_status") == "INCOMPLETE":
+            lines.append("  Reason: required evidence is incomplete.")
+        elif data.get("required_evidence_status") == "NOT_APPLICABLE" \
+                and data.get("data_completeness") != "COMPLETE":
             lines.append("  Reason: evidence incomplete.")
         elif data.get("primary_problem") == "LONG_RUNNING_SQL":
             lines.extend(["  No session termination recommended from current evidence.",

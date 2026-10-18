@@ -65,6 +65,15 @@ class HtmlReportRenderer:
             f"<div class=\"summary-metric\"><strong>{_escape(label)}</strong> "
             f"<span>{_escape(value)}</span></div>" for label, value in cards)
         summary_fields: list[tuple[str, str]] = []
+        summary_fields.append(("Data Completeness", incident.data_completeness))
+        if incident.required_evidence_status != "NOT_APPLICABLE":
+            summary_fields.extend((
+                ("Required Evidence", incident.required_evidence_status),
+                ("Optional Evidence", incident.optional_evidence_status),
+            ))
+        if incident.unavailable_optional_evidence:
+            summary_fields.append(("Unavailable Optional Evidence",
+                                   ", ".join(incident.unavailable_optional_evidence)))
         for impact_key, impact_value in incident.impact.items():
             summary_fields.append((_label(impact_key), str(impact_value)))
         for timing_key, timing_value in incident.timing.items():

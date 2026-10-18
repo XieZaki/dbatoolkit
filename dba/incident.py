@@ -28,6 +28,9 @@ class IncidentSummary:
     snapshot_time: str
     data_completeness: str
     missing_evidence: tuple[str, ...]
+    required_evidence_status: str
+    optional_evidence_status: str
+    unavailable_optional_evidence: tuple[str, ...]
     status: str
     severity: str
     primary_problem: str
@@ -97,6 +100,13 @@ def _quality(details: dict[str, Any], scenario: str) -> tuple[str, tuple[str, ..
         return "PARTIAL", ("Execution plan",)
     if scenario == "plan" and details.get("plan_available") is True:
         return "COMPLETE", ()
+    if scenario == "disk-growth":
+        required_missing = tuple(str(item) for item in details.get("required_unavailable", []) if item)
+        if details.get("incomplete") or not details.get("required_evidence_complete", True):
+            return "INCOMPLETE", required_missing or ("Required disk-growth evidence",)
+        if details.get("optional_unavailable"):
+            return "PARTIAL", ()
+        return "COMPLETE", ()
     samples = details.get("samples", [])
     bad_samples = any(not item.get("success", True) or item.get("truncated")
                       for item in samples if isinstance(item, dict))
@@ -104,11 +114,6 @@ def _quality(details: dict[str, Any], scenario: str) -> tuple[str, tuple[str, ..
     graph_anomaly = isinstance(graph, dict) and bool(graph.get("anomalies"))
     if not details.get("incomplete") and not bad_samples and not graph_anomaly:
         return "COMPLETE", ()
-    if scenario == "disk-growth":
-        disk_missing = tuple(str(item) for item in details.get("unavailable", []) if item)
-        if not samples:
-            return "INCOMPLETE", disk_missing or ("Disk and log evidence",)
-        return "PARTIAL", disk_missing or ("Disk and log evidence",)
     if not samples:
         return "INCOMPLETE", ("Required diagnostic samples",)
     missing: list[str] = []
@@ -172,30 +177,39 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
     if report.scenario == "disk-growth":
         for finding in findings:
             title = finding.title.upper()
-            if any(token in title for token in ("LOG", "WAL", "BINLOG", "REDO", "ARCHIVE", "FRA")):
+            if any(token in title for token in ("LOG", "WAL", "BINLOG", "REDO", "ARCHIVE", "FRA",
+                                                "TRANSACTION")):
                 problem_candidates.append("LOG_PRESSURE")
-            elif any(token in title for token in ("SPACE", "DATAFILE", "TABLESPACE", "TEMP")):
+            elif any(token in title for token in ("SPACE", "DATAFILE", "TABLESPACE", "TEMP", "UNDO")):
                 problem_candidates.append("SPACE_PRESSURE")
             elif "REPLICA" in title or "REPLICATION" in title:
                 problem_candidates.append("REPLICATION_LAG")
     primary = next((name for name in ("BLOCKING", "LONG_RUNNING_SQL", "HIGH_CONCURRENCY",
                                       "IDLE_TRANSACTION", "LOG_PRESSURE", "SPACE_PRESSURE",
                                       "REPLICATION_LAG") if name in problem_candidates), "UNKNOWN")
-    active_now = (primary != "UNKNOWN" or
+    if report.scenario == "disk-growth" and not incomplete:
+        primary = "NONE" if primary == "UNKNOWN" else primary
+    active_now = (primary not in {"UNKNOWN", "NONE"} or
                   report.scenario == "plan" and details.get("metrics_scope") == "current_request")
     has_warning_finding = any(f.severity.value in {"WARNING", "CRITICAL"} for f in findings)
-    severity = ("CRITICAL" if report.scenario == "replication" and
+    severity = ("CRITICAL" if report.scenario == "disk-growth" and
+                any(f.severity.value == "CRITICAL" for f in findings) else
+                "WARNING" if report.scenario == "disk-growth" and
+                any(f.severity.value == "WARNING" for f in findings) else
+                "WARNING" if report.scenario == "disk-growth" and incomplete else
+                "CRITICAL" if report.scenario == "replication" and
                 any(f.severity.value == "CRITICAL" for f in findings) else
                 "HIGH" if report.scenario == "replication" and
                 any(f.severity.value == "HIGH" for f in findings) else
                 "CRITICAL" if any(f.title in {"IDLE_TRANSACTION_BLOCKER", "IDLE_TRANSACTION"}
                                   and f.severity.value == "CRITICAL" for f in findings) else
                 "HIGH" if primary == "BLOCKING" else
+                "INFO" if report.scenario == "disk-growth" else
                 "WARNING" if primary != "UNKNOWN" or incomplete or has_warning_finding else "INFO")
     status = ("UNKNOWN" if completeness == "INCOMPLETE" else
               "CRITICAL" if severity == "CRITICAL" else
               "DEGRADED" if active_now or has_warning_finding or severity in {"WARNING", "HIGH"}
-              or completeness == "PARTIAL" else "HEALTHY")
+              or report.scenario != "disk-growth" and completeness == "PARTIAL" else "HEALTHY")
 
     concurrency = details.get("concurrency", {})
     impact: dict[str, int] = {}
@@ -343,10 +357,20 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
     } for item in details.get("samples", []) if isinstance(item, dict))
     return IncidentSummary(
         snapshot_time=report.diagnosed_at.isoformat(), data_completeness=completeness,
-        missing_evidence=missing, status=status, severity=severity,
+        missing_evidence=missing,
+        required_evidence_status=("COMPLETE" if details.get("required_evidence_complete", not incomplete)
+                                  else "INCOMPLETE") if report.scenario == "disk-growth" else "NOT_APPLICABLE",
+        optional_evidence_status=(str(details.get("optional_evidence_status", "COMPLETE"))
+                                  if report.scenario == "disk-growth" else "NOT_APPLICABLE"),
+        unavailable_optional_evidence=tuple(str(item) for item in details.get("optional_unavailable", []))
+        if report.scenario == "disk-growth" else (),
+        status=status, severity=severity,
         primary_problem=primary,
         observed_now=("ACTIVE" if active_now else
-                      "UNKNOWN" if completeness != "COMPLETE" else "NOT_DETECTED"),
+                      "UNKNOWN" if completeness == "INCOMPLETE" else
+                      "No core storage risk observed in available required evidence."
+                      if report.scenario == "disk-growth" else
+                      "NOT_DETECTED" if completeness == "COMPLETE" else "UNKNOWN"),
         impact=impact, timing=timing, wait=wait, root_cause_candidate=root_candidate,
         source=source, immediate_action=immediate, recovery_actions=tuple(actions),
         termination_risk=risk, report_path=report_path, secondary_signals=secondary,

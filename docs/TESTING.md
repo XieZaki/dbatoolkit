@@ -92,11 +92,12 @@ MySQL 5.7 legacy lock views, normalized evidence aliases, required versus
 optional collector failures and fail-closed version gating. These tests use
 Fake Adapters and do not replace live E2E verification.
 
-The current Oracle 26ai local test account lacks four required disk-growth
-object grants; the system runner records only that exact `oraclefree` result as
-an expected permission blocker. It does not run disk-growth SQL or change the
-database. Use `dba permissions oraclefree --feature disk-growth` for the
-manual-only grant text.
+The initial Oracle 26ai system run recorded four missing required disk-growth
+object grants before those core grants were provided. That result is historical,
+not a statement of current readiness. Re-run `dba check oraclefree`,
+`dba diagnose oraclefree disk-growth`, and
+`dba permissions oraclefree --feature disk-growth` to assess current live
+permissions; the system runner never changes database permissions.
 
 V0.9.1 Phase D adds version-bound disk-growth SQL, permission and parser
 contracts for SQL Server 2008 R2–2022, MySQL 5.7/8.0/8.4, PostgreSQL 13–18,

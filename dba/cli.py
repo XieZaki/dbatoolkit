@@ -109,6 +109,17 @@ def _account_security(adapter: Any) -> dict[str, Any]:
     return {"classification": "NON_PRIVILEGED", "evidence_source": "monitor_preflight"}
 
 
+def _disk_growth_permission_impact(status: object) -> str:
+    value = getattr(status, "value", status)
+    if value == PermissionStatus.MISSING.value:
+        return "Required disk-growth permissions are missing; core storage evidence cannot be collected."
+    if value == PermissionStatus.PARTIAL.value:
+        return "Required disk-growth permissions are ready; optional FRA, archive, or redo context may be unavailable."
+    if value == PermissionStatus.READY.value:
+        return "Required and configured optional disk-growth permissions are available."
+    return "Disk-growth permission impact could not be determined from the current assessment."
+
+
 def _database_error_payload(error: object) -> dict[str, Any] | None:
     if isinstance(error, dict):
         return error
@@ -898,7 +909,9 @@ def main(
                             if (replication_assessment["status"] != PermissionStatus.READY
                                     and profile.version_status in {VersionStatus.VERIFIED,
                                                                    VersionStatus.UNVERIFIED}):
-                                row["impact"] = requirement.impact
+                                row["impact"] = (_disk_growth_permission_impact(
+                                    replication_assessment["status"]
+                                ) if feature == "disk-growth" else requirement.impact)
                                 row["reference_grant"] = render_profile_sql(
                                     profile.permission_profile_id, instance.db_type,
                                     _grant_account(instance, adapter, permission_credential),
@@ -917,7 +930,8 @@ def main(
                                      "missing_reasons": privilege_reasons(
                                          requirement, assessment["missing_required"]
                                      ),
-                                     **({"impact": definitions[feature].impact}
+                                     **({"impact": _disk_growth_permission_impact(assessment["status"])
+                                         if feature == "disk-growth" else definitions[feature].impact}
                                         if assessment["status"] != PermissionStatus.READY else {})})
                     generated: str | None = None
                     if args.generate_grant or args.generate_revoke:
@@ -1107,7 +1121,7 @@ def main(
                                                     "missing_reasons": privilege_reasons(
                                                         requirement, assessment["missing_required"]
                                                     ),
-                                                    **({"impact": requirement.impact}
+                                                    **({"impact": _disk_growth_permission_impact(assessment["status"])}
                                                        if assessment["status"] != PermissionStatus.READY else {})})
                             continue
                         requirement = requirements_for(
@@ -1275,7 +1289,7 @@ def main(
                                     "feature": "disk-growth", **assessment,
                                     "version_profile": asdict(profile),
                                     "missing_reasons": privilege_reasons(requirement, missing),
-                                    "impact": requirement.impact,
+                                    "impact": _disk_growth_permission_impact(assessment["status"]),
                                     "suggested_grant": grant,
                                     "toolkit_executed": False,
                                     "dba_approval_required": True,

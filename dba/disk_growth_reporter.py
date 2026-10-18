@@ -21,11 +21,16 @@ def sections(report: DiskGrowthReport) -> list[tuple[str, list[str]]]:
                      f"Database type: {report.instance.db_type.value}",
                      f"Version: {details['version']}", details["history_note"],
                      f"Dominant observed category: {details['dominant_space_category'] or 'unavailable'}",
-                     f"Incomplete: {details['incomplete']}"]),
+                     f"Required evidence: {'COMPLETE' if details.get('required_evidence_complete') else 'INCOMPLETE'}",
+                     f"Optional evidence: {details.get('optional_evidence_status', 'UNKNOWN')}",
+                     f"Data visibility: {details.get('data_visibility', 'UNKNOWN')}",
+                     f"Incomplete: {details['incomplete']}" ]),
         ("Current Space Usage", [_view(row) for row in details["space"]] or ["Unavailable."]),
         ("Log/WAL/Binlog/Archive", [_view(details["log"])]),
-        ("Transactions", [_view(row) for row in details["other"]["transactions"]]
-         or ["No active transaction observed or source unavailable."]),
+        ("Transactions", ([f"Active transaction count: {details['other']['active_transaction_count']}"]
+                           if details["other"].get("active_transaction_count") == 0 else []) +
+         [_view(row) for row in details["other"]["transactions"]]
+         or ["Transaction evidence unavailable."]),
         ("Replication/Archive Evidence", [_view(details["other"])]),
         ("Temp/Undo Evidence", [_view(row) for row in details["space"]
                                 if row["category"] in {"TEMP", "UNDO"}]

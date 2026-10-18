@@ -500,7 +500,7 @@ _DISK_GROWTH_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
         ("SELECT SYS.V_$RECOVERY_FILE_DEST", "SELECT SYS.V_$RECOVERY_AREA_USAGE",
          "SELECT SYS.V_$ARCHIVE_DEST_STATUS", "SELECT SYS.V_$ARCHIVED_LOG",
          "SELECT SYS.V_$LOG_HISTORY", "SELECT SYS.V_$DATABASE"),
-        "Missing required grants prevent core tablespace, datafile, and temp totals; FRA, archive, and redo-history evidence may also be unavailable or not configured.",
+        "Optional FRA, archive, and redo-history evidence may be unavailable.",
         REGISTRY[DatabaseType.ORACLE]["disk-growth"].objects,
         version_constraints=("Oracle 11gR2 minimum direct object grants",)),
     "oracle_disk_12c_121_permissions": FeaturePermissions(
@@ -509,7 +509,7 @@ _DISK_GROWTH_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
         ("SELECT SYS.V_$RECOVERY_FILE_DEST", "SELECT SYS.V_$RECOVERY_AREA_USAGE",
          "SELECT SYS.V_$ARCHIVE_DEST_STATUS", "SELECT SYS.V_$ARCHIVED_LOG",
          "SELECT SYS.V_$LOG_HISTORY", "SELECT SYS.V_$DATABASE"),
-        "Missing required grants prevent core tablespace, datafile, and temp totals; FRA, archive, and redo-history evidence may also be unavailable or not configured.",
+        "Optional FRA, archive, and redo-history evidence may be unavailable.",
         REGISTRY[DatabaseType.ORACLE]["disk-growth"].objects),
     "oracle_disk_12c_122_permissions": FeaturePermissions(
         (*ORACLE_COMMON_MONITOR_REQUIREMENTS, "SELECT SYS.DBA_TABLESPACE_USAGE_METRICS",
@@ -517,7 +517,7 @@ _DISK_GROWTH_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
         ("SELECT SYS.V_$RECOVERY_FILE_DEST", "SELECT SYS.V_$RECOVERY_AREA_USAGE",
          "SELECT SYS.V_$ARCHIVE_DEST_STATUS", "SELECT SYS.V_$ARCHIVED_LOG",
          "SELECT SYS.V_$LOG_HISTORY", "SELECT SYS.V_$DATABASE"),
-        "Missing required grants prevent core tablespace, datafile, and temp totals; FRA, archive, and redo-history evidence may also be unavailable or not configured.",
+        "Optional FRA, archive, and redo-history evidence may be unavailable.",
         REGISTRY[DatabaseType.ORACLE]["disk-growth"].objects),
     "oracle_disk_modern_permissions": FeaturePermissions(
         (*ORACLE_COMMON_MONITOR_REQUIREMENTS, "SELECT SYS.DBA_TABLESPACE_USAGE_METRICS",
@@ -525,7 +525,7 @@ _DISK_GROWTH_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
         ("SELECT SYS.V_$RECOVERY_FILE_DEST", "SELECT SYS.V_$RECOVERY_AREA_USAGE",
          "SELECT SYS.V_$ARCHIVE_DEST_STATUS", "SELECT SYS.V_$ARCHIVED_LOG",
          "SELECT SYS.V_$LOG_HISTORY", "SELECT SYS.V_$DATABASE"),
-        "Missing required grants prevent core tablespace, datafile, and temp totals; FRA, archive, and redo-history evidence may also be unavailable or not configured.",
+        "Optional FRA, archive, and redo-history evidence may be unavailable.",
         REGISTRY[DatabaseType.ORACLE]["disk-growth"].objects),
 }
 

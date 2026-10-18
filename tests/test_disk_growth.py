@@ -11,7 +11,7 @@ import yaml
 from test_oracle import ROOT
 from test_oracle import fixture as oracle_fixture
 
-from dba.cli import main
+from dba.cli import _disk_growth_permission_impact, main
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import Credential, CredentialProvider
@@ -23,7 +23,9 @@ from dba.disk_growth import (
 )
 from dba.disk_growth_profiles import sql_profile_for_disk, validate_disk_profiles
 from dba.disk_growth_reporter import render_console, render_markdown
+from dba.incident import build_incident_summary
 from dba.inventory import ValidationError
+from dba.presentation import render_human
 from dba.registry import SqlScriptRegistry
 from dba.security import check_sql
 from dba.versioning import PROFILE_BINDINGS, PROFILE_RESOLVER, DetectedDatabaseVersion
@@ -294,6 +296,163 @@ def test_postgresql_no_slots_and_archive_off_are_normal_states() -> None:
     assert report.details["other"]["slot_status"] == "NOT_CONFIGURED"
     assert report.details["other"]["archive_status"] == "NOT_CONFIGURED"
     assert not report.details["incomplete"]
+
+
+def _oracle_core_and_optional(*, optional_transactions: CollectorResult | None = None,
+                              high_usage: bool = False) -> tuple[CollectorResult, ...]:
+    contract = sql_profile_for_disk("oracle_disk_modern")
+    required: list[CollectorResult] = [
+        result("disk_tablespaces", {"tablespace_name": "APP", "contents": "PERMANENT",
+                                     "used_percent": 91 if high_usage else 50}),
+        result("disk_files", {"file_name": "app01.dbf", "size_bytes": 1000}),
+        result("disk_temp", {"tablespace_name": "TEMP", "size_bytes": 100, "free_bytes": 80}),
+    ]
+    optional = [result(name, success=False) for name in contract.optional]
+    if optional_transactions is not None:
+        optional = [item for item in optional if item.collector_name != "disk_transactions"]
+        optional.append(optional_transactions)
+    return tuple(required + optional)
+
+
+def test_oracle_optional_denials_preserve_healthy_core_health() -> None:
+    report = report_with_default_profile(DatabaseType.ORACLE,
+                                         _oracle_core_and_optional(), "23.26.3.0.0")
+    summary = build_incident_summary(report)
+    assert report.details["required_evidence_complete"] is True
+    assert report.details["optional_evidence_status"] == "PARTIAL"
+    assert report.details["data_visibility"] == "PARTIAL"
+    assert summary.data_completeness == "PARTIAL"
+    assert summary.required_evidence_status == "COMPLETE"
+    assert summary.optional_evidence_status == "PARTIAL"
+    assert summary.status == "HEALTHY"
+    assert summary.severity == "INFO"
+    assert summary.primary_problem == "NONE"
+    assert summary.observed_now.startswith("No core storage risk")
+    assert not summary.missing_evidence
+    assert "disk_fra" in summary.unavailable_optional_evidence
+    assert "No automatic or destructive remediation generated." in render_console_summary(summary)
+    assert "No session termination command generated." not in render_console_summary(summary)
+    assert report.details["other"]["active_transaction_count"] is None
+
+
+def render_console_summary(summary: Any) -> str:
+    from dba.presentation import render_incident_summary
+
+    return render_incident_summary(summary)
+
+
+def test_oracle_zero_transaction_rows_are_valid_evidence() -> None:
+    report = report_with_default_profile(DatabaseType.ORACLE,
+        _oracle_core_and_optional(optional_transactions=result("disk_transactions")), "23.26.3.0.0")
+    summary = build_incident_summary(report)
+    assert report.details["other"]["transactions"] == []
+    assert report.details["other"]["active_transaction_count"] == 0
+    assert "disk_transactions" not in report.details["optional_unavailable"]
+    assert "disk_transactions" not in summary.missing_evidence
+    assert "Active transaction count: 0" in render_console(report)
+    assert summary.status == "HEALTHY" and summary.data_completeness == "PARTIAL"
+
+
+def test_oracle_one_transaction_row_is_reported_as_available_evidence() -> None:
+    tx = result("disk_transactions", {"xid": "1.2.3", "transaction_age_seconds": 4000,
+                                       "used_ublk": 4, "used_urec": 2})
+    report = report_with_default_profile(DatabaseType.ORACLE,
+                                         _oracle_core_and_optional(optional_transactions=tx), "23.26.3.0.0")
+    assert report.details["other"]["active_transaction_count"] == 1
+    assert report.details["other"]["transactions"][0]["xid"] == "1.2.3"
+    assert "disk_transactions" not in report.details["optional_unavailable"]
+
+
+def test_oracle_transaction_query_failure_is_optional_unavailability() -> None:
+    tx = result("disk_transactions", success=False)
+    report = report_with_default_profile(DatabaseType.ORACLE,
+                                         _oracle_core_and_optional(optional_transactions=tx), "23.26.3.0.0")
+    assert report.details["other"]["active_transaction_count"] is None
+    assert "disk_transactions" in report.details["optional_unavailable"]
+    summary = build_incident_summary(report)
+    assert "disk_transactions" not in summary.missing_evidence
+    assert "disk_transactions" in summary.unavailable_optional_evidence
+
+
+def test_oracle_real_storage_risk_still_degrades_with_optional_evidence_missing() -> None:
+    report = report_with_default_profile(DatabaseType.ORACLE,
+                                         _oracle_core_and_optional(high_usage=True), "23.26.3.0.0")
+    summary = build_incident_summary(report)
+    assert summary.required_evidence_status == "COMPLETE"
+    assert summary.data_completeness == "PARTIAL"
+    assert summary.status == "DEGRADED"
+    assert summary.severity == "WARNING"
+    assert summary.primary_problem == "SPACE_PRESSURE"
+
+
+def test_oracle_required_failure_is_unknown_not_healthy() -> None:
+    report = report_with_default_profile(DatabaseType.ORACLE, (
+        result("disk_tablespaces", {"tablespace_name": "APP", "used_percent": 50}),
+        result("disk_files", success=True), result("disk_temp", success=False),
+    ), "23.26.3.0.0")
+    summary = build_incident_summary(report)
+    assert report.details["required_evidence_complete"] is False
+    assert summary.data_completeness == "INCOMPLETE"
+    assert summary.required_evidence_status == "INCOMPLETE"
+    assert summary.status == "UNKNOWN"
+    assert "disk_temp" in summary.missing_evidence
+
+
+def test_oracle_fra_empty_result_is_not_configured_not_missing() -> None:
+    rows = list(_oracle_core_and_optional())
+    rows = [item for item in rows if item.collector_name != "disk_fra"]
+    rows.append(result("disk_fra"))
+    report = report_with_default_profile(DatabaseType.ORACLE, tuple(rows), "23.26.3.0.0")
+    assert report.details["other"]["fra_status"] == "NOT_CONFIGURED"
+    assert "disk_fra" in report.details["not_applicable"]
+    assert "disk_fra" not in report.details["optional_unavailable"]
+
+
+def test_oracle_permission_cli_shows_current_optional_impact_and_required_contract(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    oracle_instance, _, _, driver = oracle_fixture()
+    driver.connection.data["preflight_object_grants"].extend(
+        {"owner": "SYS", "table_name": name, "privilege": "SELECT", "grantable": "NO"}
+        for name in ("DBA_TABLESPACE_USAGE_METRICS", "DBA_TABLESPACES",
+                     "DBA_DATA_FILES", "DBA_TEMP_FREE_SPACE")
+    )
+    inventory = tmp_path / "inventory.yaml"
+    inventory.write_text(yaml.safe_dump({"databases": [
+        {**vars(oracle_instance), "db_type": "oracle", "version_family": "19c"}]}),
+        encoding="utf-8")
+
+    class Provider(CredentialProvider):
+        def get_credential(self, alias: str) -> Credential:
+            return Credential("MONITOR", "TOPSECRET")
+
+    assert main(["--inventory", str(inventory), "--sql-root", str(ROOT / "sql"),
+                 "permissions", oracle_instance.id, "--feature", "disk-growth", "--json"],
+                provider=Provider(), driver=driver) == 0
+    payload = json.loads(capsys.readouterr().out)
+    row = next(item for item in payload["features"] if item["feature"] == "disk-growth")
+    assert row["status"] == "PARTIAL"
+    assert row["missing_required"] == []
+    assert row["missing_optional"]
+    assert "Required disk-growth permissions are ready" in row["impact"]
+    assert "Missing required grants prevent core" not in row["impact"]
+    assert row["required_privileges"]
+    assert row["reference_grant"]
+    assert "TO MONITOR" in row["reference_grant"]
+    assert "TO \"dba_monitor\"" not in row["reference_grant"]
+    human = render_human("permissions", payload)
+    assert "disk-growth required permissions" in human
+    assert "disk-growth reference grants" in human
+    assert "Toolkit did NOT execute this script." in human
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    ("MISSING", "Required disk-growth permissions are missing"),
+    ("PARTIAL", "Required disk-growth permissions are ready"),
+    ("READY", "Required and configured optional disk-growth permissions are available"),
+])
+def test_disk_growth_permission_impact_matches_readiness(status: str, expected: str) -> None:
+    assert _disk_growth_permission_impact(status).startswith(expected)
 
 
 def test_binary_log_allowlist_is_exact() -> None:

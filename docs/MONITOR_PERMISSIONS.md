@@ -101,3 +101,12 @@ tablespace, datafile and temporary-space objects. FRA, archive and redo grants
 remain optional. Oracle reference SQL uses the verified runtime principal and
 direct `SYS` object names. Toolkit never executes the generated statements.
 
+For disk-growth, permission readiness and diagnostic health are independent.
+`PARTIAL` means every required core permission is present but one or more
+optional permissions are absent; it lowers evidence visibility only. Required
+tablespace/datafile/temp failures make health `UNKNOWN`. With complete required
+evidence, storage findings determine whether health is `HEALTHY` or
+`DEGRADED`. The `permissions` output shows the complete required contract and,
+for a non-READY profile, its text-only reference grants. `--generate-grant`
+prints the reviewed required grant set and never executes it.
+

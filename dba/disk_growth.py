@@ -121,7 +121,7 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
         backups = _rows(results, "disk_log_backup")
         if backups:
             log["last_log_backup_time"] = backups[0].get("last_log_backup_time")
-        for row in _rows(results, "transactions"):
+        for row in (_rows(results, "disk_transactions") or _rows(results, "transactions")):
             age = _number(row.get("transaction_age_seconds"))
             if age is not None and age >= 3600:
                 add("SQLSERVER_OLD_ACTIVE_TRANSACTION", Severity.WARNING, "transactions",
@@ -138,8 +138,11 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
                                         "note": "Cumulative counters; no current temp footprint or rate."}
         other["largest_relations"] = _rows(results, "disk_relations")
         slots = _rows(results, "disk_slots")
+        slots_result = results.get("disk_slots")
         other["slots"] = slots
-        other["slot_status"] = "NOT_CONFIGURED" if not slots else "CONFIGURED"
+        other["slot_status"] = ("UNAVAILABLE" if slots_result is None or not slots_result.success
+                                 or slots_result.truncated else
+                                 "NOT_CONFIGURED" if not slots else "CONFIGURED")
         for row in slots:
             retained = _number(row.get("retained_wal_estimate_bytes"))
             if row.get("active") is False and retained is not None and retained > 0:
@@ -160,9 +163,11 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
                     {"last_failed_wal": log.get("last_failed_wal"),
                      "last_failed_time": failed, "failed_count": log.get("failed_count")},
                     "Review archiver destination and recent error evidence.")
+        elif results.get("disk_archiver") is None or not results["disk_archiver"].success:
+            other["archive_status"] = "UNAVAILABLE"
         other["replicas"] = _rows(results, "disk_replicas")
         other["wal_filesystem"] = WAL_NOTE
-        for row in _rows(results, "transactions"):
+        for row in (_rows(results, "disk_transactions") or _rows(results, "transactions")):
             age = _number(row.get("transaction_age_seconds"))
             if age is not None and age >= 3600:
                 add("PG_LONG_TRANSACTION", Severity.WARNING, "transactions",
@@ -175,10 +180,13 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
         config = (_rows(results, "disk_binlog_config")
                   or _rows(results, "disk_binlog_config_legacy"))
         log = {**config[0], "category": "BINLOG", "source": "disk_binlog_config"} if config else {}
+        config_result = results.get("disk_binlog_config") or results.get("disk_binlog_config_legacy")
         if config and not config[0].get("binary_log_enabled"):
             log["binlog_status"] = "Not configured"
         elif config:
             log["binlog_status"] = "CONFIGURED"
+        elif config_result is None or not config_result.success or config_result.truncated:
+            log["binlog_status"] = "UNAVAILABLE"
         other["largest_tables"] = _rows(results, "disk_tables")
         other["innodb_tablespaces"] = _rows(results, "disk_tablespaces")
         other["data_free_semantics"] = (
@@ -240,7 +248,10 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
                      "used_percent": round((size - free) / size * 100, 1)},
                     "Review temporary-space consumers and capacity manually.")
         fra = _rows(results, "disk_fra")
-        other["fra_status"] = "Configured" if fra else "Not configured"
+        fra_result = results.get("disk_fra")
+        other["fra_status"] = ("UNAVAILABLE" if fra_result is None or not fra_result.success
+                                or fra_result.truncated else
+                                "CONFIGURED" if fra else "NOT_CONFIGURED")
         if fra:
             log = {**fra[0], "category": "FRA", "source": "disk_fra"}
             limit, used = _number(log.get("space_limit")), _number(log.get("space_used"))
@@ -284,16 +295,33 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
     mysql_binlog_disabled = (instance.db_type == DatabaseType.MYSQL
                              and mysql_binlog_configuration
                              and not mysql_binlog_configuration[0].get("binary_log_enabled"))
-    not_applicable = ("disk_binlogs",) if mysql_binlog_disabled else ()
+    not_applicable = ["disk_binlogs"] if mysql_binlog_disabled else []
+    if instance.db_type == DatabaseType.ORACLE:
+        fra_result = results.get("disk_fra")
+        if fra_result and fra_result.success and not fra_result.truncated and not fra_result.rows:
+            not_applicable.extend(("disk_fra", "disk_fra_usage"))
+        redo_rows = _rows(results, "disk_redo")
+        if redo_rows and redo_rows[0].get("log_mode") == "NOARCHIVELOG":
+            not_applicable.extend(("disk_archive", "disk_archive_volume"))
+    if instance.db_type == DatabaseType.POSTGRESQL:
+        slots_result = results.get("disk_slots")
+        if slots_result and slots_result.success and not slots_result.truncated and not slots_result.rows:
+            not_applicable.append("disk_slots")
     missing_required = [name for name in required_collectors if name not in results]
     failed_required = [name for name in required_collectors if name in results
                        and (not results[name].success or results[name].truncated)]
     unavailable_optional = [name for name in optional_collectors if name not in results
                             and name not in not_applicable]
     failed_optional = [name for name in optional_collectors if name in results
-                       and (not results[name].success or results[name].truncated)]
+                       and (not results[name].success or results[name].truncated)
+                       and name not in not_applicable]
     incomplete = bool(missing_required or failed_required)
-    other["transactions"] = _rows(results, "transactions")
+    transaction_result = results.get("disk_transactions") or results.get("transactions")
+    transaction_rows = list(transaction_result.rows) if transaction_result and transaction_result.success else []
+    other["transactions"] = transaction_rows
+    other["active_transaction_count"] = (len(transaction_rows)
+                                          if transaction_result and transaction_result.success
+                                          and not transaction_result.truncated else None)
     samples = [{"source": result.collector_name, "row_count": result.row_count,
                 "success": result.success, "truncated": result.truncated,
                 "error_type": result.error_type} for result in collected]
@@ -308,13 +336,15 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
     optional_missing = list(dict.fromkeys(unavailable_optional + failed_optional))
     details = {"version": version, "version_profile": profile_id, "space": space, "log": log, "other": other,
                "samples": samples, "incomplete": incomplete,
+               "required_evidence_complete": not incomplete,
+               "optional_evidence_status": "PARTIAL" if optional_missing else "COMPLETE",
                "data_visibility": "PARTIAL" if optional_missing else "FULL",
                "dominant_space_category": dominant,
                "history_note": HISTORY_NOTE, "next_diagnostic_step": next_step,
                "required_unavailable": missing_required + failed_required,
                "optional_unavailable": optional_missing,
-               "not_applicable": list(not_applicable),
-               "unavailable": missing_required + failed_required + optional_missing}
+               "not_applicable": not_applicable,
+               "unavailable": missing_required + failed_required}
     return DiskGrowthReport(instance, datetime.now(timezone.utc), "disk-growth",
                             tuple(findings), redact(details))
 

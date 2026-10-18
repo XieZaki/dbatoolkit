@@ -431,7 +431,9 @@ def _transaction_section(details: dict[str, Any], database_type: str,
 def _recovery_section(incident: IncidentSummary, details: dict[str, Any], scenario: str) -> ReportSection:
     actions = incident.recovery_actions
     if not actions:
-        if incident.data_completeness != "COMPLETE":
+        if scenario == "disk-growth":
+            reason = "No automatic or destructive remediation is generated for disk-growth diagnosis."
+        elif incident.data_completeness != "COMPLETE":
             reason = "Evidence is incomplete; no safe termination action was generated."
         elif scenario != "slow":
             reason = "No session recovery action applies to this diagnostic scenario."
@@ -468,10 +470,25 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
         name = sample.get("collector", sample.get("source", "unknown"))
         success = bool(sample.get("success", True))
         truncated = bool(sample.get("truncated", False))
-        status = "FAILED" if not success else "TRUNCATED" if truncated else "COMPLETE"
+        collector = str(name)
+        optional = collector in details.get("optional_unavailable", [])
+        required = collector in details.get("required_unavailable", [])
+        status = ("MISSING_REQUIRED" if required else
+                  "OPTIONAL_UNAVAILABLE" if optional else
+                  "FAILED" if not success else "TRUNCATED" if truncated else "COMPLETE")
         impact = (sample.get("error_type") or sample.get("error_message") or
                   ("Collector row limit reached" if truncated else "—"))
         quality.append({"collector": name, "status": status, "impact": impact})
+    sampled = {str(item.get("collector", item.get("source", "unknown")))
+               for item in details.get("samples", []) if isinstance(item, dict)}
+    for name in details.get("required_unavailable", []):
+        if name not in sampled:
+            quality.append({"collector": name, "status": "MISSING_REQUIRED",
+                            "impact": "Required evidence was not collected."})
+    for name in details.get("optional_unavailable", []):
+        if name not in sampled:
+            quality.append({"collector": name, "status": "OPTIONAL_UNAVAILABLE",
+                            "impact": "Optional context was not collected."})
     for note in details.get("quality", []):
         if isinstance(note, str):
             quality.append({"collector": "Snapshot", "status": "NOTE", "impact": note})
@@ -481,6 +498,9 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
     table = _table(quality, (("Collector", ("collector",)), ("Status", ("status",)),
                              ("Impact", ("impact",))))
     summary = f"Data completeness: {incident.data_completeness}."
+    if report.scenario == "disk-growth":
+        summary += (f" Required evidence: {incident.required_evidence_status}."
+                    f" Optional evidence: {incident.optional_evidence_status}.")
     if details.get("incomplete"):
         summary += " Snapshot is incomplete; absence of a finding is not proof of absence."
     return ReportSection("collection-quality", "Collection Quality", summary=summary,
@@ -548,7 +568,9 @@ def _disk_growth_sections(details: dict[str, Any]) -> list[ReportSection]:
         if table:
             sections.append(ReportSection(key, title, tables=(table,)))
     context_keys = ("dominant_space_category", "history_note", "next_diagnostic_step",
-                    "unavailable", "note", "compatibility")
+                    "required_evidence_complete", "optional_evidence_status", "data_visibility",
+                    "required_unavailable", "optional_unavailable", "not_applicable",
+                    "note", "compatibility")
     context_rows = [{"item": _label(key), "value": _human(details[key])}
                     for key in context_keys if key in details]
     context_table = _table(context_rows, (("Item", ("item",)), ("Value", ("value",))))
