@@ -357,3 +357,16 @@ This section supplements the original audit decision; it does not revise the aud
 - Plan Registry SQL is marked read-only/reviewed and explicitly applicable to the supported families. Active and cached samples include SQL/plan handles, statement offsets, and query hashes. Multiple/truncated row results are ambiguous; a missing cached plan remains unavailable. The Toolkit does not submit or re-execute captured application SQL.
 - Local verification: targeted Plan/version/permission tests passed (111 tests); Ruff, strict mypy, and `dba validate` passed. Full-suite and tracked-file secret-scan results are recorded in the V0.9.1 delivery report.
 - Live SQL Server 2022 checks were attempted but did not reach the database: the encrypted Credential Store session was locked and the noninteractive process reported that an interactive terminal is required to unlock it. No Plan query or database mutation was executed during this attempt. SQL Server 2022 real E2E remains pending a locally unlocked credential session.
+
+## 24. Post-commit SQL Server 2022 system verification
+
+After the original migration commit was pushed, the user unlocked the local credential session. The sandboxed process could not access the current-user named pipe, so the authorized read-only checks were rerun under the same Windows user context outside the sandbox; current-user pipe ACL and peer verification were not changed.
+
+- Target: Inventory asset `sqlserver2022`, `127.0.0.1:1433/master`; detected SQL Server `16.0.4305.5`; Python 3.12.14, pyodbc 5.3.0, ODBC Driver 17 fallback.
+- `dba check sqlserver2022`: connection and version verification succeeded; SQL Server Plan resolved to `SUPPORTED` / `VERIFIED`; Plan permission readiness was `READY` with `VIEW SERVER PERFORMANCE STATE`.
+- `dba permissions sqlserver2022 --feature plan`: `READY`; required permission was satisfied; no grant was generated or executed.
+- `dba collect sqlserver2022 active-sessions`: succeeded and returned one visible session, SQLServerCEIP session 53. No application test session was present.
+- `dba diagnose sqlserver2022 plan --session 53`: executed through the versioned Plan path and returned `PLAN_NOT_AVAILABLE` with `UNKNOWN` confidence because no existing plan evidence was available for that service session. No report or plan artifact was saved, and no application SQL was submitted.
+- All database calls in this verification were read-only. The prior full unit suite and static gates remain the recorded results; this documentation-only follow-up does not change code.
+
+This is a successful SQL Server 2022 connection/profile/permission/CLI system check, but it does not establish that a representative application query plan was available. Old SQL Server families remain unverified on live instances.
