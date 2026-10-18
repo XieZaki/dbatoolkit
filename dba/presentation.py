@@ -557,7 +557,16 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                     duration = wait.get("duration_ms")
                     duration_text = f"{float(duration) / 1000:g}" \
                         if isinstance(duration, (int, float)) and not isinstance(duration, bool) else "未知"
-                    lines.append(f"会话{wait.get('processlist_id')}；状态：{wait.get('state_name') or '未知'}；当前运行：{duration_text} 秒；未观察到锁阻塞。")
+                    pid = _first(wait, "pid", "processlist_id")
+                    state = _first(wait, "state", "state_name") or "未知"
+                    event = _first(wait, "wait_event", "wait_event_type")
+                    lines.append(f"PID {pid}；状态：{state}；运行时间：{duration_text} 秒；等待事件：{event or '未知'}；未观察到锁阻塞。")
+                    if report.instance.db_type.value == "postgresql" and isinstance(wait.get("sql"), str):
+                        safe_sql = " ".join(wait["sql"].split())
+                        lines.append(f"   SQL：{safe_sql[:200]}{'…（已截断）' if len(safe_sql) > 200 else ''}")
+                        lines.append("   说明：明确的主动等待，不代表数据库资源瓶颈。")
+                    elif wait.get("request_interpretation"):
+                        lines.append(f"   说明：{wait['request_interpretation']}")
         lines.extend(("", "【处置提示】",
                       "人工操作前重新核对会话 ID、登录时间、用户、主机、应用及事务身份。",
                       "终止可能触发回滚、额外 I/O、日志/Undo 压力和应用错误；终止不保证立即恢复。Toolkit 未执行任何处置命令。"))
@@ -580,14 +589,20 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                 if root.get("direct_blocked_count") is not None:
                     lines.append(f"直接影响：{root['direct_blocked_count']}；间接影响：{root.get('indirect_blocked_count', 0)}；总影响：{blocked or 0}")
                 lines.append(f"状态：{status or 'UNKNOWN'}")
-                lines.append(f"未结束事务：{'是' if transaction else '未确认'}")
+                transaction_text = ("是" if transaction else
+                                    "否" if root.get("unfinished_transaction_confirmed") is False else
+                                    "未确认")
+                transaction_prefix = "采样时未结束事务" if report.instance.db_type.value == "postgresql" else "未结束事务"
+                lines.append(f"{transaction_prefix}：{transaction_text}")
+                if report.instance.db_type.value == "postgresql":
+                    lines.append(f"backend_start：{root.get('backend_start') or '未采集'}；xact_start：{root.get('xact_start') or '未采集'}")
                 if _first(root, "transaction_id", "trx_id") is not None:
                     if report.instance.db_type.value == "mysql":
                         lines.append(f"InnoDB 事务 ID：{_first(root, 'transaction_id', 'trx_id')}")
                         lines.append(f"MySQL 连接 ID：{root.get('processlist_id', target)}；Performance Schema THREAD_ID：{root.get('thread_id') or 'N/A'}")
                     else:
                         lines.append(f"事务标识：{_first(root, 'transaction_id', 'trx_id')}")
-                identity_quality = _first(root, "transaction_identity_quality") or "需要人工重新核对"
+                identity_quality = _first(root, "identity_quality", "transaction_identity_quality") or "需要人工重新核对"
                 lines.append(f"身份状态：{identity_quality}")
                 if decision.get("status") == "AVAILABLE":
                     lines.extend(("建议：", "1. 重新核对当前会话身份及未结束事务。",
@@ -599,10 +614,13 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                 else:
                     lines.extend(("具体命令：暂不生成",
                                   f"原因：{decision.get('reason') or '关键身份字段不足'}",
-                                  "需要核查：当前会话 ID、登录身份及事务归属。",
-                                  "参考模板：KILL <经实时复核的会话ID>"))
-                lines.extend(("命令基于历史采样；Toolkit 未实时锁定会话身份。",
-                              "session_id 可能复用；执行可能触发回滚且不保证立即结束。"))
+                                  "需要核查：当前会话 ID、登录身份及事务归属。"))
+                    if report.instance.db_type.value == "postgresql":
+                        lines.append("PostgreSQL 复核：查询 pg_stat_activity，核对 PID、backend_start、xact_start、用户和客户端来源。")
+                    else:
+                        lines.append("参考模板：KILL <经实时复核的会话ID>")
+                lines.extend(("命令基于历史采样；Toolkit 未实时锁定会话身份；会话标识可能复用。",
+                              "执行可能触发回滚且不保证立即结束。"))
     else:
         findings = [finding_labels.get(finding.title, "未分类空间或日志线索")
                     for finding in report.findings[:5]]

@@ -207,6 +207,10 @@ def test_database_specific_reference_commands_flow_through_shared_domain(
                 "roots": [root], "top_queries": [], "long_running": [],
                 "samples": [{"collector": name, "success": True, "truncated": False}
                             for name in ("active_sessions", "active_requests", "transactions", "blocking")]}
+    if db_type == DatabaseType.POSTGRESQL:
+        root["manual_action"] = {"status": "AVAILABLE", "target_type": "POSTGRESQL_PID",
+                                  "action_type": "CANCEL_QUERY", "commands": (command,),
+                                  "transaction_confirmed": True}
     finding = Finding("ROOT_BLOCKER", Severity.WARNING, root, "review",
                       (ReferenceCommand(command, "manual only"),), session=finding_session)
     value = SlowReport(instance, NOW, "slow", (finding,), evidence)

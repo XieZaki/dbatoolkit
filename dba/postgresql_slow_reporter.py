@@ -42,11 +42,18 @@ def sections(report: PostgreSQLSlowReport) -> list[tuple[str, list[str]]]:
                 for item in report.findings]
     commands = [f"{cmd.text}  {cmd.description}"
                 for item in report.findings for cmd in item.reference_commands]
+    active_waits = [
+        f"PID {row.get('pid')} | {row.get('wait_event_type')}/{row.get('wait_event')} | "
+        f"{row.get('duration_ms')} ms | {row.get('sql')}"
+        for row in data.get("active_waits", [])
+    ]
     return [
         ("Summary", ["PostgreSQL Slow Diagnose", f"Instance: {report.instance.id}",
                      f"Version: {data['version']}", f"Time: {report.diagnosed_at.isoformat()}",
                      *data["quality"]]),
         ("Concurrency", [f"{key}: {value}" for key, value in data["concurrency"].items()]),
+        ("Active Wait Statements", active_waits or
+         ["No independently recognized pg_sleep wait in the available sample."]),
         ("Long Running Queries", ["Active SQL ranked by server-side duration (Top N):",
                                   *(top or ["No active query in available sample."]),
                                   "Threshold matches: " + _view(data["long_running"])]),

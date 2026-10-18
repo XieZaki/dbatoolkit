@@ -11,11 +11,14 @@ from dba.cli import main
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.errors import ToolkitError
+from dba.incident import build_incident_summary, build_priority_candidates, manual_action_decisions
 from dba.postgresql import PostgreSQLAdapter
 from dba.postgresql_collectors import ActiveSessionsCollector, LongRunningCollector
 from dba.postgresql_slow import blocking_graph, build_slow_report, collect_slow_phase, diagnose_slow
 from dba.postgresql_slow_reporter import render_console, render_markdown
+from dba.presentation import render_emergency_triage, render_json
 from dba.registry import SqlScriptRegistry
+from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.settings import PostgreSQLSettings
 
 INSTANCE = DatabaseInstance("pg", "PG", DatabaseType.POSTGRESQL, "test.invalid", 5432, "monitor",
@@ -222,8 +225,9 @@ def test_idle_transaction_root_source_reference_and_report() -> None:
     assert blocked_query["blocking_pids"] == [1]
     assert blocked_query["query_summary"] == "SELECT 1"
     refs = next(item.reference_commands for item in report.findings if item.title == "ROOT_BLOCKER")
-    assert [cmd.text for cmd in refs] == [
-        "SELECT pg_cancel_backend(1);", "SELECT pg_terminate_backend(1);"]
+    assert [cmd.text for cmd in refs] == ["SELECT pg_terminate_backend(1);"]
+    assert root["unfinished_transaction_confirmed"] is True
+    assert root["manual_action"]["status"] == "AVAILABLE"
     assert all(not hasattr(cmd, "execute") for cmd in refs)
     markdown = render_markdown(report)
     for heading in ("Summary", "Concurrency", "Long Running Queries", "Blocking Tree",
@@ -231,6 +235,176 @@ def test_idle_transaction_root_source_reference_and_report() -> None:
                     "Recommendations", "Reference Commands"):
         assert f"## {heading}" in markdown
     assert "Toolkit did not execute" in markdown and "Toolkit did not execute" in render_console(report)
+
+
+def test_postgres_manual_action_is_shared_and_profile_partial_does_not_suppress() -> None:
+    rows = (result("active_sessions", [
+        session(2977, "idle in transaction", query="UPDATE fixture SET x=1"),
+        session(2978, wait_event_type="Lock", wait_event="transactionid"),
+        session(2979, wait_event_type="Lock", wait_event="transactionid")]),
+        CollectorResult("pg", "long_running", datetime.now(timezone.utc),
+                        datetime.now(timezone.utc), 1.0, (), 0, False, False,
+                        "QueryTimeout", "optional profile query timed out"),
+        result("transactions", [session(2977, "idle in transaction")]),
+        result("blocking", [{"blocked_pid": 2978, "blocker_pid": 2977},
+                             {"blocked_pid": 2979, "blocker_pid": 2978}]))
+    report = build_slow_report(INSTANCE, rows, PostgreSQLSettings(), "160015",
+                               required_collectors=("active_sessions", "transactions", "blocking"))
+    report.details.update({"emergency_evidence_complete": True,
+                           "full_profile_evidence_status": "PARTIAL",
+                           "incomplete": True})
+    decisions = manual_action_decisions(report)
+    summary = build_incident_summary(report)
+    report.details["manual_action_decisions"] = decisions
+    cli = render_emergency_triage(report, capture_started_at="captured")
+    html = HtmlReportRenderer().render(build_report_model(report, summary))
+    payload = render_json({"report": report, "incident_summary": summary,
+                           "manual_action_decisions": decisions})
+    expected = "SELECT pg_terminate_backend(2977);"
+    assert report.details["blocking_graph"]["children"] == {"2977": [2978], "2978": [2979]}
+    root = report.details["roots"][0]
+    assert (root["pid"], root["direct_blocked_count"], root["indirect_blocked_count"],
+            root["blocked_count"]) == (2977, 1, 1, 2)
+    assert root["unfinished_transaction_confirmed"] is True
+    assert root["identity_quality"] == "SAMPLED_IDENTITY_VERIFIED_RECHECK_REQUIRED"
+    assert decisions[0]["commands"] == (expected,)
+    assert [item.reference_command for item in summary.recovery_actions] == [expected]
+    assert expected in cli and expected in html and expected in payload
+    assert "pg_cancel_backend(2977)" not in cli + html + payload
+    assert "Toolkit 未执行" in cli
+    assert "2026-01-01" in html and "pg_stat_activity" in html
+    assert "DMV" not in html and "open_transaction_count" not in html
+
+
+@pytest.mark.parametrize(("state", "session_updates", "transaction_updates", "blocking_rows", "reason"), [
+    ("idle in transaction", {"backend_start": None}, {}, None, "backend_start"),
+    ("idle in transaction", {}, {"xact_start": "different"}, None, "xact_start do not match"),
+    ("idle in transaction", {"xact_start": None}, {}, None, "session xact_start is unavailable"),
+    ("idle in transaction", {}, None, None, "transaction evidence is missing or ambiguous"),
+    ("active", {"query_start": None}, {}, None, "query_start"),
+    ("active", {"query_truncated": True}, {}, None, "truncated"),
+])
+def test_postgres_action_suppresses_ambiguous_or_incomplete_identity(
+    state: str, session_updates: dict[str, Any], transaction_updates: dict[str, Any] | None,
+    blocking_rows: list[dict[str, Any]] | None, reason: str,
+) -> None:
+    sampled = session(50, state, **session_updates)
+    tx_rows = [session(50, state, **(transaction_updates or {}))] if transaction_updates is not None else []
+    results = (result("active_sessions", [sampled, session(51)]), result("long_running", []),
+               result("transactions", tx_rows),
+               result("blocking", blocking_rows or [{"blocked_pid": 51, "blocker_pid": 50}]))
+    report = build_slow_report(INSTANCE, results, PostgreSQLSettings(), "160015",
+                               required_collectors=("active_sessions", "transactions", "blocking"))
+    finding = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert finding.reference_commands == ()
+    assert reason in finding.evidence["manual_action"]["reason"]
+
+
+@pytest.mark.parametrize("results", [
+    "duplicate_session", "unknown_root_state", "truncated_blocking", "failed_transactions",
+    "missing_root_session", "graph_anomaly",
+])
+def test_postgres_action_suppressed_for_duplicate_or_incomplete_graph_evidence(results: str) -> None:
+    sessions = [session(70, "idle in transaction"), session(71)]
+    transactions = [session(70, "idle in transaction")]
+    blocking = [{"blocked_pid": 71, "blocker_pid": 70}]
+    samples = [result("active_sessions", sessions), result("long_running", []),
+               result("transactions", transactions), result("blocking", blocking)]
+    if results == "duplicate_session":
+        sessions.append(session(70, "idle in transaction", usename="different"))
+        samples[0] = result("active_sessions", sessions)
+    elif results == "unknown_root_state":
+        sessions[0] = session(70, "unknown")
+        samples[0] = result("active_sessions", sessions)
+    elif results == "truncated_blocking":
+        samples[3] = result("blocking", blocking, truncated=True)
+    elif results == "failed_transactions":
+        now = datetime.now(timezone.utc)
+        samples[2] = CollectorResult("pg", "transactions", now, now, 1.0, (), 0,
+                                     False, False, "PermissionDenied", "unavailable")
+    elif results == "missing_root_session":
+        samples[0] = result("active_sessions", [session(71)])
+    elif results == "graph_anomaly":
+        samples[3] = result("blocking", [*blocking,
+                                          {"blocked_pid": 72, "blocker_pid": 73},
+                                          {"blocked_pid": 73, "blocker_pid": 72}])
+    report = build_slow_report(INSTANCE, tuple(samples), PostgreSQLSettings(), "160015",
+                               required_collectors=("active_sessions", "transactions", "blocking"))
+    finding = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert not finding.reference_commands
+
+
+def test_active_postgres_root_uses_cancel_only() -> None:
+    rows = (result("active_sessions", [session(90, "active", query="UPDATE fixture SET x=1"),
+                                        session(91)]), result("long_running", []),
+            result("transactions", [session(90, "active")]),
+            result("blocking", [{"blocked_pid": 91, "blocker_pid": 90}]))
+    report = build_slow_report(INSTANCE, rows, PostgreSQLSettings(), "160015",
+                               required_collectors=("active_sessions", "transactions", "blocking"))
+    finding = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert [item.text for item in finding.reference_commands] == ["SELECT pg_cancel_backend(90);"]
+    assert "pg_terminate_backend" not in str(finding.reference_commands)
+
+
+def test_suppressed_postgres_decision_is_identical_across_cli_html_and_json() -> None:
+    rows = (result("active_sessions", [session(80, "idle in transaction", xact_start=None),
+                                        session(81)]), result("long_running", []),
+            result("transactions", [session(80, "idle in transaction")]),
+            result("blocking", [{"blocked_pid": 81, "blocker_pid": 80}]))
+    report = build_slow_report(INSTANCE, rows, PostgreSQLSettings(), "160015",
+                               required_collectors=("active_sessions", "transactions", "blocking"))
+    report.details["emergency_evidence_complete"] = True
+    report.details["incomplete"] = False
+    decisions = manual_action_decisions(report)
+    report.details["manual_action_decisions"] = decisions
+    summary = build_incident_summary(report)
+    cli = render_emergency_triage(report, capture_started_at="captured")
+    html = HtmlReportRenderer().render(build_report_model(report, summary))
+    payload = render_json({"report": report, "incident_summary": summary,
+                           "manual_action_decisions": decisions})
+    reason = "session xact_start is unavailable"
+    assert decisions[0]["status"] == "SUPPRESSED"
+    assert reason in cli and reason in html and reason in payload
+    assert "pg_terminate_backend(80)" not in cli + html + payload
+    assert "KILL <" not in cli + html + payload
+
+
+@pytest.mark.parametrize("query", ["SELECT pg_sleep(120);", "SELECT pg_sleep($1)",
+                                    "select pg_catalog.pg_sleep(1.5);"])
+def test_pg_sleep_wait_is_separated_from_long_sql(query: str) -> None:
+    rows = (result("active_sessions", [session(65, query=query, wait_event_type="Timeout",
+                                                  wait_event="PgSleep", duration_ms=65000)]),
+            result("long_running", [session(65, query=query, duration_ms=65000)]),
+            result("transactions", []), result("blocking", []))
+    report = build_slow_report(INSTANCE, rows, PostgreSQLSettings(long_running_seconds=60), "160015")
+    assert report.details["active_waits"][0]["pid"] == 65
+    assert report.details["active_waits"][0]["request_kind"] == "ACTIVE_WAIT"
+    assert report.details["long_running"] == []
+    assert report.details["active_requests"] == []
+    assert not any(item.title == "LONG_RUNNING_SQL" for item in report.findings)
+    assert not any(item["session_id"] == 65 for item in build_priority_candidates(report))
+    cli = render_emergency_triage(report, capture_started_at="captured")
+    html = HtmlReportRenderer().render(build_report_model(report, build_incident_summary(report)))
+    assert "PID 65" in cli and query in cli and "不代表数据库资源瓶颈" in cli
+    assert "65" in html and query in html and "pg_sleep" in html
+
+
+def test_pg_sleep_recognition_requires_timeout_event_simple_sql_and_no_blocker() -> None:
+    for query, wait_type, wait_event, truncated, blocked in (
+        ("SELECT 'pg_sleep(120)'", "Timeout", "PgSleep", False, False),
+        ("SELECT pg_sleep(120); -- comment", "Timeout", "PgSleep", False, False),
+        ("SELECT pg_sleep(120), 1", "Timeout", "PgSleep", False, False),
+        ("SELECT pg_sleep(120)", "IO", "PgSleep", False, False),
+        ("SELECT pg_sleep(120)", "Timeout", "PgSleep", True, False),
+        ("SELECT pg_sleep(120)", "Timeout", "PgSleep", False, True),
+    ):
+        results = (result("active_sessions", [session(65, query=query, wait_event_type=wait_type,
+                                                        wait_event=wait_event,
+                                                        query_truncated=truncated)]),
+                   result("long_running", []), result("transactions", []),
+                   result("blocking", [{"blocked_pid": 65, "blocker_pid": 66}] if blocked else []))
+        report = build_slow_report(INSTANCE, results, PostgreSQLSettings(), "160015")
+        assert report.details["active_waits"] == []
 
 
 def test_incomplete_snapshot_suppresses_reference() -> None:

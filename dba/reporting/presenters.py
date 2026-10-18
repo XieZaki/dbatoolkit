@@ -324,15 +324,19 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                              "open_txn": _first(session, "open_transaction_count", "open_tran")})
     related_total = len(related_rows)
     related_rows = related_rows[:policy.max_related_sessions]
-    identity_columns = (("Session", ("session",)), ("Role", ("role",)),
+    identity_columns: tuple[tuple[str, tuple[str, ...]], ...] = (("Session", ("session",)), ("Role", ("role",)),
                         ("Database", ("database",)), ("Status", ("status",)),
                         ("Login", ("login",)), ("Host", ("host",)),
-                        ("Program", ("program",)), ("Client IP", ("client_ip",)),
-                        ("Session Open Transaction Count", ("open_txn",)))
+                        ("Program", ("program",)), ("Client IP", ("client_ip",)))
+    if report.instance.db_type.value != "postgresql":
+        identity_columns += (("Session Open Transaction Count", ("open_txn",)),)
     identity_table = _table(related_rows, identity_columns)
+    identity_summary = ("PostgreSQL 会话身份来自 pg_stat_activity 采样；backend_start 和 xact_start 用于人工复核。"
+                        if report.instance.db_type.value == "postgresql" else
+                        "会话级 open_transaction_count 与事务 DMV 返回的事务行数语义不同。")
     sections.append(ReportSection(
         "session-sources", "Session Identity",
-        summary="会话级 open_transaction_count 与事务 DMV 返回的事务行数语义不同。 " +
+        summary=identity_summary + " " +
                 _omitted(related_total, len(related_rows), "incident-related sessions"),
         tables=(identity_table,) if identity_table else ()))
 
@@ -364,6 +368,8 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
     if runtime_table:
         runtime_summary = ("MySQL Performance Schema 提供当前语句耗时和可见等待事件；等待 consumer 未启用时等待详情不可用。"
                            if report.instance.db_type.value == "mysql" else
+                           "PostgreSQL pg_stat_activity 提供当前 backend 的语句耗时与 wait event；不表示累计 CPU 或 I/O 计数。"
+                           if report.instance.db_type.value == "postgresql" else
                            "CPU、logical reads、reads、writes 为 DMV 当前累计值；单次采样为零不代表历史没有资源消耗。")
         sections.append(ReportSection(
             "request-runtime", "Request Runtime",
@@ -506,9 +512,9 @@ def _transaction_section(details: dict[str, Any], database_type: str,
         output.append({"session": session,
                        "transaction_id": _first(row, "transaction_id", "trx_id", "xid"),
                        "begin": _local_time(_first(row, "transaction_begin_time", "begin_time",
-                                                     "trx_started"))
+                                                     "trx_started", "xact_start"))
                                 if _first(row, "transaction_begin_time", "begin_time",
-                                          "trx_started") is not None else "—",
+                                          "trx_started", "xact_start") is not None else "—",
                        "age": _duration_seconds(age), "type": kind,
                        "state": _human(_first(row, "trx_state")) if database_type == "mysql"
                        else state})
@@ -715,15 +721,23 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
         sections.append(recent_section)
     active_waits = _dict_rows(details.get("active_waits"))
     if active_waits:
-        wait_rows = [{"session": row.get("processlist_id"), "state": row.get("state_name"),
+        is_postgresql = report.instance.db_type.value == "postgresql"
+        wait_rows = [{"session": _first(row, "pid", "processlist_id"),
+                      "state": _first(row, "state", "state_name"),
                       "runtime": _duration_ms(row.get("duration_ms")),
+                      "wait": _first(row, "wait_event", "wait_event_type"),
+                      "sql": row.get("sql"),
                       "interpretation": row.get("request_interpretation")}
                      for row in active_waits]
         table = _table(wait_rows, (("Session", ("session",)), ("Status", ("state",)),
                                    ("Request Runtime", ("runtime",)),
+                                   *(((("Wait Event", ("wait",)), ("SQL", ("sql",)))
+                                      if is_postgresql else ())),
                                    ("Interpretation", ("interpretation",))))
         sections.append(ReportSection("active-waits", "Active Wait Statements",
-                                      summary="仅对明确独立 SELECT SLEEP(...) 且状态为 User sleep 的语句分类。",
+                                      summary=("仅对无锁阻塞且精确匹配 pg_sleep(...) 的 PostgreSQL 查询分类；SQL 来自已脱敏采样。"
+                                               if is_postgresql else
+                                               "仅对明确独立 SELECT SLEEP(...) 且状态为 User sleep 的语句分类。"),
                                       tables=(table,) if table else ()))
     if incident.root_cause_candidate:
         fields = tuple((_label(str(key)), _human(value))

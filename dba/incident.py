@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from dba.core import DiagnosticReport, ReferenceCommand
+from dba.core import DiagnosticReport
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ def _is_open_transaction(root: dict[str, Any]) -> bool | None:
     if root.get("unfinished_transaction_confirmed") is True:
         return True
     if root.get("unfinished_transaction_confirmed") is False:
-        return False if root.get("open_transaction_count") == 0 else None
+        return False
     if root.get("transaction_age_seconds") is not None:
         return True
     if any(root.get(key) not in (None, 0, "") for key in ("trx_id", "used_ublk", "transaction_id")):
@@ -296,43 +296,35 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
     wait = _wait_summary(details)
 
     actions: list[RecoveryAction] = []
-    graph = details.get("blocking_graph", {})
-    graph_reliable = not isinstance(graph, dict) or not graph.get("anomalies")
-    emergency_complete = details.get(
-        "emergency_evidence_complete", not details.get("incomplete", False))
-    if graph_reliable:
-        for root_finding in (finding for finding in findings if finding.title == "ROOT_BLOCKER"):
-            finding_root = root_finding.evidence
-            finding_session = root_finding.session or _first(
-                finding_root, "session_id", "pid", "processlist_id", "sid")
-            finding_impact = _int(_first(finding_root, "blocked_count", "blocked_session_count")) or 0
-            if not finding_impact or finding_session in (None, ""):
+    for decision in manual_action_decisions(report):
+        if decision.get("status") != "AVAILABLE":
+            continue
+        finding_session = decision.get("target_session")
+        root_finding = next((item for item in findings if item.title == "ROOT_BLOCKER"
+                             and str(item.session or _first(item.evidence, "session_id", "pid",
+                                                             "processlist_id", "sid")) ==
+                             str(finding_session)), None)
+        if root_finding is None:
+            continue
+        finding_root = root_finding.evidence
+        finding_impact = _int(_first(finding_root, "blocked_count", "blocked_session_count")) or 0
+        if not finding_impact or finding_session in (None, ""):
+            continue
+        allowed_commands = set(decision.get("commands", ()))
+        open_transaction = _is_open_transaction(finding_root)
+        for command in root_finding.reference_commands:
+            if command.text not in allowed_commands:
                 continue
-            commands: tuple[ReferenceCommand, ...] = root_finding.reference_commands
-            root_manual_action = finding_root.get("manual_action", {})
-            producer_approved = (isinstance(root_manual_action, dict)
-                                 and root_manual_action.get("status") == "AVAILABLE")
-            if commands and (producer_approved or emergency_complete):
-                # Transaction existence alone does not measure rollback work.
-                rollback = "UNKNOWN"
-                open_transaction = _is_open_transaction(finding_root)
-                for command in commands:
-                    command_upper = command.text.upper()
-                    action_type = ("CANCEL_QUERY" if "PG_CANCEL_BACKEND" in command_upper
-                                   or "KILL QUERY" in command_upper else "TERMINATE_SESSION")
-                    actions.append(RecoveryAction(
-                        action_type=action_type,
-                        target_session=str(finding_session),
-                        reason=f"Root blocker affecting {finding_impact} sessions",
-                        reference_command=command.text,
-                        open_transaction="YES" if open_transaction else
-                        "NO" if open_transaction is False else "UNKNOWN",
-                        rollback_risk=rollback,
-                        # The command's producer applies database-specific identity
-                        # gates. Optional profile completeness must not erase a
-                        # separately validated emergency root-blocker reference.
-                        evidence_complete=True,
-                    ))
+            command_upper = command.text.upper()
+            action_type = ("CANCEL_QUERY" if "PG_CANCEL_BACKEND" in command_upper
+                           or "KILL QUERY" in command_upper else "TERMINATE_SESSION")
+            actions.append(RecoveryAction(
+                action_type=action_type, target_session=str(finding_session),
+                reason=f"Root blocker affecting {finding_impact} sessions",
+                reference_command=command.text,
+                open_transaction="YES" if open_transaction else
+                "NO" if open_transaction is False else "UNKNOWN",
+                rollback_risk="UNKNOWN", evidence_complete=True))
 
     immediate = None
     if active_now:
@@ -408,16 +400,26 @@ def manual_action_decisions(report: DiagnosticReport) -> tuple[dict[str, Any], .
         report_details = getattr(report, "details", {})
         emergency_complete = report_details.get(
             "emergency_evidence_complete", not report_details.get("incomplete", False))
-        available = bool(commands) and (producer_approved or emergency_complete)
+        is_postgresql = report.instance.db_type.value == "postgresql"
+        graph = report_details.get("blocking_graph", {})
+        graph_reliable = not isinstance(graph, dict) or not graph.get("anomalies")
+        # PostgreSQL's producer decision has stronger PID/session/transaction
+        # correlation rules and must never be overridden by phase completeness.
+        available = (bool(commands) and producer_approved and graph_reliable if is_postgresql else
+                     bool(commands) and (producer_approved or emergency_complete) and graph_reliable)
+        unavailable_reason = ("blocking graph contains invalid or cyclic edges" if not graph_reliable else
+                              detail.get("reason",
+                                         "Emergency root-blocker evidence is incomplete or identity evidence is insufficient."))
         decisions.append({
-            "status": "AVAILABLE" if available else str(detail.get("status", "SUPPRESSED")),
+            "status": "AVAILABLE" if available else "SUPPRESSED",
             "target_session": finding.session or _first(
                 evidence, "session_id", "pid", "processlist_id", "sid"),
             "target_type": detail.get("target_type", "SESSION_ID"),
             "commands": commands if available else (),
-            "reason": None if available else detail.get(
-                "reason", "Emergency root-blocker evidence is incomplete or identity evidence is insufficient."),
+            "reason": None if available else unavailable_reason,
             "identity_evidence": detail.get("identity_evidence", evidence),
+            "action_type": detail.get("action_type"),
+            "transaction_confirmed": detail.get("transaction_confirmed"),
             "recheck_required": True,
             "toolkit_executed": False,
         })
