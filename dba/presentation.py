@@ -54,6 +54,10 @@ def _line(label: str, value: Any) -> str:
     return f"  {label:<24}{safe if safe not in (None, '') else 'UNKNOWN'}"
 
 
+def _first(row: dict[str, Any], *names: str) -> Any:
+    return next((row[name] for name in names if row.get(name) is not None), None)
+
+
 def render_human(command: str, value: Any) -> str:
     """Render common results without coupling domain modules to the terminal."""
     data = asdict(value) if hasattr(value, "__dataclass_fields__") else value
@@ -463,6 +467,7 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
     candidate_labels = {
         "ROOT_BLOCKER": "根阻塞", "IDLE_OPEN_TRANSACTION": "未结束事务",
         "BLOCKED_VICTIM": "被阻塞会话", "LONG_RUNNING_SQL": "长运行 SQL",
+        "ACTIVE_WAIT": "主动等待语句",
     }
     finding_labels = {
         "SQLSERVER_DATAFILE_NEAR_LIMIT": "SQL Server 数据文件接近容量上限",
@@ -515,16 +520,89 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
         if not candidates:
             lines.append("当前证据没有可列出的会话候选。")
         for item in candidates:
-            category = candidate_labels.get(str(item.get("category")), "待核查会话")
+            category_values = item.get("categories", [item.get("category")])
+            category = " / ".join(candidate_labels.get(str(value), "待核查会话")
+                                  for value in category_values)
             lines.append(f"{item['rank']}. 会话 {item['session_id']}｜{category}")
             lines.append(f"   原因：{item['reason']}")
             lines.append(f"   用户：{item.get('username') or 'N/A'}；主机：{item.get('host') or 'N/A'}；IP：{item.get('client_ip') or 'N/A'}；应用：{item.get('application') or 'N/A'}；状态：{item.get('state') or 'N/A'}")
-            lines.append(f"   SQL 标识：{item.get('sql_id') or 'N/A'}；事务标识：{item.get('transaction_id') or 'N/A'}；运行秒数：{item.get('running_seconds') if item.get('running_seconds') is not None else 'N/A'}")
+            if item.get("mysql_connection_id") is not None:
+                lines.append(f"   MySQL 连接 ID：{item['mysql_connection_id']}；Performance Schema THREAD_ID：{item.get('performance_schema_thread_id') or 'N/A'}；InnoDB 事务 ID：{item.get('transaction_id') or 'N/A'}")
+            else:
+                sql_label = "SQL 标识" + (f"（{item.get('sql_id_type')}）" if item.get("sql_id_type") else "")
+                lines.append(f"   {sql_label}：{item.get('sql_id') or 'N/A'}；事务标识：{item.get('transaction_id') or 'N/A'}；运行秒数：{item.get('running_seconds') if item.get('running_seconds') is not None else 'N/A'}")
             lines.append(f"   登录时间：{item.get('login_time') or 'N/A'}；事务时长：{item.get('transaction_age_seconds') if item.get('transaction_age_seconds') is not None else 'N/A'} 秒；影响会话：{item.get('blocked_session_count', 0)}")
+            if item.get("mysql_connection_id") is not None:
+                root_evidence = next((root for root in details.get("roots", [])
+                                      if isinstance(root, dict) and str(root.get("processlist_id"))
+                                      == str(item["mysql_connection_id"])), {})
+                if root_evidence:
+                    lines.append(f"   直接影响：{root_evidence.get('direct_blocked_count', 0)}；间接影响：{root_evidence.get('indirect_blocked_count', 0)}；总影响：{root_evidence.get('blocked_count', 0)}")
             lines.append(f"   身份质量：{item.get('identity_quality', 'UNKNOWN')}；{item.get('identity_reuse_note')}")
+        victims = details.get("blocked_victims", [])
+        if isinstance(victims, list) and victims:
+            lines.extend(("", "【被阻塞会话】"))
+            for rank, victim in enumerate(victims, 1):
+                if not isinstance(victim, dict):
+                    continue
+                elapsed = victim.get("duration_ms")
+                elapsed_text = f"{float(elapsed) / 1000:g} 秒" \
+                    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) else "未知"
+                lines.append(f"{rank}. 会话{victim.get('processlist_id')}；直接阻塞者：{victim.get('direct_blocker_id') or '未知'}；根阻塞者：{victim.get('root_blocker_id') or '未知'}；当前请求时长：{elapsed_text}")
+        active_waits = details.get("active_waits", [])
+        if isinstance(active_waits, list) and active_waits:
+            lines.extend(("", "【主动等待语句】"))
+            for wait in active_waits:
+                if isinstance(wait, dict):
+                    duration = wait.get("duration_ms")
+                    duration_text = f"{float(duration) / 1000:g}" \
+                        if isinstance(duration, (int, float)) and not isinstance(duration, bool) else "未知"
+                    lines.append(f"会话{wait.get('processlist_id')}；状态：{wait.get('state_name') or '未知'}；当前运行：{duration_text} 秒；未观察到锁阻塞。")
         lines.extend(("", "【处置提示】",
                       "人工操作前重新核对会话 ID、登录时间、用户、主机、应用及事务身份。",
                       "终止可能触发回滚、额外 I/O、日志/Undo 压力和应用错误；终止不保证立即恢复。Toolkit 未执行任何处置命令。"))
+        decisions = details.get("manual_action_decisions", [])
+        if isinstance(decisions, (list, tuple)) and decisions:
+            lines.extend(("", "【人工处置参考】"))
+            for decision in decisions:
+                if not isinstance(decision, dict):
+                    continue
+                target = decision.get("target_session")
+                root = next((item for item in details.get("roots", [])
+                             if isinstance(item, dict) and str(_first(
+                                 item, "session_id", "pid", "processlist_id", "sid")) == str(target)), {})
+                blocked = _first(root, "blocked_count", "blocked_session_count")
+                status = _first(root, "status", "command_name", "state", "state_name")
+                transaction = (root.get("unfinished_transaction_confirmed") is True
+                               or _first(root, "trx_id", "transaction_id") not in (None, ""))
+                lines.append(f"根阻塞会话：{target if target is not None else 'UNKNOWN'}")
+                lines.append(f"影响会话：{blocked if blocked is not None else 0}")
+                if root.get("direct_blocked_count") is not None:
+                    lines.append(f"直接影响：{root['direct_blocked_count']}；间接影响：{root.get('indirect_blocked_count', 0)}；总影响：{blocked or 0}")
+                lines.append(f"状态：{status or 'UNKNOWN'}")
+                lines.append(f"未结束事务：{'是' if transaction else '未确认'}")
+                if _first(root, "transaction_id", "trx_id") is not None:
+                    if report.instance.db_type.value == "mysql":
+                        lines.append(f"InnoDB 事务 ID：{_first(root, 'transaction_id', 'trx_id')}")
+                        lines.append(f"MySQL 连接 ID：{root.get('processlist_id', target)}；Performance Schema THREAD_ID：{root.get('thread_id') or 'N/A'}")
+                    else:
+                        lines.append(f"事务标识：{_first(root, 'transaction_id', 'trx_id')}")
+                identity_quality = _first(root, "transaction_identity_quality") or "需要人工重新核对"
+                lines.append(f"身份状态：{identity_quality}")
+                if decision.get("status") == "AVAILABLE":
+                    lines.extend(("建议：", "1. 重新核对当前会话身份及未结束事务。",
+                                  "2. 确认是否属于需要中断的业务。",
+                                  "3. 评估回滚和日志压力。",
+                                  "4. DBA 确认后自行决定是否终止。",
+                                  "参考 SQL（仅供人工复制，不会自动执行）："))
+                    lines.extend(str(command) for command in decision.get("commands", ()))
+                else:
+                    lines.extend(("具体命令：暂不生成",
+                                  f"原因：{decision.get('reason') or '关键身份字段不足'}",
+                                  "需要核查：当前会话 ID、登录身份及事务归属。",
+                                  "参考模板：KILL <经实时复核的会话ID>"))
+                lines.extend(("命令基于历史采样；Toolkit 未实时锁定会话身份。",
+                              "session_id 可能复用；执行可能触发回滚且不保证立即结束。"))
     else:
         findings = [finding_labels.get(finding.title, "未分类空间或日志线索")
                     for finding in report.findings[:5]]
@@ -554,11 +632,12 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
             slots = other.get("slots")
             if isinstance(slots, list) and slots:
                 lines.insert(-4, f"复制槽记录：{len(slots)} 项；需人工确认用途和下游消费状态。")
+    pending = bool(details.get("supplemental_pending"))
     lines.extend(("", "【证据状态】",
                   f"应急核心证据：{'完整' if details.get('emergency_evidence_complete') else '不完整 / 未知'}",
-                  "补充证据：采集中" if details.get("supplemental_pending") else "补充证据：已完成",
+                  "补充证据：待采集" if pending else "补充证据：无额外查询",
                   "采样为串行 BEST-EFFORT 快照，不是原子快照。", "=" * 52,
-                  "正在继续采集补充证据并生成详细中文 HTML 报告…"))
+                  "正在采集补充证据…" if pending else "无额外补充查询，正在生成 HTML 报告…"))
     return "\n".join(lines)
 
 

@@ -38,13 +38,15 @@ from dba.environment import driver_info
 from dba.errors import ToolkitError
 from dba.execution_plan import diagnose_plan
 from dba.execution_plan_profiles import validate_plan_profiles
-from dba.incident import build_incident_summary, build_priority_candidates
+from dba.incident import build_incident_summary, build_priority_candidates, manual_action_decisions
 from dba.inventory import Inventory, ValidationError
 from dba.logging import configure_logging, redact
 from dba.mysql import MySQLAdapter
 from dba.mysql_collectors import COLLECTORS as MYSQL_COLLECTORS
+from dba.mysql_collectors import collect_recent_statements as collect_mysql_recent_statements
 from dba.mysql_slow import build_slow_phase_report as build_mysql_slow_phase_report
 from dba.mysql_slow import collect_slow_phase as collect_mysql_slow_phase
+from dba.mysql_slow_reporter import render_recent_statements as render_mysql_recent_statements
 from dba.oracle import OracleAdapter
 from dba.oracle_collectors import COLLECTORS as ORACLE_COLLECTORS
 from dba.oracle_slow import build_slow_phase_report as build_oracle_slow_phase_report
@@ -1410,6 +1412,8 @@ def main(
                         report = collect_disk_growth_phase(adapter, emergency=True)
                         report.details.update({"capture_started_at": capture_started_at,
                                                "snapshot_consistency": "BEST_EFFORT"})
+                        supplemental_expected = bool(report.details.get("supplemental_not_collected"))
+                        report.details["supplemental_pending"] = supplemental_expected
                         triage_completed_at = datetime.now(timezone.utc).isoformat()
                         first_summary_monotonic: float | None = None
                         if args.format == "console" and not args.json and not args.quiet:
@@ -1428,6 +1432,12 @@ def main(
                                                "capture_finished_at": datetime.now(timezone.utc).isoformat(),
                                                "snapshot_consistency": "BEST_EFFORT",
                                                "supplemental_pending": False})
+                        if args.format == "console" and not args.json and not args.quiet:
+                            completion = ("补充证据：已完成" if report.details.get(
+                                "full_profile_evidence_status") == "COMPLETE" else
+                                "补充证据采集结束，仍有缺失或不完整项；详见报告") if supplemental_expected \
+                                else "无额外补充查询；HTML 报告已生成"
+                            print(completion, flush=True)
                         capture_finished_at = report.details["capture_finished_at"]
                         diagnostic_timing = {
                             "time_to_first_summary_ms": round((first_summary_monotonic - started) * 1000)
@@ -1508,10 +1518,16 @@ def main(
                             phase_build = build_sqlserver_slow_phase_report
                         collected = phase_collect(cast(Any, adapter), emergency_names)
                         report = phase_build(adapter, collected, emergency=True)
+                        supplemental_expected = bool(cast(Any, report).details.get(
+                            "supplemental_not_collected"))
                         cast(Any, report).details.update({"capture_started_at": capture_started_at,
-                                                          "snapshot_consistency": "BEST_EFFORT"})
+                                                          "snapshot_consistency": "BEST_EFFORT",
+                                                          "supplemental_pending": supplemental_expected})
                         emergency_candidates = build_priority_candidates(report)
-                        cast(Any, report).details["priority_candidates"] = emergency_candidates
+                        cast(Any, report).details.update({
+                            "priority_candidates": emergency_candidates,
+                            "manual_action_decisions": manual_action_decisions(report),
+                        })
                         triage_completed_at = datetime.now(timezone.utc).isoformat()
                         first_summary_monotonic = None
                         if args.format == "console" and not args.json and not args.quiet:
@@ -1527,15 +1543,39 @@ def main(
                                 + optional_collectors_for_adapter(adapter)))
                             collected = phase_collect(cast(Any, adapter), full_names, collected)
                             report = phase_build(cast(Any, adapter), collected, emergency=False)
+                            if isinstance(adapter, MySQLAdapter):
+                                if args.format == "console" and not args.json and not args.quiet:
+                                    print("正在采集根阻塞最近 SQL...", flush=True)
+                                recent_result = collect_mysql_recent_statements(adapter, report)
+                                collected = (*collected, recent_result)
+                                report = phase_build(cast(Any, adapter), collected, emergency=False)
+                                cast(Any, report).details["recent_statements"] = list(recent_result.rows)
+                                cast(Any, report).details["recent_statements_elapsed_ms"] = recent_result.elapsed_ms
+                                if args.format == "console" and not args.json and not args.quiet:
+                                    print(render_mysql_recent_statements(recent_result.rows,
+                                                                         recent_result.elapsed_ms), flush=True)
                         else:
                             cast(Any, report).details["full_profile_evidence_complete"] = False
                             cast(Any, report).details["full_profile_evidence_status"] = "INCOMPLETE"
+                            if isinstance(adapter, MySQLAdapter):
+                                cast(Any, report).details["recent_statements"] = [{
+                                    "evidence_status": "NOT_COLLECTED_CORE_INCOMPLETE",
+                                    "reason": "Required emergency evidence was incomplete; recent SQL was not queried.",
+                                    "statements": [],
+                                }]
                         cast(Any, report).details.update({"priority_candidates": build_priority_candidates(report),
+                                               "manual_action_decisions": manual_action_decisions(report),
                                                "capture_started_at": capture_started_at,
                                                "triage_completed_at": triage_completed_at,
                                                "capture_finished_at": datetime.now(timezone.utc).isoformat(),
                                                "snapshot_consistency": "BEST_EFFORT",
                                                "supplemental_pending": False})
+                        if args.format == "console" and not args.json and not args.quiet:
+                            completion = ("补充证据：已完成" if cast(Any, report).details.get(
+                                "full_profile_evidence_status") == "COMPLETE" else
+                                "补充证据采集结束，仍有缺失或不完整项；详见报告") if supplemental_expected \
+                                else "无额外补充查询；HTML 报告已生成"
+                            print(completion, flush=True)
                         capture_finished_at = cast(Any, report).details["capture_finished_at"]
                         diagnostic_timing = {
                             "time_to_first_summary_ms": round((first_summary_monotonic - started) * 1000)
@@ -1665,6 +1705,7 @@ def main(
                 report_path = _diagnostic_report_path(instance.id, args.scenario, args.report)
                 report_path.parent.mkdir(parents=True, exist_ok=True)
                 incident_summary = build_incident_summary(report, str(report_path))
+                cast(Any, report).details["manual_action_decisions"] = manual_action_decisions(report)
                 output["incident_summary"] = asdict(incident_summary)
                 output["report_path"] = str(report_path)
                 plan_artifact_path: Path | None = None

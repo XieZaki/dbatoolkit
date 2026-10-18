@@ -1,7 +1,7 @@
 SELECT r.session_id, r.status, r.command, r.start_time,
     r.total_elapsed_time AS elapsed_ms, r.cpu_time AS cpu_ms,
     r.logical_reads, r.reads, r.writes, r.wait_type, r.wait_time AS wait_ms,
-    r.blocking_session_id, DB_NAME(r.database_id) AS database_name,
+    r.blocking_session_id, r.wait_resource, DB_NAME(r.database_id) AS database_name,
     CONVERT(varchar(130), r.sql_handle, 1) AS sql_handle,
     LEFT(t.text, 16384) AS sql_text,
     CASE WHEN DATALENGTH(t.text) > 32768 THEN 1 ELSE 0 END AS sql_text_truncated

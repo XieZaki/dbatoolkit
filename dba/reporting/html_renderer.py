@@ -58,8 +58,8 @@ class HtmlReportRenderer:
     def render(self, model: ReportModel) -> str:
         incident = model.incident_summary
         cards = (
-            ("状态", incident.status), ("主要问题", _label(incident.primary_problem)),
-            ("当前观测", _label(incident.observed_now)), ("严重程度", incident.severity),
+            ("状态", _label(incident.status)), ("主要问题", _label(incident.primary_problem)),
+            ("当前观测", _label(incident.observed_now)), ("严重程度", _label(incident.severity)),
         )
         summary_metrics = "".join(
             f"<div class=\"summary-metric\"><strong>{_escape(label)}</strong> "
@@ -110,6 +110,7 @@ def _label(value: str) -> str:
         "Database Type": "数据库类型", "Version": "版本", "Scenario": "诊断场景",
         "Generated At": "报告生成时间", "Environment": "环境", "Data Completeness": "证据完整性",
         "Root Blockers": "根阻塞", "Root Cause Candidate": "现场诊断结论",
+        "Recent SQL Evidence": "最近执行 SQL",
         "Blocking Analysis": "锁与阻塞链", "Transaction Analysis": "长期未提交事务",
         "Session Identity": "会话身份与来源", "Request Runtime": "请求运行信息",
         "Workload Summary": "当前数据库状态", "Long Running SQL": "慢 SQL",
@@ -137,6 +138,32 @@ def _label(value: str) -> str:
         "Reference Command": "人工参考命令", "Capture Started": "采集开始",
         "Triage Completed": "初报完成", "Capture Finished": "采集结束",
         "Snapshot Consistency": "快照一致性",
+        "Indirectly Affected": "间接受影响会话",
+        "Direct Blocked": "直接阻塞会话", "Direct Blocker": "直接阻塞者",
+        "SQL identifier type": "SQL 标识类型",
+        "Root Blocker": "根阻塞会话", "Wait Resource": "等待资源描述",
+        "Observation": "当前观测", "Session Open Transaction Count": "会话级未结束事务计数",
+        "Identity quality": "身份可信度", "Identity reuse note": "会话复用提示",
+        "Target Session": "目标会话", "Open Transaction": "未结束事务",
+        "Rollback Risk": "回滚风险", "Rollback Duration": "回滚耗时",
+        "DBA Approval Required": "需要 DBA 审批", "Toolkit Executed": "Toolkit 是否执行",
+        "Root-blocker Related Requests": "根阻塞相关请求",
+        "Non-blocked Long-running Requests": "非阻塞的长运行请求",
+        "Blocked Long-running Requests": "被阻塞的长运行请求",
+        "MISSING_REQUIRED": "必需证据缺失",
+        "OPTIONAL_UNAVAILABLE": "可选证据不可用", "NOT_COLLECTED": "未采集",
+        "TRUNCATED": "结果已截断", "COMPLETE": "完整", "FAILED": "失败",
+        "CRITICAL": "严重", "WARNING": "警告", "HIGH": "高", "INFO": "提示",
+        "YES": "是", "NO": "否", "ACTIVE": "活动",
+        "sleeping": "休眠", "suspended": "挂起", "running": "运行中",
+        "Blocked": "被阻塞会话", "Long Running": "长运行请求",
+        "Data completeness": "证据完整性", "Emergency evidence": "应急证据",
+        "Full profile evidence": "完整配置证据", "required evidence": "必需证据",
+        "Optional evidence": "可选证据", "Required evidence": "必需证据",
+        "Optional unavailable": "可选证据不可用", "Collector row limit reached": "已达到采集行数上限",
+        "NOT_APPLICABLE": "不适用", "PARTIAL": "部分可用", "INCOMPLETE": "不完整",
+        "PENDING": "待采集", "IDENTITY_INCOMPLETE": "身份信息不完整",
+        "REQUIRED_BEFORE_MANUAL_ACTION": "人工操作前必须重新核验",
     }
     if value in translations:
         return translations[value]
@@ -149,6 +176,9 @@ def _local_snapshot(value: str) -> str:
     from datetime import datetime
 
     try:
-        return datetime.fromisoformat(value).astimezone().isoformat(sep=" ", timespec="seconds")
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.isoformat(sep=" ", timespec="seconds") + " (时区未知)"
+        return parsed.astimezone().isoformat(sep=" ", timespec="seconds")
     except ValueError:
         return value

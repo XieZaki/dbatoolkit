@@ -1,4 +1,5 @@
-SELECT st.session_id, a.transaction_id, a.transaction_begin_time,
+SELECT st.session_id, s.login_time,
+    a.transaction_id, a.transaction_begin_time,
     a.transaction_type, a.transaction_state,
     CAST(DATEDIFF(DAY, a.transaction_begin_time, GETDATE()) AS bigint) * 86400
       + DATEDIFF(SECOND, DATEADD(DAY, DATEDIFF(DAY, a.transaction_begin_time, GETDATE()),

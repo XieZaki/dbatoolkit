@@ -1,5 +1,6 @@
 """Evidence-only MySQL slow diagnosis with transaction-backed idle findings."""
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -14,6 +15,7 @@ from dba.mysql_collectors import (
     ActiveSessionsCollector,
     BlockingCollector,
     TransactionsCollector,
+    collect_recent_statements,
 )
 from dba.postgresql_slow import blocking_graph
 from dba.settings import MySQLSettings
@@ -47,6 +49,16 @@ def _descendants(root: int, children: dict[int, set[int]]) -> set[int]:
     return seen
 
 
+_STANDALONE_SLEEP = re.compile(r"^\s*SELECT\s+SLEEP\s*\(\s*[^()]+\s*\)\s*;?\s*$", re.IGNORECASE)
+
+
+def _standalone_sleep(row: dict[str, Any]) -> bool:
+    sql = row.get("sql_text")
+    state = row.get("state_name")
+    return (isinstance(sql, str) and _STANDALONE_SLEEP.fullmatch(sql) is not None
+            and isinstance(state, str) and state.casefold() == "user sleep")
+
+
 def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult, ...],
                       settings: MySQLSettings, version: str,
                       statement_script: str = "active_requests",
@@ -60,27 +72,35 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
         return [dict(row) for row in result.rows] if result and result.success else []
 
     sessions = rows("active_sessions")
-    requests = rows("active_requests")
+    requests = [{**row, "request_kind": "ACTIVE_WAIT",
+                 "request_interpretation": "明确的独立 SELECT SLEEP 主动等待；耗时不代表数据库资源瓶颈"}
+                if _standalone_sleep(row) else row for row in rows("active_requests")]
     transactions = rows("transactions")
     blocking = rows("blocking")
+    session_ids = [_pid(row.get("processlist_id")) for row in sessions]
+    session_id_counts = {pid: session_ids.count(pid) for pid in set(session_ids) if pid is not None}
+    transaction_pids = [_pid(row.get("trx_mysql_thread_id")) for row in transactions]
+    transaction_pid_counts = {pid: transaction_pids.count(pid)
+                              for pid in set(transaction_pids) if pid is not None}
     session_map = {pid: row for row in sessions
                    if (pid := _pid(row.get("processlist_id"))) is not None}
     transaction_map = {pid: row for row in transactions
                        if (pid := _pid(row.get("trx_mysql_thread_id"))) is not None}
     graph = blocking_graph(blocking)
     children = {int(pid): set(links) for pid, links in graph["children"].items()}
-    blocked_pids = {pid for links in children.values() for pid in links}
+    blocked_pids = {pid for links in children.values() for pid in links if type(pid) is int}
     waiting = [row for row in requests if row.get("current_wait") or
                row.get("processlist_id") in blocked_pids]
+    active_waits = [row for row in requests if row.get("request_kind") == "ACTIVE_WAIT"]
     idle = [row for row in sessions if row.get("command_name") == "Sleep"
             and _pid(row.get("processlist_id")) in transaction_map]
     limited = statement_script != "active_requests"
     quality = [f"{r.collector_name}: {'failed' if not r.success else 'truncated' if r.truncated else 'ok'}"
                for r in results]
     if limited:
-        quality.append("active_requests: current wait detail unavailable" if
+        quality.append("active_requests: events_waits_current consumer is disabled; reviewed fallback returns NULL current_wait" if
                        statement_script == "active_requests_no_waits" else
-                       "active_requests: thread fallback; statement timer, rows and wait detail unavailable")
+                       "active_requests: statement consumer unavailable; fallback lacks statement timer, rows and wait detail")
     incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
     if limited and visibility == "FULL":
         # The compatibility statement remains usable, but it omits wait detail;
@@ -99,15 +119,12 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     if graph["anomalies"]:
         findings.append(Finding("BLOCKING_GRAPH_ANOMALY", Severity.WARNING,
             {"anomalies": graph["anomalies"]}, "阻塞图有无效边或循环；重新采样。"))
-    complete_graph = (not incomplete and not graph["anomalies"] and
-                      all(by_name.get(name) is not None and by_name[name].success
-                          and not by_name[name].truncated
-                          for name in ("active_sessions", "active_requests", "transactions", "blocking")))
     roots: list[dict[str, Any]] = []
     for root_pid in graph["roots"]:
         session = session_map.get(root_pid)
         tx = transaction_map.get(root_pid, {})
         affected = sorted(_descendants(root_pid, children))
+        direct_affected = sorted(children.get(root_pid, ()))
         current_sql = session.get("sql_text") if session and session.get("command_name") != "Sleep" else None
         root = {"processlist_id": root_pid, "thread_id": session.get("thread_id") if session else None,
                 "user_name": session.get("user_name") if session else None,
@@ -118,22 +135,97 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                 "state_name": session.get("state_name") if session else None,
                 "current_sql": current_sql, "last_sql": None,
                 "last_sql_reason": "MySQL current snapshots do not prove the last completed SQL",
-                "trx_id": tx.get("trx_id"), "transaction_age_seconds": tx.get("transaction_age_seconds"),
+                "trx_id": tx.get("trx_id"), "transaction_id": tx.get("trx_id"),
+                "transaction_identity_quality": "UNKNOWN",
+                "transaction_age_seconds": tx.get("transaction_age_seconds"),
                 "trx_rows_locked": tx.get("trx_rows_locked"),
                 "trx_rows_modified": tx.get("trx_rows_modified"),
-                "blocked_count": len(affected), "blocked_pids": affected,
+                "blocked_count": len(affected), "direct_blocked_count": len(direct_affected),
+                "indirect_blocked_count": len(set(affected) - set(direct_affected)),
+                "blocked_pids": affected,
                 "session_available": session is not None}
         roots.append(root)
-        references = (
-            (ReferenceCommand(f"KILL QUERY {root_pid};",
-                              "仅供 DBA 人工审核；停止当前语句，保留连接，Toolkit 未执行。"),
-             ReferenceCommand(f"KILL {root_pid};",
-                              "仅供 DBA 人工审核；终止整个连接，Toolkit 未执行。"))
-            if (session and complete_graph and session.get("user_name") and session.get("host_raw")
-                and session.get("thread_id") is not None) else ()
+        # KILL targets PROCESSLIST_ID (the connection ID), never THREAD_ID or trx_id.
+        # Wait-event / full-profile visibility is optional context and does not
+        # invalidate an independently confirmed data_lock_waits root.
+        core_names = ("active_sessions", "transactions", "blocking")
+        core_evidence_complete = all(
+            by_name.get(name) is not None and by_name[name].success and not by_name[name].truncated
+            for name in core_names
         )
+        transaction = transaction_map.get(root_pid, {})
+        transaction_available = bool(transaction)
+        transaction_id = transaction.get("trx_id")
+        transaction_id_valid = transaction_id not in (None, "", 0, "0", "UNKNOWN", "N/A")
+        tx_identity_conflict = (
+            transaction_pid_counts.get(root_pid, 0) > 1
+            or session_id_counts.get(root_pid, 0) != 1
+            or transaction_available and session
+            and transaction.get("thread_id") is not None and session.get("thread_id") is not None
+            and transaction.get("thread_id") != session.get("thread_id")
+        )
+        if transaction_available and transaction_id_valid and not tx_identity_conflict \
+                and _pid(transaction.get("trx_mysql_thread_id")) == root_pid:
+            root["transaction_identity_quality"] = "VERIFIED"
+        elif tx_identity_conflict:
+            root["transaction_identity_quality"] = "AMBIGUOUS"
+        elif transaction_available:
+            root["transaction_identity_quality"] = "IDENTITY_INCOMPLETE"
+        identity_fields_present = bool(
+            session and session.get("user_name") not in (None, "")
+            and "host_raw" in session and transaction_available
+            and transaction_id_valid
+            and _pid(transaction.get("trx_mysql_thread_id")) == root_pid
+        )
+        missing_core = [name for name in core_names if by_name.get(name) is None
+                        or not by_name[name].success or by_name[name].truncated]
+        suppression_reason: str | None = None
+        if graph["anomalies"]:
+            suppression_reason = "Blocking graph contains anomalies."
+        elif not core_evidence_complete:
+            suppression_reason = "Required evidence unavailable or truncated: " + ", ".join(missing_core)
+        elif tx_identity_conflict:
+            suppression_reason = "Conflicting or duplicate connection/transaction identity."
+        elif session is None:
+            suppression_reason = "Missing active_sessions row for PROCESSLIST_ID."
+        elif session.get("user_name") in (None, ""):
+            suppression_reason = "Missing session identity field: user_name."
+        elif "host_raw" not in session:
+            suppression_reason = "Missing session identity field: host_raw."
+        elif not transaction_available:
+            suppression_reason = "Missing InnoDB transaction for trx_mysql_thread_id."
+        elif _pid(transaction.get("trx_mysql_thread_id")) != root_pid:
+            suppression_reason = "trx_mysql_thread_id does not match PROCESSLIST_ID."
+        elif not transaction_id_valid:
+            suppression_reason = "Missing or invalid transaction identity field: trx_id."
+        elif not identity_fields_present:
+            suppression_reason = "Root connection and its open InnoDB transaction could not be matched."
+        references = ((ReferenceCommand(
+            f"KILL CONNECTION {root_pid};",
+            "仅供 DBA 人工审核；终止整个连接并释放其事务锁；Toolkit 未执行。",
+        ),) if suppression_reason is None else ())
+        root["manual_action"] = {
+            "status": "AVAILABLE" if references else "SUPPRESSED",
+            "target_type": "PROCESSLIST_ID",
+            "target": root_pid if references else None,
+            "reason": suppression_reason,
+            "identity_evidence": {
+                "processlist_id": root_pid,
+                "thread_id": session.get("thread_id") if session else None,
+                "trx_id": transaction_id if transaction_available else None,
+                "trx_mysql_thread_id": (transaction.get("trx_mysql_thread_id")
+                                        if transaction_available else None),
+                "trx_started": transaction.get("trx_started") if transaction_available else None,
+            },
+            "identity_rule": (
+                "trx_started is optional when PROCESSLIST_ID, user/host row, trx_id, "
+                "trx_mysql_thread_id, and blocking relationship agree."
+            ),
+            "recheck_required": True,
+            "toolkit_executed": False,
+        }
         findings.append(Finding("ROOT_BLOCKER", Severity.WARNING, root,
-            "重新核对连接身份及回滚影响；Sleep 会话通常没有当前查询可供 KILL QUERY 取消。",
+            "重新核对连接身份及回滚影响；本参考使用 PROCESSLIST_ID 终止整个连接。",
             references, session=str(root_pid)))
     idle_details: list[dict[str, Any]] = []
     for session in idle:
@@ -146,6 +238,7 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
             continue
         affected = sorted(_descendants(pid, children))
         detail = {"processlist_id": pid, "transaction_age_seconds": age,
+                  "thread_id": session.get("thread_id"),
                   "user_name": session.get("user_name"), "host_raw": session.get("host_raw"),
                   "host_ip": session.get("host_ip"), "database_name": session.get("database_name"),
                   "current_sql": None, "last_sql": None,
@@ -186,13 +279,51 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     if incomplete:
         findings.append(Finding("INCOMPLETE_SNAPSHOT", Severity.WARNING,
             {"quality": quality}, "采集失败、截断或降级，不能将未发现的问题视为完整结论。"))
+    blocked_victims: list[dict[str, Any]] = []
+    request_by_pid: dict[int, dict[str, Any]] = {}
+    for row in requests:
+        pid = _pid(row.get("processlist_id"))
+        if pid is not None:
+            request_by_pid[pid] = row
+    parent_map = {int(pid): {int(value) for value in values}
+                  for pid, values in graph["parents"].items()}
+    root_ids = set(graph["roots"])
+    victim_pids = sorted(blocked_pids) if not graph["anomalies"] else []
+    for pid in victim_pids:
+        direct = sorted(parent_map.get(pid, ()))
+        ancestors = set(direct)
+        pending = list(direct)
+        while pending:
+            current = pending.pop()
+            if current in ancestors and current not in root_ids:
+                parents = parent_map.get(current, set())
+                fresh = parents - ancestors
+                ancestors.update(fresh)
+                pending.extend(fresh)
+        root_candidates = sorted(root_ids & ancestors)
+        root_blocker_id = root_candidates[0] if len(root_candidates) == 1 else None
+        request = request_by_pid.get(pid, {})
+        blocked_victims.append({
+            "processlist_id": pid,
+            "direct_blocker_id": direct[0] if len(direct) == 1 else None,
+            "root_blocker_id": root_blocker_id,
+            "duration_ms": duration(request),
+            "wait_detail_available": bool(request.get("current_wait")),
+            "request_kind": "BLOCKED_VICTIM",
+        })
     return MySQLSlowReport(instance, datetime.now(timezone.utc), "slow", tuple(findings),
         redact({"version": version, "concurrency": concurrency,
                 "top_queries": top_queries, "long_running": long[:settings.slow_top_n],
                 "blocking_graph": graph, "roots": roots, "transactions": transactions,
                 "idle_transactions": idle_details, "sessions": sessions,
-                "active_requests": requests,
+                "active_requests": requests, "blocked_victims": blocked_victims,
+                "active_waits": active_waits,
                 "quality": quality, "incomplete": incomplete, "data_visibility": visibility,
+                "wait_detail_status": "UNAVAILABLE" if limited else "AVAILABLE",
+                "wait_detail_reason": ("Performance Schema events_waits_current consumer is disabled; the approved active_requests_no_waits Registry query intentionally projects NULL AS current_wait. No consumer or server setting was changed."
+                                       if statement_script == "active_requests_no_waits" else
+                                       "Statement instrumentation is unavailable in the selected compatibility query."
+                                       if statement_script == "active_requests_basic" else None),
                 "samples": [{"collector": r.collector_name, "started_at": r.started_at,
                              "finished_at": r.finished_at, "row_count": r.row_count,
                              "truncated": r.truncated, "success": r.success,
@@ -216,9 +347,27 @@ def diagnose_slow(adapter: MySQLAdapter) -> MySQLSlowReport:
                                result.error_message or "Required sample unavailable.")
         if not result.success:
             break
-    return build_slow_report(adapter.instance, tuple(results), adapter.settings,
-                             version, adapter.statement_script, tuple(required),
-                             optional_collectors_for_adapter(adapter))
+    report = build_slow_report(adapter.instance, tuple(results), adapter.settings,
+                               version, adapter.statement_script, tuple(required),
+                               optional_collectors_for_adapter(adapter))
+    by_name = {item.collector_name: item for item in results}
+    core_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                        for name in emergency_collectors_for_adapter(adapter))
+    if core_complete:
+        recent = collect_recent_statements(adapter, report)
+        results.append(recent)
+        report = build_slow_report(adapter.instance, tuple(results), adapter.settings,
+                                   version, adapter.statement_script, tuple(required),
+                                   optional_collectors_for_adapter(adapter))
+        report.details["recent_statements"] = list(recent.rows)
+        report.details["recent_statements_elapsed_ms"] = recent.elapsed_ms
+    else:
+        report.details["recent_statements"] = [{
+            "evidence_status": "NOT_COLLECTED_CORE_INCOMPLETE",
+            "reason": "Required emergency evidence was incomplete; recent SQL was not queried.",
+            "statements": [],
+        }]
+    return report
 
 
 _STAGED_COLLECTORS = {

@@ -134,6 +134,7 @@ REGISTRY: dict[DatabaseType, dict[str, FeaturePermissions]] = {
         "slow": FeaturePermissions(("PROCESS", "SELECT performance_schema"), (),
                                     "Other users' sessions or statement/wait details may be unavailable.",
                                     ("performance_schema.threads", "performance_schema.events_statements_current",
+                                     "performance_schema.events_statements_history",
                                      "performance_schema.events_waits_current", "performance_schema.data_lock_waits",
                                      "performance_schema.data_locks", "performance_schema.setup_consumers",
                                      "performance_schema.global_status", "information_schema.innodb_trx",

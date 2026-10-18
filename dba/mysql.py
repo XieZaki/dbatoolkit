@@ -30,7 +30,7 @@ from dba.settings import MySQLSettings
 class Cursor(Protocol):
     description: Sequence[Sequence[Any]] | None
 
-    def execute(self, sql: str) -> Any: ...
+    def execute(self, sql: str, parameters: tuple[int, ...] | None = None) -> Any: ...
     def fetchmany(self, size: int) -> Sequence[Sequence[Any]]: ...
     def close(self) -> None: ...
 
@@ -74,7 +74,7 @@ class MySQLAdapter(Adapter):
 
     REQUIRED = ("preflight", "preflight_roles", "server_info", "database_status", "active_sessions",
                 "active_requests", "active_requests_no_waits", "active_requests_basic",
-                "transactions", "blocking", "monitor_grants")
+                "transactions", "blocking", "recent_statements", "monitor_grants")
     STREAMING_SCRIPTS = frozenset({
         "active_sessions", "active_requests", "active_requests_no_waits",
         "active_requests_basic", "transactions", "blocking", "database_status",
@@ -103,6 +103,7 @@ class MySQLAdapter(Adapter):
         self._read_timeout = self.settings.query_timeout
         self._streaming_cursor: Any | None = None
         self.preflight_checks: dict[str, bool] = {}
+        self.statement_history_consumer: bool | None = None
         self.permission_observations: set[str] = set()
         self.privilege_classification: dict[str, Any] = {"classification": "UNKNOWN"}
         self.current_user: str | None = None
@@ -268,6 +269,9 @@ class MySQLAdapter(Adapter):
             self._statement_script = "active_requests"
         self.preflight_checks["instrumented_statements"] = self._statement_script != "active_requests_basic"
         self.preflight_checks["instrumented_waits"] = self._statement_script == "active_requests"
+        history_consumer = row.get("history_consumer")
+        self.statement_history_consumer = history_consumer == 1 if type(history_consumer) is int else None
+        self.preflight_checks["statement_history_consumer"] = self.statement_history_consumer is True
         for name in ("server_info", "database_status", "active_sessions",
                      self._statement_script, "transactions", "blocking"):
             probe = self._run(self.registry.get(name, DatabaseType.MYSQL))
@@ -320,7 +324,8 @@ class MySQLAdapter(Adapter):
                     for key, item in value.items()}
         return redact(value)
 
-    def execute_readonly(self, script: SqlScript) -> CollectorResult:
+    def execute_readonly(self, script: SqlScript,
+                         parameters: tuple[int, ...] | None = None) -> CollectorResult:
         if not self._ready:
             readiness = self._known_replication_readiness()
             if readiness is not None and readiness["status"] == "MISSING":
@@ -330,7 +335,7 @@ class MySQLAdapter(Adapter):
                     permission_readiness=readiness,
                 )
             raise ToolkitError("PreflightRequired", "MySQL connection preflight did not complete.")
-        return self._run(script)
+        return self._run(script, parameters)
 
     def _known_replication_readiness(self) -> dict[str, Any] | None:
         if not self._version or not self.current_user:
@@ -350,7 +355,7 @@ class MySQLAdapter(Adapter):
             "dba_approval_required": bool(missing),
         }
 
-    def _run(self, script: SqlScript) -> CollectorResult:
+    def _run(self, script: SqlScript, parameters: tuple[int, ...] | None = None) -> CollectorResult:
         started_at = datetime.now(timezone.utc)
         started = time.monotonic()
         cursor: Cursor | None = None
@@ -364,6 +369,14 @@ class MySQLAdapter(Adapter):
             self.registry.authorize(script, DatabaseType.MYSQL)
             authorized = True
             script_name = script.metadata.name
+            if parameters is not None and (
+                script_name != "recent_statements" or len(parameters) != 3
+                or any(type(value) is not int or value <= 0 for value in parameters)
+                or parameters[0] != parameters[2]
+            ):
+                raise ToolkitError("RegistryRejected", "Bound parameters are not valid for this reviewed query.")
+            if script_name == "recent_statements" and parameters is None:
+                raise ToolkitError("RegistryRejected", "Recent statement query requires verified bound identities.")
             if self._connection is None:
                 raise ToolkitError("NotConnected", "Connection is closed.")
             streaming = script.metadata.name in self.STREAMING_SCRIPTS
@@ -371,12 +384,19 @@ class MySQLAdapter(Adapter):
                 cursor = self._connection.cursor(self._streaming_cursor)
             else:
                 cursor = self._connection.cursor()
-            cursor.execute(script.text)
+            if parameters is None:
+                cursor.execute(script.text)
+            else:
+                cursor.execute(script.text, parameters)
             if cursor.description is None:
                 raise ToolkitError("InvalidResult", "Read-only script returned no rowset.")
             columns = [str(column[0]) for column in cursor.description]
             values = cursor.fetchmany(script.metadata.max_rows)
-            truncated = len(values) >= script.metadata.max_rows
+            # The recent-statement Registry SQL uses an explicit LIMIT 5.
+            # Exactly five rows means the sample limit was reached, but does
+            # not establish that a sixth row exists.
+            truncated = (len(values) >= script.metadata.max_rows
+                         and script.metadata.name != "recent_statements")
             rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in values)
         except ToolkitError as exc:
             error = exc

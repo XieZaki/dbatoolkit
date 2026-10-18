@@ -92,14 +92,17 @@ SLOW_SQL_PROFILES: dict[str, dict[str, str]] = {
     "mysql57_slow": {
         "active_sessions": "active_sessions_legacy", "active_requests": "active_requests_legacy",
         "transactions": "transactions", "blocking": "blocking_legacy",
+        "recent_statements": "recent_statements",
     },
     "mysql80_slow": {
         "active_sessions": "active_sessions", "active_requests": "active_requests",
         "transactions": "transactions", "blocking": "blocking",
+        "recent_statements": "recent_statements",
     },
     "mysql84_slow": {
         "active_sessions": "active_sessions", "active_requests": "active_requests",
         "transactions": "transactions", "blocking": "blocking",
+        "recent_statements": "recent_statements",
     },
     "pg13_18_slow": {
         "active_sessions": "active_sessions", "long_running": "long_running",
@@ -131,9 +134,9 @@ SLOW_SQL_PROFILES: dict[str, dict[str, str]] = {
 SLOW_OPTIONAL_COLLECTORS: dict[str, tuple[str, ...]] = {
     "sqlserver_2008r2_slow": ("transactions", "connections"),
     "sqlserver_shared_slow": ("transactions", "connections"),
-    "mysql57_slow": ("transactions", "blocking"),
-    "mysql80_slow": ("transactions", "blocking"),
-    "mysql84_slow": ("transactions", "blocking"),
+    "mysql57_slow": ("transactions", "blocking", "recent_statements"),
+    "mysql80_slow": ("transactions", "blocking", "recent_statements"),
+    "mysql84_slow": ("transactions", "blocking", "recent_statements"),
     "pg13_18_slow": ("long_running", "transactions", "blocking"),
     "oracle11gr2_slow": ("transactions", "blocking", "previous_sql"),
     "oracle12c_121_slow": ("transactions", "blocking", "previous_sql"),

@@ -208,6 +208,17 @@ def build_slow_report(
             for r in associated
             if r.get("transaction_state") in (2, 4, 5) and r.get("transaction_type") in (1, 2, 4)
         ]
+        identity_quality = "CONFIRMED"
+        session_login_time = session.get("login_time")
+        transaction_login_times = {str(row.get("login_time")) for row in unfinished
+                                   if row.get("login_time") is not None}
+        if len(unfinished) > 1:
+            identity_quality = "AMBIGUOUS"
+        elif unfinished and (session_login_time is None or len(transaction_login_times) != 1
+                             or str(session_login_time) not in transaction_login_times):
+            identity_quality = "RECHECK_REQUIRED"
+        transaction_identity = (unfinished[0].get("transaction_id")
+                                if len(unfinished) == 1 and identity_quality == "CONFIRMED" else None)
         sources = connection_map.get(sid, [])
         last = [r.get("last_sql") for r in sources if r.get("last_sql")]
         affected = descendants(sid, graph["children"])
@@ -232,6 +243,8 @@ def build_slow_report(
             "last_sql": last,
             "connections": sources,
             "transactions": associated,
+            "transaction_id": transaction_identity,
+            "transaction_identity_quality": identity_quality if unfinished else "NOT_CONFIRMED",
             "transaction_begin_time": min(
                 (
                     str(r["transaction_begin_time"])
@@ -251,7 +264,7 @@ def build_slow_report(
             "blocked_session_count": len(affected),
             "blocked_sessions": sorted(affected),
             "session_available": bool(session),
-            "unfinished_transaction_confirmed": bool(unfinished),
+            "unfinished_transaction_confirmed": bool(unfinished) and identity_quality == "CONFIRMED",
             "sql_note": "Current/last batch is contextual evidence, not proof of the statement that acquired a lock.",
         }
         if not root["client_net_address"]:
@@ -265,7 +278,7 @@ def build_slow_report(
         )
         reference_evidence_complete = all(
             by_name.get(name) is not None and by_name[name].success and not by_name[name].truncated
-            for name in ("active_requests", "active_sessions", "transactions", "connections")
+            for name in ("active_requests", "active_sessions", "transactions")
         ) and not graph["anomalies"]
         identity_complete = all(session.get(key) not in (None, "") for key in (
             "login_time", "login_name", "host_name", "program_name"
@@ -277,8 +290,29 @@ def build_slow_report(
                 ),
             )
             if session and sid > 0 and affected and reference_evidence_complete and identity_complete
+            and identity_quality not in {"AMBIGUOUS", "RECHECK_REQUIRED"}
             else ()
         )
+        root["manual_action"] = {
+            "status": "AVAILABLE" if references else "SUPPRESSED",
+            "target_type": "SQL_SERVER_SESSION_ID",
+            "target": sid if references else None,
+            "reason": None if references else (
+                "Blocking graph contains anomalies." if graph["anomalies"] else
+                "Root session or downstream impact is not confirmed." if not session or sid <= 0 or not affected else
+                "Required active-request, session, or transaction evidence is incomplete." if
+                not reference_evidence_complete else
+                "Session identity fields are incomplete." if not identity_complete else
+                "Session or transaction identity is ambiguous or may have been reused."
+            ),
+            "identity_evidence": {key: root.get(key) for key in (
+                "session_id", "login_time", "login_name", "host_name", "program_name",
+                "transaction_id", "unfinished_transaction_confirmed",
+                "transaction_identity_quality", "blocked_session_count",
+            )},
+            "recheck_required": True,
+            "toolkit_executed": False,
+        }
         findings.append(
             Finding(
                 "ROOT_BLOCKER",
@@ -294,7 +328,7 @@ def build_slow_report(
             and not active
             and session.get("status") == "sleeping"
             and number(session.get("open_transaction_count")) > 0
-            and unfinished
+            and unfinished and identity_quality == "CONFIRMED"
         ):
             findings.append(
                 Finding(

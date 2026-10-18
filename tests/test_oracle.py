@@ -448,5 +448,5 @@ def test_cli_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     report_path = tmp_path / "oracle.html"
     assert main([*prefix, "diagnose", instance.id, "slow", "--report", str(report_path), "--json"],
                 provider=provider, driver=driver) == 0
-    assert "Long Running Requests" in report_path.read_text(encoding="utf-8")
+    assert "长运行请求 1 条" in report_path.read_text(encoding="utf-8")
     assert "TOPSECRET" not in report_path.read_text(encoding="utf-8")

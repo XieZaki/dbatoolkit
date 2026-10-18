@@ -26,6 +26,12 @@ _VALUE_LABELS = {
     "TEMP": "临时空间", "DATA": "数据文件", "TABLE": "表", "INDEX": "索引",
     "ROOT_BLOCKER": "根阻塞", "IDLE_OPEN_TRANSACTION": "未结束事务",
     "BLOCKED_VICTIM": "被阻塞会话", "LONG_RUNNING_SQL": "长运行 SQL",
+    "ACTIVE_WAIT": "主动等待语句",
+    "TERMINATE_SESSION": "终止会话参考", "CANCEL_QUERY": "取消查询参考",
+    "ACTIVE": "活动", "COMPLETE": "完整", "CRITICAL": "严重",
+    "INFO": "提示", "WARNING": "警告", "HIGH": "高", "UNKNOWN": "未知",
+    "RECHECK_REQUIRED": "需要重新核验", "VERIFIED": "事务关联已核验",
+    "AMBIGUOUS": "身份存在冲突", "IDENTITY_INCOMPLETE": "身份信息不完整",
 }
 _FINDING_LABELS = {
     "SQLSERVER_DATAFILE_NEAR_LIMIT": "SQL Server 数据文件接近容量上限",
@@ -51,10 +57,15 @@ _FINDING_LABELS = {
 
 def _local_time(value: Any) -> str:
     if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.isoformat(sep=" ", timespec="seconds") + " (时区未知)"
         moment = value.astimezone()
     elif isinstance(value, str):
         try:
-            moment = datetime.fromisoformat(value).astimezone()
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return parsed.isoformat(sep=" ", timespec="seconds") + " (时区未知)"
+            moment = parsed.astimezone()
         except ValueError:
             return value
     else:
@@ -136,9 +147,9 @@ def _table(rows: list[dict[str, Any]], columns: tuple[tuple[str, tuple[str, ...]
 
 def _omitted(total: int, displayed: int, noun: str) -> str:
     omitted = max(0, total - displayed)
-    text = f"Total {total} · Displayed {displayed} · Omitted {omitted}."
+    text = f"共{total}条，显示{displayed}条，省略{omitted}条。"
     if omitted:
-        text += f" {omitted} additional {noun} omitted from the human report; use --json for structured data."
+        text += f" 人工报告省略其余{noun}；结构化数据请使用 --json。"
     return text
 
 
@@ -176,6 +187,7 @@ def _blocking_sections(roots: list[Any], children: dict[str, list[Any]],
     root_rows: list[dict[str, Any]] = []
     tree_rows: list[dict[str, Any]] = []
     related: set[str] = set()
+    parent_of = {str(child): str(parent) for parent, values in children.items() for child in values}
     for root in roots[:policy.max_root_blockers]:
         root_id = str(root)
         pending = [(root_id, 0)]
@@ -196,7 +208,9 @@ def _blocking_sections(roots: list[Any], children: dict[str, list[Any]],
             pending.extend((str(child), depth + 1) for child in children.get(sid, []))
         if not ordered:
             continue
-        root_rows.append({"root": root_id, "affected": max(0, len(ordered) - 1),
+        descendants_count = max(0, len(ordered) - 1)
+        root_rows.append({"root": root_id, "affected": descendants_count,
+                          "indirect": max(0, descendants_count - len(children.get(root_id, []))),
                           "direct": len(children.get(root_id, [])),
                           "depth": max(depth for _, depth in ordered),
                           "longest": _duration_ms(max_wait) if max_wait else "—"})
@@ -207,15 +221,19 @@ def _blocking_sections(roots: list[Any], children: dict[str, list[Any]],
             tree_rows.append({"root": root_id,
                               "session": f"{'  ' * depth}{'└─ ' if depth else ''}{sid}",
                               "role": "Root Blocker" if depth == 0 else "Blocked",
+                              "parent": parent_of.get(sid, "—"),
                               "wait": _first(request, "wait_type", "wait_event", "current_wait"),
+                              "wait_resource": request.get("wait_resource"),
                               "elapsed": _duration_ms(_first(request, "elapsed_ms", "duration_ms")),
                               "login": _first(session, "login_name", "usename", "user_name")})
         tree_rows.append({"root": root_id, "session": "—", "role": "Display summary",
-                          "wait": "—", "elapsed": _omitted(len(ordered), len(shown), "blocking nodes"),
+                          "parent": "—", "wait": "—", "wait_resource": "—",
+                          "elapsed": _omitted(len(ordered), len(shown), "blocking nodes"),
                           "login": "—"})
     root_table = _table(root_rows, (("Root Session", ("root",)),
                                    ("Affected Sessions", ("affected",)),
-                                   ("Direct Children", ("direct",)),
+                                   ("Indirectly Affected", ("indirect",)),
+                                   ("Direct Blocked", ("direct",)),
                                    ("Maximum Depth", ("depth",)),
                                    ("Longest Block", ("longest",))))
     summaries = [ReportSection(
@@ -223,17 +241,22 @@ def _blocking_sections(roots: list[Any], children: dict[str, list[Any]],
         summary=_omitted(len(roots), len(root_rows), "root blockers"),
         tables=(root_table,) if root_table else ())]
     tree_table = _table(tree_rows, (("Root", ("root",)), ("Session", ("session",)),
-                                   ("Role", ("role",)), ("Wait", ("wait",)),
+                                   ("Role", ("role",)), ("Direct Blocker", ("parent",)),
+                                   ("Wait", ("wait",)), ("Wait Resource", ("wait_resource",)),
                                    ("Elapsed", ("elapsed",)), ("Login", ("login",))))
     tree = ReportSection("blocking", "Blocking Analysis",
-                         summary="Blocking relationships from this bounded snapshot."
-                         if tree_table else "No blocking relationships observed in this snapshot.",
+                         summary="当前有界采样观察到的阻塞关系；直接与间接受影响会话分别计数。"
+                         if tree_table else "当前采样未观察到阻塞关系。",
                          tables=(tree_table,) if tree_table else ())
     return summaries + [tree], related
 
 
 def _long_running_rows(report: DiagnosticReport, details: dict[str, Any]) -> list[dict[str, Any]]:
     configured = _dict_rows(details.get("long_running"))
+    if report.instance.db_type.value == "mysql":
+        # MySQL annotates exact standalone SLEEP statements as intentional waits;
+        # preserve that classification from the analyzer's threshold result.
+        return configured
     finding = next((item for item in report.findings if item.title == "LONG_RUNNING_SQL"), None)
     threshold = finding.evidence.get("threshold_seconds") if finding else None
     if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
@@ -305,11 +328,12 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                         ("Database", ("database",)), ("Status", ("status",)),
                         ("Login", ("login",)), ("Host", ("host",)),
                         ("Program", ("program",)), ("Client IP", ("client_ip",)),
-                        ("Open Txn", ("open_txn",)))
+                        ("Session Open Transaction Count", ("open_txn",)))
     identity_table = _table(related_rows, identity_columns)
     sections.append(ReportSection(
-        "session-sources", "Session Identity", summary=_omitted(related_total, len(related_rows),
-                                                                  "incident-related sessions"),
+        "session-sources", "Session Identity",
+        summary="会话级 open_transaction_count 与事务 DMV 返回的事务行数语义不同。 " +
+                _omitted(related_total, len(related_rows), "incident-related sessions"),
         tables=(identity_table,) if identity_table else ()))
 
     runtime_rows = []
@@ -325,6 +349,7 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                                        if _first(row, "elapsed_ms", "duration_ms") is not None else
                                        _duration_seconds(row.get("duration_seconds")),
                              "wait": _first(row, "wait_type", "wait_event", "current_wait"),
+                             "wait_resource": row.get("wait_resource"),
                              "blocked_by": _first(row, "blocking_session_id", "blocking_pid",
                                                   "blocking_sid"),
                              "cpu": _first(row, "cpu_time_ms", "cpu_ms", "cpu_time"),
@@ -332,14 +357,33 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                              "reads": _first(row, "reads"), "writes": _first(row, "writes")})
     runtime_table = _table(runtime_rows, (("Session", ("session",)), ("Status", ("status",)),
                                           ("Elapsed", ("elapsed",)), ("Wait", ("wait",)),
+                                          ("Wait Resource", ("wait_resource",)),
                                           ("Blocked By", ("blocked_by",)), ("CPU", ("cpu",)),
                                           ("Logical Reads", ("logical_reads",)),
                                           ("Reads", ("reads",)), ("Writes", ("writes",))))
     if runtime_table:
-        sections.append(ReportSection("request-runtime", "Request Runtime", tables=(runtime_table,)))
+        runtime_summary = ("MySQL Performance Schema 提供当前语句耗时和可见等待事件；等待 consumer 未启用时等待详情不可用。"
+                           if report.instance.db_type.value == "mysql" else
+                           "CPU、logical reads、reads、writes 为 DMV 当前累计值；单次采样为零不代表历史没有资源消耗。")
+        sections.append(ReportSection(
+            "request-runtime", "Request Runtime",
+            summary=runtime_summary,
+            tables=(runtime_table,)))
 
     root_ids = {str(item) for item in roots}
     blocked_ids = {str(child) for values in children.values() for child in values}
+    parent_of = {str(child): str(parent) for parent, values in children.items() for child in values}
+
+    def root_for(session_id: str) -> str | None:
+        seen: set[str] = set()
+        current = session_id
+        while current not in seen:
+            seen.add(current)
+            parent = parent_of.get(current)
+            if parent is None:
+                return current if current in root_ids else None
+            current = parent
+        return None
     root_related: list[dict[str, Any]] = []
     blocked_long: list[dict[str, Any]] = []
     nonblocked: list[dict[str, Any]] = []
@@ -364,17 +408,17 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
     root_related.sort(key=elapsed_key, reverse=True)
     blocked_long.sort(key=elapsed_key, reverse=True)
     nonblocked.sort(key=elapsed_key, reverse=True)
-    counts = (f"Long Running Requests {len(long_rows)} · Blocked "
-              f"{len(root_related) + len(blocked_long)} · Non-Blocked {len(nonblocked)}.")
+    counts = (f"长运行请求 {len(long_rows)} 条 · 阻塞相关 "
+              f"{len(root_related) + len(blocked_long)} 条 · 非阻塞 {len(nonblocked)} 条。")
     if long_rows:
         sections.append(ReportSection("workload-summary", "Workload Summary", summary=counts))
         blocked_budget = policy.max_blocked_requests
         for section_id, title, values, cap, noun in (
-            ("root-related-requests", "Root-blocker Related Requests", root_related,
+            ("root-related-requests", "根阻塞相关请求", root_related,
              policy.max_blocked_requests, "root-related requests"),
-            ("blocked-long-running", "Blocked Long-running Requests", blocked_long,
+            ("blocked-long-running", "被阻塞的长运行请求", blocked_long,
              policy.max_blocked_requests, "blocked requests"),
-            ("nonblocked-long-running", "Non-blocked Long-running Requests", nonblocked,
+            ("nonblocked-long-running", "非阻塞的长运行请求", nonblocked,
              policy.max_nonblocked_long_running, "non-blocked requests"),
         ):
             visible = values[:cap]
@@ -386,11 +430,25 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                                if _first(row, "elapsed_ms", "duration_ms") is not None else
                                _duration_seconds(row.get("duration_seconds")),
                      "wait": _first(row, "wait_type", "wait_event", "current_wait"),
+                     "wait_resource": row.get("wait_resource"),
                      "blocker": _first(row, "blocking_session_id", "blocking_pid", "blocking_sid"),
+                     "root_blocker": root_for(str(_session_id(row) or "")),
+                     "interpretation": ("明确的主动等待语句，不代表数据库资源瓶颈" if
+                         row.get("request_kind") == "ACTIVE_WAIT" else
+                         "长时间主动等待（WAITFOR）" if
+                         str(row.get("wait_type", "")).upper() == "WAITFOR" and
+                         isinstance(row.get("sql_text"), str) and
+                         re.search(r"\bWAITFOR\s+(DELAY|TIME)\b", row["sql_text"], re.IGNORECASE)
+                         else "WAITFOR 等待事件；SQL 文本不可用，语义需复核" if
+                         str(row.get("wait_type", "")).upper() == "WAITFOR" else None),
                      "database": _first(row, "database_name", "datname")} for row in visible]
             table = _table(rows, (("Session", ("session",)), ("Status", ("status",)),
                                   ("Elapsed", ("elapsed",)), ("Wait", ("wait",)),
-                                  ("Blocked By", ("blocker",)), ("Database", ("database",))))
+                                  ("Wait Resource", ("wait_resource",)),
+                                  ("Direct Blocker", ("blocker",)),
+                                  ("Root Blocker", ("root_blocker",)),
+                                  ("Observation", ("interpretation",)),
+                                  ("Database", ("database",))))
             blocks = tuple(block for row in visible
                            if (block := _sql_block(row, policy)) is not None)
             if values:
@@ -444,11 +502,16 @@ def _transaction_section(details: dict[str, Any], database_type: str,
         else:
             kind = _human(_first(row, "transaction_type", "type"))
             state = _human(_first(row, "transaction_state", "state"))
-        output.append({"session": _session_id(row),
+        session = row.get("trx_mysql_thread_id") if database_type == "mysql" else _session_id(row)
+        output.append({"session": session,
                        "transaction_id": _first(row, "transaction_id", "trx_id", "xid"),
-                       "begin": _local_time(_first(row, "transaction_begin_time", "begin_time"))
-                                if _first(row, "transaction_begin_time", "begin_time") is not None else "—",
-                       "age": _duration_seconds(age), "type": kind, "state": state})
+                       "begin": _local_time(_first(row, "transaction_begin_time", "begin_time",
+                                                     "trx_started"))
+                                if _first(row, "transaction_begin_time", "begin_time",
+                                          "trx_started") is not None else "—",
+                       "age": _duration_seconds(age), "type": kind,
+                       "state": _human(_first(row, "trx_state")) if database_type == "mysql"
+                       else state})
     shown = output[:policy.max_transactions]
     table = _table(shown, (("Session", ("session",)), ("Transaction ID", ("transaction_id",)),
                            ("Begin Time", ("begin",)), ("Age", ("age",)),
@@ -459,30 +522,38 @@ def _transaction_section(details: dict[str, Any], database_type: str,
 
 
 def _recovery_section(incident: IncidentSummary, details: dict[str, Any], scenario: str,
-                      database_type: str = "") -> ReportSection:
+                      database_type: str = "", report: DiagnosticReport | None = None) -> ReportSection:
     identity = {
         "sqlserver": "session_id、login_time、login_name、host_name、program_name、transaction identity",
         "postgresql": "pid、backend_start、xact_start、usename、application_name",
         "mysql": "connection_id、user、host、transaction id/start",
         "oracle": "SID、SERIAL#、INST_ID（适用时）、USERNAME、事务和 SQL 上下文",
     }.get(database_type, "会话标识、登录时间、用户、来源、事务及 SQL 上下文")
-    safety_fields = (("Manual Identity Recheck", identity),
-                     ("Termination Risk", "Kill != Immediate Recovery；可能发生回滚并增加 I/O、日志/Undo 压力和应用错误。"),
-                     ("Toolkit Executed", "NO"))
+    safety_fields = (("人工身份复核", identity),
+                     ("处置风险", "终止不等于立即恢复；可能发生回滚并增加 I/O、日志/Undo 压力和应用错误。"),
+                     ("Toolkit 是否执行", "否"))
     actions = incident.recovery_actions
     if not actions:
+        root_finding = next((finding for finding in report.findings
+                             if finding.title == "ROOT_BLOCKER"), None) if report else None
+        manual_action = (root_finding.evidence.get("manual_action", {})
+                         if root_finding is not None else {})
+        explicit_reason = (manual_action.get("reason")
+                           if isinstance(manual_action, dict) else None)
         if scenario == "disk-growth":
-            reason = "No automatic or destructive remediation is generated for disk-growth diagnosis."
+            reason = "空间诊断不会生成自动或破坏性修复操作。"
+        elif explicit_reason:
+            reason = f"未生成具体命令：{explicit_reason}"
         elif incident.data_completeness != "COMPLETE":
-            reason = "Evidence is incomplete; no safe termination action was generated."
+            reason = "完整 Profile 证据不完整；人工处置参考仍按根阻塞身份证据单独判定。"
         elif scenario != "slow":
-            reason = "No session recovery action applies to this diagnostic scenario."
+            reason = "此诊断场景不适用会话处置参考命令。"
         elif not isinstance(details.get("blocking_graph"), dict) or not details["blocking_graph"].get("roots"):
-            reason = "No confirmed root blocker with business impact was observed."
+            reason = "未观察到具有业务影响的已确认根阻塞。"
         else:
-            reason = "No safe, evidence-backed recovery action was generated."
+            reason = "当前证据不足以生成安全的人工处置参考。"
         return ReportSection("immediate-recovery", "Immediate Recovery", summary=reason,
-                             fields=(("DBA Approval Required", "YES if action is later approved"),
+                             fields=(("需要 DBA 审批", "如后续决定处置，必须先经 DBA 审核"),
                                      *safety_fields))
     rows = [{"session": action.target_session, "action": action.action_type,
              "reason": action.reason, "open_txn": action.open_transaction,
@@ -494,11 +565,12 @@ def _recovery_section(incident: IncidentSummary, details: dict[str, Any], scenar
                           ("Rollback Risk", ("risk",)), ("Rollback Duration", ("duration",)),
                           ("DBA Approval Required", ("approval",)),
                           ("Toolkit Executed", ("executed",))))
-    commands = tuple(ReportCodeBlock(f"Reference command for session {action.target_session} "
-                                     "(manual only)", action.reference_command, "sql")
+    commands = tuple(ReportCodeBlock(f"会话 {action.target_session} 参考语句（折叠；人工审核）",
+                                     action.reference_command, "sql", True)
                      for action in actions)
     return ReportSection("immediate-recovery", "Immediate Recovery", severity="WARNING",
-                         summary="Reference commands are text only. Recheck session identity immediately before manual use.",
+                         summary="以下仅为基于历史采样的参考文本；执行前必须重新核对会话身份。Toolkit 未执行。"
+                                 "回滚耗时未知，终止大事务可能增加日志占用、I/O 压力并引发应用错误。",
                          fields=safety_fields,
                          tables=(table,) if table else (), code_blocks=commands)
 
@@ -542,15 +614,15 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
                    for item in incident.missing_evidence]
     table = _table(quality, (("Collector", ("collector",)), ("Status", ("status",)),
                              ("Impact", ("impact",))))
-    summary = f"Data completeness: {incident.data_completeness}."
+    summary = f"证据完整性：{incident.data_completeness}。"
     if details.get("emergency_evidence_status"):
-        summary += (f" Emergency evidence: {details.get('emergency_evidence_status')}."
-                    f" Full profile evidence: {details.get('full_profile_evidence_status', 'UNKNOWN')}.")
+        summary += (f" 应急证据：{details.get('emergency_evidence_status')}。"
+                    f"完整配置证据：{details.get('full_profile_evidence_status', 'UNKNOWN')}。")
     if report.scenario == "disk-growth":
-        summary += (f" Required evidence: {incident.required_evidence_status}."
-                    f" Optional evidence: {incident.optional_evidence_status}.")
+        summary += (f" 必需证据：{incident.required_evidence_status}。"
+                    f"可选证据：{incident.optional_evidence_status}。")
     if details.get("incomplete"):
-        summary += " Snapshot is incomplete; absence of a finding is not proof of absence."
+        summary += " 当前采样不完整；未发现异常不代表异常不存在。"
     return ReportSection("collection-quality", "Collection Quality", summary=summary,
                          tables=(table,) if table else ())
 
@@ -579,15 +651,19 @@ def _finding_section(report: DiagnosticReport) -> ReportSection | None:
 def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                    details: dict[str, Any], policy: HumanReportPolicy) -> list[ReportSection]:
     sections: list[ReportSection] = [_recovery_section(incident, details, report.scenario,
-                                                       report.instance.db_type.value)]
+                                                       report.instance.db_type.value, report)]
     priority = [item for item in details.get("priority_candidates", []) if isinstance(item, dict)]
     priority_rows = [{"rank": item.get("rank"), "session": item.get("session_id"),
-                      "category": _human(item.get("category")), "reason": item.get("reason"),
+                      "category": _human(item.get("categories", item.get("category"))),
+                      "reason": item.get("reason"),
                       "user": item.get("username"), "host": item.get("host"),
                       "client_ip": item.get("client_ip"), "database": item.get("database"),
                       "application": item.get("application"), "state": item.get("state"),
                       "runtime": item.get("running_seconds"),
                       "sql_id": item.get("sql_id"), "transaction_id": item.get("transaction_id"),
+                      "mysql_connection_id": item.get("mysql_connection_id"),
+                      "performance_schema_thread_id": item.get("performance_schema_thread_id"),
+                      "sql_id_type": item.get("sql_id_type"),
                       "login_time": item.get("login_time"),
                       "transaction_age": item.get("transaction_age_seconds"),
                       "blocked_count": item.get("blocked_session_count"),
@@ -603,6 +679,9 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                                            ("Application", ("application",)), ("State", ("state",)),
                                            ("Runtime seconds", ("runtime",)),
                                            ("SQL identity", ("sql_id",)),
+                                           ("SQL identifier type", ("sql_id_type",)),
+                                           ("MySQL connection ID", ("mysql_connection_id",)),
+                                           ("Performance Schema THREAD_ID", ("performance_schema_thread_id",)),
                                            ("Transaction identity", ("transaction_id",)),
                                            ("Login time", ("login_time",)),
                                            ("Transaction age seconds", ("transaction_age",)),
@@ -614,6 +693,38 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
     sections.append(ReportSection("priority-candidates", "Priority Review Candidates",
                                   summary="候选仅用于人工核查，不代表 Toolkit 已验证当前会话身份或建议自动终止。",
                                   tables=(priority_table,) if priority_table else ()))
+    victims = _dict_rows(details.get("blocked_victims"))
+    if victims:
+        victim_rows = [{"session": row.get("processlist_id"),
+                        "direct_blocker": row.get("direct_blocker_id"),
+                        "root_blocker": row.get("root_blocker_id"),
+                        "request_runtime": _duration_ms(row.get("duration_ms"))
+                                           if row.get("duration_ms") is not None else None,
+                        "wait_detail": "可用" if row.get("wait_detail_available") else "不可用"}
+                       for row in victims]
+        table = _table(victim_rows, (("Session", ("session",)),
+                                     ("Direct Blocker", ("direct_blocker",)),
+                                     ("Root Blocker", ("root_blocker",)),
+                                     ("Request Runtime", ("request_runtime",)),
+                                     ("Wait Detail", ("wait_detail",))))
+        sections.append(ReportSection("blocked-victims", "Blocked Victims",
+                                      summary="按已采样阻塞关系单独列出受害会话，不生成终止建议。",
+                                      tables=(table,) if table else ()))
+    recent_section = _mysql_recent_statements_section(report, details)
+    if recent_section:
+        sections.append(recent_section)
+    active_waits = _dict_rows(details.get("active_waits"))
+    if active_waits:
+        wait_rows = [{"session": row.get("processlist_id"), "state": row.get("state_name"),
+                      "runtime": _duration_ms(row.get("duration_ms")),
+                      "interpretation": row.get("request_interpretation")}
+                     for row in active_waits]
+        table = _table(wait_rows, (("Session", ("session",)), ("Status", ("state",)),
+                                   ("Request Runtime", ("runtime",)),
+                                   ("Interpretation", ("interpretation",))))
+        sections.append(ReportSection("active-waits", "Active Wait Statements",
+                                      summary="仅对明确独立 SELECT SLEEP(...) 且状态为 User sleep 的语句分类。",
+                                      tables=(table,) if table else ()))
     if incident.root_cause_candidate:
         fields = tuple((_label(str(key)), _human(value))
                        for key, value in incident.root_cause_candidate.items())
@@ -628,12 +739,65 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
     if report.instance.db_type.value == "sqlserver" and plan_commands:
         sections.append(ReportSection(
             "execution-plan-follow-up", "Execution Plan Follow-up",
-            summary="Run a targeted plan collection only after reviewing the affected request.",
+            summary="当前 CLI 支持按会话采集执行计划。仅当目标会话仍有可用请求、权限和版本能力满足时才可成功；执行前先重新核对会话。",
             fields=tuple(plan_commands)))
     transaction = _transaction_section(details, report.instance.db_type.value, policy)
     if transaction:
         sections.append(transaction)
     return sections
+
+
+def _mysql_recent_statements_section(report: DiagnosticReport,
+                                     details: dict[str, Any]) -> ReportSection | None:
+    recent = _dict_rows(details.get("recent_statements"))
+    if report.instance.db_type.value != "mysql" or not recent:
+        return None
+    fields: list[tuple[str, str]] = []
+    blocks: list[ReportCodeBlock] = []
+    elapsed = details.get("recent_statements_elapsed_ms")
+    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) and elapsed >= 0:
+        elapsed_text = "<0.1" if elapsed < 0.1 else f"{elapsed:.1f}"
+    else:
+        elapsed_text = "未记录"
+    fields.append(("采集耗时（毫秒）", elapsed_text))
+    for target in recent[:5]:
+        session_id = target.get("session_id", "不可用")
+        fields.append((f"连接 {session_id} 状态", str(target.get("evidence_status", "UNKNOWN"))))
+        if target.get("limit_reached"):
+            fields.append((f"连接 {session_id} 采集上限",
+                           "已达到每连接5条记录上限；是否还有更早事件未知"))
+        elif target.get("truncated"):
+            fields.append((f"连接 {session_id} 采集上限", "存在未显示的历史记录"))
+        if target.get("reason"):
+            fields.append((f"连接 {session_id} 说明", str(target["reason"])))
+        statements = target.get("statements", [])
+        if not isinstance(statements, list):
+            continue
+        for statement in statements[:5]:
+            if not isinstance(statement, dict):
+                continue
+            event_id = statement.get("event_id", "不可用")
+            fields.extend((("连接 ID", str(statement.get("session_id", session_id))),
+                           ("事件 ID", str(event_id)),
+                           ("执行耗时（毫秒）", str(statement.get("duration_ms", "不可用"))),
+                           ("数据来源", str(statement.get("source", "未知"))),
+                           ("证据状态", str(statement.get("evidence_status", "UNKNOWN"))),
+                           ("SQL 文本截断", "是" if statement.get("truncated") else "否")))
+            sql = statement.get("sql_text_redacted")
+            if isinstance(sql, str):
+                clipped = sql[:1000]
+                text_truncated = len(sql) > 1000
+                title = f"连接 {session_id} 事件 {event_id}"
+                if statement.get("truncated") or text_truncated:
+                    title += " (truncated)"
+                if text_truncated:
+                    clipped += "\n[SQL text omitted by 1000 character report limit.]"
+                blocks.append(ReportCodeBlock(title, clipped,
+                                              language="sql", collapsed=True))
+    return ReportSection(
+        "mysql-recent-statements", "Recent SQL Evidence",
+        summary="最近执行 SQL；不保证属于当前事务，也不保证是持锁 SQL。SQL 文本已脱敏并折叠显示。",
+        fields=tuple(fields), code_blocks=tuple(blocks))
 
 
 def _disk_growth_sections(details: dict[str, Any]) -> list[ReportSection]:
@@ -849,13 +1013,14 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
     if report.scenario == "slow":
         sections = _slow_sections(report, incident, details, policy)
     elif report.scenario == "plan":
-        sections = [_recovery_section(incident, details, report.scenario, instance.db_type.value),
+        sections = [_recovery_section(incident, details, report.scenario, instance.db_type.value, report),
                     *_plan_sections(details, plan_artifact, policy)]
     elif report.scenario == "replication":
         sections = _replication_sections(report, policy)
     else:
         sections = _disk_growth_sections(details)
-        sections.insert(0, _recovery_section(incident, details, report.scenario, instance.db_type.value))
+        sections.insert(0, _recovery_section(incident, details, report.scenario,
+                                             instance.db_type.value, report))
     findings = _finding_section(report)
     if findings:
         sections.append(findings)
@@ -870,6 +1035,8 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
         "Findings and Recommendations": "诊断发现与建议", "Database Space": "数据文件与表空间",
         "Transaction Log": "事务日志与保留证据", "Other Storage Evidence": "空间与日志证据",
         "Diagnostic Context": "未获取的证据与诊断上下文", "Priority Review Candidates": "优先核查对象",
+        "Blocked Victims": "被阻塞会话", "Active Wait Statements": "主动等待语句",
+        "Transaction Identity Quality": "事务身份质量",
     }
     headers = {"Rank": "排序", "Session": "会话", "Type": "类型", "Reason": "入选原因",
                "User": "用户", "Host": "主机", "Client IP": "客户端 IP", "Database": "数据库",
@@ -878,6 +1045,12 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
                "SQL identity": "SQL 标识", "Transaction identity": "事务标识", "Login time": "登录时间",
                "Blocked session count": "影响会话数", "Evidence timestamp": "证据时间",
                "Identity quality": "身份信息质量", "Identity reuse note": "会话 ID 复用提示",
+               "MySQL connection ID": "MySQL 连接 ID",
+               "Performance Schema THREAD_ID": "Performance Schema THREAD_ID",
+               "Request Runtime": "当前请求时长", "Wait Detail": "等待详情",
+               "Direct Blocker": "直接阻塞者", "Root Blocker": "根阻塞者",
+               "Interpretation": "说明",
+               "Transaction Identity Quality": "事务身份质量",
                "Identity recheck": "身份复核", "Finding": "发现", "Severity": "严重程度",
                "Recommendation": "建议", "Database ID": "数据库 ID", "Instance": "实例",
                "Database Type": "数据库类型", "Version": "版本", "Scenario": "诊断场景",

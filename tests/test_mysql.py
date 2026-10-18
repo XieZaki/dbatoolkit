@@ -32,7 +32,7 @@ INSTANCE = DatabaseInstance("my", "MySQL", DatabaseType.MYSQL, "test.invalid", 3
 PREFLIGHT = {"server_version": "8.0.44", "monitor_user": "toolkit_monitor@%",
              "active_roles": "NONE", "performance_schema_enabled": 1,
              "connection_id": 9, "privileged_grants": 0, "non_readonly_grants": 0,
-             "statements_consumer": 1, "waits_consumer": 1}
+             "statements_consumer": 1, "waits_consumer": 1, "history_consumer": 1}
 
 
 class FakeCursor:
@@ -45,10 +45,11 @@ class FakeCursor:
         self.offset = 0
         self.closed = False
 
-    def execute(self, sql: str) -> None:
+    def execute(self, sql: str, parameters: tuple[int, ...] | None = None) -> None:
         name = self.connection.scripts[sql]
         self.script_name = name
         self.connection.executed.append(name)
+        self.connection.executed_parameters.append(parameters)
         if name in self.connection.failures:
             raise self.connection.failures[name]
         self.rows = list(self.connection.results.get(name, []))
@@ -80,6 +81,7 @@ class FakeConnection:
         }
         self.failures: dict[str, BaseException] = {}
         self.executed: list[str] = []
+        self.executed_parameters: list[tuple[int, ...] | None] = []
         self.cursors: list[FakeCursor] = []
         self.closed = False
         self.autocommit = True
@@ -151,12 +153,46 @@ def test_adapter_preflight_credentials_timeout_registry_and_cleanup() -> None:
         assert driver.options["connect_timeout"] == 5
         assert driver.options["read_timeout"] == 5
         assert driver.options["write_timeout"] == 5
+        assert target.preflight_checks["statement_history_consumer"]
+        assert "recent_statements" not in driver.connection.executed
         assert PASSWORD not in repr(target)
         before = len(driver.connection.executed)
-        rejected = target.execute_readonly("SELECT 1")  # type: ignore[arg-type]
-        assert not rejected.success and rejected.error_type == "RegistryRejected"
+        parameterized_rejected = target.execute_readonly("SELECT %s", (1,))  # type: ignore[arg-type]
+        assert not parameterized_rejected.success and parameterized_rejected.error_type == "RegistryRejected"
         assert len(driver.connection.executed) == before
+
+
+def test_recent_statement_query_uses_bound_ids_and_registered_script() -> None:
+    target, driver = adapter()
+    script = target.registry.get("recent_statements", DatabaseType.MYSQL)
+    driver.connection.results["recent_statements"] = [{
+        "session_id": 36, "thread_id": 78, "event_id": 105,
+        "duration_ms": 1, "sql_text": "SELECT 1", "sql_text_truncated": 0,
+    }]
+    with target:
+        result = target.execute_readonly(script, (78, 36, 78))
+        assert result.success
+        assert driver.connection.executed[-1] == "recent_statements"
+        assert driver.connection.executed_parameters[-1] == (78, 36, 78)
     assert driver.connection.closed and all(item.closed for item in driver.connection.cursors)
+    unbound_target, _ = adapter()
+    with unbound_target:
+        rejected = unbound_target.execute_readonly("SELECT 1")  # type: ignore[arg-type]
+        assert not rejected.success and rejected.error_type == "RegistryRejected"
+
+
+def test_recent_statement_exactly_five_rows_reaches_limit_without_claiming_truncation() -> None:
+    target, driver = adapter()
+    script = target.registry.get("recent_statements", DatabaseType.MYSQL)
+    driver.connection.results["recent_statements"] = [
+        {"session_id": 36, "thread_id": 78, "event_id": event_id,
+         "duration_ms": 1, "sql_text": "SELECT 1", "sql_text_truncated": 0}
+        for event_id in range(5, 0, -1)
+    ]
+    with target:
+        result = target.execute_readonly(script, (78, 36, 78))
+    assert result.success and result.row_count == 5
+    assert not result.truncated
 
 
 def test_mysql57_preflight_does_not_execute_mysql80_role_function() -> None:
@@ -630,13 +666,141 @@ def test_sleep_transaction_multilevel_roots_references_and_markdown() -> None:
     assert report.details["idle_transactions"][0]["last_sql"] is None
     refs = next(item.reference_commands for item in report.findings
                 if item.title == "ROOT_BLOCKER" and item.session == "1")
-    assert [item.text for item in refs] == ["KILL QUERY 1;", "KILL 1;"]
+    assert [item.text for item in refs] == ["KILL CONNECTION 1;"]
     assert all(not hasattr(item, "execute") for item in refs)
     assert "Toolkit did not execute" in render_console(report)
     for heading in ("Summary", "Concurrency", "Long Running SQL", "Blocking Tree",
                     "Root Blocker", "Transactions", "Idle Transactions", "Session Source",
                     "Findings", "Recommendations", "Reference Commands"):
         assert f"## {heading}" in render_markdown(report)
+
+
+def test_mysql_processlist_id_is_reference_target_when_optional_wait_detail_is_partial() -> None:
+    session_row = {**session(26, "Sleep"), "thread_id": 68}
+    now = datetime.now(timezone.utc)
+    report = build_slow_report(INSTANCE, (
+        result("active_sessions", [session_row]),
+        CollectorResult("my", "active_requests", now, now, 1.0, (), 0, False, False,
+                        error_type="CapabilityUnavailable"),
+        result("transactions", [{"trx_mysql_thread_id": 26, "thread_id": 68,
+                                 "trx_id": "4272", "trx_started": None,
+                                 "transaction_age_seconds": None}]),
+        result("blocking", [{"blocked_pid": 30, "blocker_pid": 26},
+                             {"blocked_pid": 31, "blocker_pid": 30}]),
+    ), MySQLSettings(), "8.4.0", statement_script="active_requests_no_waits",
+        required_collectors=("active_sessions", "transactions", "blocking"))
+    root = next(item for item in report.findings
+                if item.title == "ROOT_BLOCKER" and item.session == "26")
+    assert report.details["data_visibility"] == "PARTIAL"
+    assert [command.text for command in root.reference_commands] == ["KILL CONNECTION 26;"]
+    assert "68" not in " ".join(command.text for command in root.reference_commands)
+    assert "4272" not in " ".join(command.text for command in root.reference_commands)
+    assert root.evidence["manual_action"]["identity_evidence"]["thread_id"] == 68
+    assert root.evidence["manual_action"]["identity_evidence"]["trx_id"] == "4272"
+    assert not any(hasattr(command, "execute") for command in root.reference_commands)
+
+
+def test_mysql_suppresses_reference_for_transaction_identity_conflict() -> None:
+    report = build_slow_report(INSTANCE, (
+        result("active_sessions", [{**session(26, "Sleep"), "thread_id": 68}]),
+        result("active_requests", []),
+        result("transactions", [{"trx_mysql_thread_id": 26, "thread_id": 99,
+                                 "trx_id": "4272", "trx_started": "2026-10-18"}]),
+        result("blocking", [{"blocked_pid": 30, "blocker_pid": 26}]),
+    ), MySQLSettings(), "8.4.0")
+    root = next(item for item in report.findings
+                if item.title == "ROOT_BLOCKER" and item.session == "26")
+    assert not root.reference_commands
+    assert root.evidence["manual_action"]["status"] == "SUPPRESSED"
+    assert "Conflicting" in root.evidence["manual_action"]["reason"]
+
+
+def test_mysql_realistic_blocking_chain_threshold_sleep_and_transaction_identity() -> None:
+    from dba.incident import (
+        build_incident_summary,
+        build_priority_candidates,
+        manual_action_decisions,
+    )
+    from dba.presentation import render_emergency_triage, render_json
+    from dba.reporting import HtmlReportRenderer, build_report_model
+
+    rows = (
+        result("active_sessions", [
+            {**session(29, "Sleep"), "thread_id": 72},
+            session(30),
+            {**session(31), "state_name": "User sleep", "sql_text": "SELECT SLEEP(115)"},
+            session(32),
+        ]),
+        result("active_requests", [
+            {**session(30), "duration_ms": 6000, "current_wait": None},
+            {**session(31), "duration_ms": 6000, "current_wait": None,
+             "state_name": "User sleep", "sql_text": "SELECT SLEEP(115)"},
+            {**session(32), "duration_ms": 5500, "current_wait": None},
+        ]),
+        result("transactions", [{"trx_mysql_thread_id": 29, "thread_id": 72,
+                                 "trx_id": "4282", "trx_started": "2026-10-18 23:14:32",
+                                 "transaction_age_seconds": 6, "trx_state": "LOCK WAIT"}]),
+        result("blocking", [{"blocked_pid": 30, "blocker_pid": 29},
+                             {"blocked_pid": 32, "blocker_pid": 30}]),
+    )
+    report = build_slow_report(INSTANCE, rows, MySQLSettings(long_running_seconds=10),
+                               "8.4.11", statement_script="active_requests_no_waits")
+    candidates = build_priority_candidates(report)
+    assert [item["session_id"] for item in candidates] == [29]
+    assert not any(item.title == "LONG_RUNNING_SQL" for item in report.findings)
+    assert [(row["processlist_id"], row["direct_blocker_id"], row["root_blocker_id"])
+            for row in report.details["blocked_victims"]] == [(30, 29, 29), (32, 30, 29)]
+    assert [row["processlist_id"] for row in report.details["active_waits"]] == [31]
+    assert report.details["roots"][0]["transaction_id"] == "4282"
+    assert report.details["roots"][0]["transaction_identity_quality"] == "VERIFIED"
+    summary = build_incident_summary(report)
+    assert summary.root_cause_candidate is not None
+    assert summary.root_cause_candidate["transaction_id"] == "4282"
+    assert summary.root_cause_candidate["transaction_identity_quality"] == "VERIFIED"
+    report.details["priority_candidates"] = candidates
+    report.details["manual_action_decisions"] = manual_action_decisions(report)
+    html = HtmlReportRenderer().render(build_report_model(report, summary))
+    json_report = render_json(report)
+    assert "4282" in html and "事务关联已核验" in html
+    assert "被阻塞会话" in html and "主动等待语句" in html
+    assert "KILL CONNECTION 29;" in html
+    assert '"trx_id": "4282"' in json_report and '"transaction_identity_quality": "VERIFIED"' in json_report
+    assert '"target": 29' in json_report and '"trx_id": 29' not in json_report
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert [command.text for command in root.reference_commands] == ["KILL CONNECTION 29;"]
+    assert all("THREAD_ID" not in command.text and "4282" not in command.text
+               for command in root.reference_commands)
+    text = render_emergency_triage(report, candidates, capture_started_at="2026-10-18T23:14:32+08:00")
+    assert "会话30" in text and "会话32" in text and "主动等待语句" in text
+    assert "Performance Schema THREAD_ID：72" in text
+    assert "InnoDB 事务 ID：4282" in text
+    assert "KILL CONNECTION 29;" in text
+    assert "会话31｜长运行 SQL" not in text
+
+
+@pytest.mark.parametrize(("elapsed", "is_long"), [(5500, False), (6000, False), (10000, True), (11000, True)])
+def test_mysql_slow_threshold_boundary(elapsed: int, is_long: bool) -> None:
+    rows = (result("active_sessions", [session(7)]),
+            result("active_requests", [{**session(7), "duration_ms": elapsed}]),
+            result("transactions", []), result("blocking", []))
+    report = build_slow_report(INSTANCE, rows, MySQLSettings(long_running_seconds=10), "8.4.11")
+    finding = next((item for item in report.findings if item.title == "LONG_RUNNING_SQL"), None)
+    assert (finding is not None) is is_long
+    assert bool(report.details["long_running"]) is is_long
+
+
+def test_long_standalone_sleep_keeps_wait_interpretation_without_review_candidate() -> None:
+    from dba.incident import build_priority_candidates
+
+    rows = (result("active_sessions", [{**session(31), "state_name": "User sleep",
+                                        "sql_text": "SELECT SLEEP(115)"}]),
+            result("active_requests", [{**session(31), "state_name": "User sleep",
+                                         "sql_text": "SELECT SLEEP(115)", "duration_ms": 15000}]),
+            result("transactions", []), result("blocking", []))
+    report = build_slow_report(INSTANCE, rows, MySQLSettings(long_running_seconds=10), "8.4.11")
+    assert report.details["long_running"][0]["request_kind"] == "ACTIVE_WAIT"
+    assert [row["processlist_id"] for row in report.details["active_waits"]] == [31]
+    assert not build_priority_candidates(report)
 
 
 def test_cycle_and_incomplete_suppress_references() -> None:

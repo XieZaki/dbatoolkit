@@ -140,6 +140,7 @@ def test_idle_transaction_evidence_source_age_and_last_sql() -> None:
             {
                 "session_id": 51,
                 "transaction_id": 7,
+                "login_time": "2026-10-13T09:00:00",
                 "transaction_state": 2,
                 "transaction_type": 1,
                 "transaction_age_seconds": 5862,
@@ -150,6 +151,7 @@ def test_idle_transaction_evidence_source_age_and_last_sql() -> None:
     )
     root = value.details["roots"][0]
     assert root["transaction_age_seconds"] == 5862 and root["client_net_address"] == "10.0.0.1"
+    assert root["transaction_id"] == 7 and root["transaction_identity_quality"] == "CONFIRMED"
     assert root["last_sql"] == ["UPDATE fixture"] and root["host_name"] == "app"
     finding = next(f for f in value.findings if f.title == "IDLE_TRANSACTION_BLOCKER")
     assert finding.severity.value == "CRITICAL" and finding.evidence["transactions"]
@@ -166,6 +168,71 @@ def test_idle_requires_unfinished_dmv_transaction(state: int | None) -> None:
         [{"session_id": 51, "transaction_state": state, "transaction_type": 1}],
     )
     assert "IDLE_TRANSACTION_BLOCKER" not in [f.title for f in value.findings]
+
+
+def test_root_transaction_id_requires_unique_identity_and_same_login_time() -> None:
+    session = {"session_id": 51, "status": "sleeping", "login_time": "2026-10-13T09:00:00",
+               "open_transaction_count": 1, "login_name": "monitor", "host_name": "app",
+               "program_name": "client"}
+    tx = {"session_id": 51, "login_time": "2026-10-13T09:00:00", "transaction_id": 376008,
+          "transaction_state": 2, "transaction_type": 1, "transaction_age_seconds": 174}
+    root_report = report([edge(56, 51)], [session], [tx])
+    root = root_report.details["roots"][0]
+    assert root["transaction_id"] == 376008
+    assert root["status"] == "sleeping" and root["transaction_identity_quality"] == "CONFIRMED"
+
+    ambiguous = report([edge(56, 51)], [session], [tx, {**tx, "transaction_id": 376009}])
+    assert ambiguous.details["roots"][0]["transaction_id"] is None
+    assert ambiguous.details["roots"][0]["transaction_identity_quality"] == "AMBIGUOUS"
+    assert not any(f.reference_commands for f in ambiguous.findings)
+
+    reused = report([edge(56, 51)], [session], [{**tx, "login_time": "2026-10-13T10:00:00"}])
+    assert reused.details["roots"][0]["transaction_id"] is None
+    assert reused.details["roots"][0]["transaction_identity_quality"] == "RECHECK_REQUIRED"
+    assert not any(f.reference_commands for f in reused.findings)
+
+
+def test_root_reference_does_not_depend_on_optional_connection_address_collector() -> None:
+    login_time = "2026-10-18T10:00:00"
+    value = build_slow_report(INSTANCE, (
+        sample("active_requests", [edge(56, 58, status="suspended")]),
+        sample("active_sessions", [
+            {"session_id": 58, "status": "sleeping", "login_time": login_time,
+             "login_name": "app", "host_name": "worker", "program_name": "orders",
+             "open_transaction_count": 1},
+            {"session_id": 56, "status": "suspended", "login_time": login_time,
+             "login_name": "app", "host_name": "worker", "program_name": "orders"},
+        ]),
+        sample("transactions", [{"session_id": 58, "login_time": login_time,
+                                  "transaction_id": 376008, "transaction_state": 2,
+                                  "transaction_type": 1, "transaction_age_seconds": 174}]),
+    ), SQLServerSettings())
+    root = next(finding for finding in value.findings if finding.title == "ROOT_BLOCKER")
+    assert [command.text for command in root.reference_commands] == ["KILL 58;"]
+    assert root.evidence["manual_action"]["status"] == "AVAILABLE"
+
+
+def test_sqlserver_blocking_chain_keeps_root_transaction_separate_from_victims() -> None:
+    sessions = [{"session_id": sid, "status": "sleeping" if sid == 58 else "suspended",
+                 "login_time": f"2026-10-18T13:{sid}:00", "login_name": f"app{sid}",
+                 "host_name": "simulator", "program_name": "incident-test",
+                 "open_transaction_count": 2 if sid != 58 else 1}
+                for sid in (58, 56, 59)]
+    transactions = [{"session_id": sid, "login_time": f"2026-10-18T13:{sid}:00",
+                     "transaction_id": txid, "transaction_state": 2, "transaction_type": 1,
+                     "transaction_age_seconds": 174}
+                    for sid, txid in ((58, 376008), (56, 376018), (59, 376027))]
+    value = report([edge(56, 58, wait_type="LCK_M_X", wait_time_ms=173000),
+                    edge(59, 56, wait_type="LCK_M_X", wait_time_ms=173000)],
+                   sessions, transactions)
+    root = value.details["roots"][0]
+    assert root["session_id"] == 58
+    assert root["transaction_id"] == 376008
+    assert root["transaction_identity_quality"] == "CONFIRMED"
+    children = value.details["blocking_graph"]["children"]
+    assert root["blocked_session_count"] == 2 and len(children.get("58", children.get(58, []))) == 1
+    assert {row["transaction_id"] for row in value.details["transactions"]} == {
+        376008, 376018, 376027}
 
 
 def test_missing_root_ip_sql_and_legacy_fields() -> None:

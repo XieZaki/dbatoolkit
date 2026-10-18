@@ -241,8 +241,6 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
                default=None) if isinstance(roots, list) else None
     root_count = _int(_first(root or {}, "blocked_count", "blocked_session_count")) or 0
     root_session = _first(root or {}, "session_id", "pid", "processlist_id", "sid")
-    identity_known = (type(root_session) is int and root_session > 0
-                      or isinstance(root_session, str) and root_session.strip())
     transaction = _is_open_transaction(root or {})
     root_candidate: dict[str, Any] | None = None
     source: dict[str, Any] | None = None
@@ -255,6 +253,8 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
             "blocked_sessions": root_count,
             "open_transaction": "YES" if transaction else "NO" if transaction is False else "UNKNOWN",
             "transaction_age_seconds": _int(root.get("transaction_age_seconds")),
+            "transaction_id": _first(root, "transaction_id", "trx_id"),
+            "transaction_identity_quality": root.get("transaction_identity_quality", "UNKNOWN"),
         }
         source = {key: value for key, value in {
             "login": _first(root, "login_name", "usename", "user_name", "username"),
@@ -296,30 +296,43 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
     wait = _wait_summary(details)
 
     actions: list[RecoveryAction] = []
-    evidence_complete = completeness == "COMPLETE" and not details.get("blocking_graph", {}).get("anomalies")
-    if root and root_count > 0 and identity_known and evidence_complete:
-        root_finding = next((f for f in findings if f.title == "ROOT_BLOCKER"
-                             and f.reference_commands and (
-                                 str(f.session) == str(root_session)
-                                 or str(_first(f.evidence, "sid", "pid", "session_id",
-                                               "processlist_id")) == str(root_session)
-                             )), None)
-        commands: tuple[ReferenceCommand, ...] = root_finding.reference_commands if root_finding else ()
-        if commands:
-            rollback = "HIGH" if transaction else "LOW" if transaction is False else "UNKNOWN"
-            for command in commands:
-                command_upper = command.text.upper()
-                action_type = ("CANCEL_QUERY" if "PG_CANCEL_BACKEND" in command_upper
-                               or "KILL QUERY" in command_upper else "TERMINATE_SESSION")
-                actions.append(RecoveryAction(
-                    action_type=action_type,
-                    target_session=str(root_session),
-                    reason=f"Root blocker affecting {root_count} sessions",
-                    reference_command=command.text,
-                    open_transaction="YES" if transaction else "NO" if transaction is False else "UNKNOWN",
-                    rollback_risk=rollback,
-                    evidence_complete=True,
-                ))
+    graph = details.get("blocking_graph", {})
+    graph_reliable = not isinstance(graph, dict) or not graph.get("anomalies")
+    emergency_complete = details.get(
+        "emergency_evidence_complete", not details.get("incomplete", False))
+    if graph_reliable:
+        for root_finding in (finding for finding in findings if finding.title == "ROOT_BLOCKER"):
+            finding_root = root_finding.evidence
+            finding_session = root_finding.session or _first(
+                finding_root, "session_id", "pid", "processlist_id", "sid")
+            finding_impact = _int(_first(finding_root, "blocked_count", "blocked_session_count")) or 0
+            if not finding_impact or finding_session in (None, ""):
+                continue
+            commands: tuple[ReferenceCommand, ...] = root_finding.reference_commands
+            root_manual_action = finding_root.get("manual_action", {})
+            producer_approved = (isinstance(root_manual_action, dict)
+                                 and root_manual_action.get("status") == "AVAILABLE")
+            if commands and (producer_approved or emergency_complete):
+                # Transaction existence alone does not measure rollback work.
+                rollback = "UNKNOWN"
+                open_transaction = _is_open_transaction(finding_root)
+                for command in commands:
+                    command_upper = command.text.upper()
+                    action_type = ("CANCEL_QUERY" if "PG_CANCEL_BACKEND" in command_upper
+                                   or "KILL QUERY" in command_upper else "TERMINATE_SESSION")
+                    actions.append(RecoveryAction(
+                        action_type=action_type,
+                        target_session=str(finding_session),
+                        reason=f"Root blocker affecting {finding_impact} sessions",
+                        reference_command=command.text,
+                        open_transaction="YES" if open_transaction else
+                        "NO" if open_transaction is False else "UNKNOWN",
+                        rollback_risk=rollback,
+                        # The command's producer applies database-specific identity
+                        # gates. Optional profile completeness must not erase a
+                        # separately validated emergency root-blocker reference.
+                        evidence_complete=True,
+                    ))
 
     immediate = None
     if active_now:
@@ -380,6 +393,37 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
         collector_summary=collector_summary)
 
 
+def manual_action_decisions(report: DiagnosticReport) -> tuple[dict[str, Any], ...]:
+    """Expose the same evidence-backed manual-action decision to every presenter."""
+    decisions: list[dict[str, Any]] = []
+    for finding in report.findings:
+        if finding.title != "ROOT_BLOCKER":
+            continue
+        evidence = finding.evidence
+        detail = evidence.get("manual_action", {})
+        if not isinstance(detail, dict):
+            detail = {}
+        commands = tuple(command.text for command in finding.reference_commands)
+        producer_approved = detail.get("status") == "AVAILABLE"
+        report_details = getattr(report, "details", {})
+        emergency_complete = report_details.get(
+            "emergency_evidence_complete", not report_details.get("incomplete", False))
+        available = bool(commands) and (producer_approved or emergency_complete)
+        decisions.append({
+            "status": "AVAILABLE" if available else str(detail.get("status", "SUPPRESSED")),
+            "target_session": finding.session or _first(
+                evidence, "session_id", "pid", "processlist_id", "sid"),
+            "target_type": detail.get("target_type", "SESSION_ID"),
+            "commands": commands if available else (),
+            "reason": None if available else detail.get(
+                "reason", "Emergency root-blocker evidence is incomplete or identity evidence is insufficient."),
+            "identity_evidence": detail.get("identity_evidence", evidence),
+            "recheck_required": True,
+            "toolkit_executed": False,
+        })
+    return tuple(decisions)
+
+
 def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any], ...]:
     """Create a deterministic five-row review queue from captured slow evidence."""
     if report.scenario != "slow":
@@ -409,7 +453,16 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
         inst_id = row.get("inst_id")
         identity_key = f"{inst_id}:{sid}" if inst_id is not None else str(sid)
         previous = selected.get(identity_key)
-        if previous is not None and int(previous["selection_priority"]) <= priority:
+        if previous is not None:
+            categories = list(previous.get("categories", (previous.get("category"),)))
+            if kind not in categories:
+                categories.append(kind)
+            reasons = list(previous.get("reasons", (previous.get("reason", ""),)))
+            if reason not in reasons:
+                reasons.append(reason)
+            previous["categories"] = categories
+            previous["reasons"] = reasons
+            previous["reason"] = "；".join(reasons)
             return
         session_key = f"{inst_id}:{sid}" if inst_id is not None else str(sid)
         session = session_map.get(session_key, {})
@@ -429,12 +482,36 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
         if running is None:
             elapsed = _first(row, "elapsed_ms", "duration_ms")
             running = round(elapsed / 1000, 1) if type(elapsed) in (int, float) else None
+        transaction_quality = row.get("transaction_identity_quality")
+        if transaction_quality in {"AMBIGUOUS", "RECHECK_REQUIRED"}:
+            reason = f"{reason} 事务身份：{transaction_quality}，需重新核验。"
+        login_identity = (_first(row, "login_time", "backend_start", "connect_time") or
+                          _first(session, "login_time", "backend_start", "connect_time"))
+        if report.instance.db_type.value == "mysql" and transaction_quality == "VERIFIED":
+            identity_quality = "VERIFIED"
+        elif transaction_quality in {"AMBIGUOUS", "IDENTITY_INCOMPLETE", "RECHECK_REQUIRED"}:
+            identity_quality = str(transaction_quality)
+        else:
+            identity_quality = "IDENTITY_INCOMPLETE" if not login_identity else "RECHECK_REQUIRED"
+        sql_id = _first(row, "sql_id", "sql_handle", "query_id", "digest") or \
+            _first(request, "sql_id", "sql_handle", "query_id", "digest")
+        sql_id_type = next((key for key in ("sql_id", "sql_handle", "query_id", "digest")
+                            if row.get(key) is not None), None) or \
+            next((key for key in ("sql_id", "sql_handle", "query_id", "digest")
+                  if request.get(key) is not None), None)
         selected[identity_key] = {
-            "session_id": sid, "category": kind, "reason": reason,
+            "session_id": sid, "category": kind, "categories": [kind],
+            "reason": reason, "reasons": [reason],
             "session_key": identity_key,
             "blocked_session_count": blocked if type(blocked) is int else 0,
-            "sql_id": _first(row, "sql_id", "sql_handle", "query_id", "thread_id") or
-                      _first(request, "sql_id", "sql_handle", "query_id", "thread_id"),
+            "sql_id": sql_id,
+            "sql_id_type": sql_id_type,
+            "mysql_connection_id": _first(row, "processlist_id") or
+                                   _first(request, "processlist_id")
+                                   if report.instance.db_type.value == "mysql" else None,
+            "performance_schema_thread_id": _first(row, "thread_id") or
+                                             _first(request, "thread_id")
+                                             if report.instance.db_type.value == "mysql" else None,
             "transaction_id": _first(row, "transaction_id", "trx_id", "xid"),
             "username": _first(row, "login_name", "usename", "user_name", "username") or
                         _first(session, "login_name", "usename", "user_name", "username"),
@@ -455,9 +532,7 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
             "selection_priority": priority, "evidence_timestamp": captured,
             "evidence_quality": details.get("emergency_evidence_status", "UNKNOWN"),
             "identity_recheck": "REQUIRED_BEFORE_MANUAL_ACTION",
-            "identity_quality": "IDENTITY_INCOMPLETE" if not (
-                _first(row, "login_time", "backend_start", "connect_time") or
-                _first(session, "login_time", "backend_start", "connect_time")) else "RECHECK_REQUIRED",
+            "identity_quality": identity_quality,
             "identity_reuse_note": "会话 ID 可能已复用；必须在人工操作前重新核对当前会话身份。",
         }
 
@@ -468,14 +543,41 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
         if isinstance(row, dict):
             add(row, "IDLE_OPEN_TRANSACTION", 1, "会话与未结束事务证据关联。")
     requests = details.get("all_requests", details.get("active_requests", details.get("top_queries", [])))
-    for row in requests if isinstance(requests, list) else []:
+    long_finding = next((item for item in report.findings if item.title == "LONG_RUNNING_SQL"), None)
+    threshold = long_finding.evidence.get("threshold_seconds") if long_finding else None
+    graph = details.get("blocking_graph", {})
+    blocked_ids: set[str] = set()
+    if isinstance(graph, dict) and isinstance(graph.get("children"), dict):
+        blocked_ids = {str(child) for children in graph["children"].values()
+                       if isinstance(children, list) for child in children}
+    configured_long = details.get("long_running", [])
+    long_rows = [item for item in configured_long if isinstance(item, dict)] \
+        if isinstance(configured_long, list) else []
+    if not long_rows and isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
+        candidates = requests if isinstance(requests, list) else []
+        for request in candidates:
+            if not isinstance(request, dict):
+                continue
+            elapsed = _first(request, "elapsed_ms", "duration_ms")
+            if elapsed is None:
+                seconds = _first(request, "duration_seconds", "time_seconds")
+                elapsed = seconds * 1000 if isinstance(seconds, (int, float)) else None
+            if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) \
+                    and elapsed >= float(threshold) * 1000:
+                long_rows.append(request)
+    for row in long_rows:
         if not isinstance(row, dict):
+            continue
+        sid = _first(row, "session_id", "pid", "processlist_id", "sid")
+        if sid is None or str(sid) in blocked_ids:
             continue
         blocker = _first(row, "blocking_session_id", "blocking_pid", "blocker_pid")
         if blocker not in (None, 0, "0", ""):
-            add(row, "BLOCKED_VICTIM", 2, "被阻塞会话是受害方，不应作为根因处理。")
-        elif _first(row, "duration_seconds", "time_seconds", "elapsed_ms", "duration_ms"):
-            add(row, "LONG_RUNNING_SQL", 3, "长运行 SQL 是核查线索，不构成终止建议。")
+            continue
+        if row.get("request_kind") == "ACTIVE_WAIT":
+            continue
+        add(row, "LONG_RUNNING_SQL", 3,
+            "已达到配置的长运行阈值；仅作为人工核查线索。")
     ordered = sorted(selected.values(), key=lambda row: (
         int(row["selection_priority"]), -int(row["blocked_session_count"]),
         -int(row["transaction_age_seconds"] or 0) if type(row["transaction_age_seconds"]) is int else 0,

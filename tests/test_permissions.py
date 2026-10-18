@@ -116,6 +116,7 @@ def test_registry_sql_scanner_stays_aligned() -> None:
                         VERSION_DETECTION_PRIVILEGES.get(database_type, ()))
         assert objects <= declared
     assert "show binary logs" in scanned[DatabaseType.MYSQL]
+    assert "performance_schema.events_statements_history" in scanned[DatabaseType.MYSQL]
 
 
 def test_permission_registry_preflight_alignment() -> None:
@@ -133,6 +134,8 @@ def test_permission_registry_preflight_alignment() -> None:
     assert "read_all_stats" in postgres and "read_all_settings" in postgres
     mysql = (ROOT / "sql/mysql/preflight.sql").read_text(encoding="utf-8").lower()
     assert "replication client" in mysql
+    assert "events_statements_history" in mysql
+    assert "history_consumer" in mysql
     oracle = (ROOT / "dba/oracle.py").read_text(encoding="utf-8")
     for view in ("V_$INSTANCE", "V_$DATABASE", "V_$SESSION", "V_$SQL", "V_$TRANSACTION"):
         assert view in oracle

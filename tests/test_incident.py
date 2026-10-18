@@ -7,8 +7,9 @@ from typing import Any
 import pytest
 
 from dba.core import DatabaseInstance, DatabaseType, Finding, ReferenceCommand, Severity
-from dba.incident import IncidentSummary, build_incident_summary
-from dba.presentation import render_incident_summary, render_json
+from dba.incident import IncidentSummary, build_incident_summary, manual_action_decisions
+from dba.presentation import render_emergency_triage, render_incident_summary, render_json
+from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.slow import SlowReport
 from dba.slow_reporter import render_markdown
 
@@ -74,7 +75,7 @@ def test_blocking_incident_summary_has_impact_timing_source_and_safe_action() ->
     action = value.recovery_actions[0]
     assert action.action_type == "TERMINATE_SESSION"
     assert action.reference_command == "KILL 11;"
-    assert action.rollback_risk == "HIGH" and action.rollback_duration == "UNKNOWN"
+    assert action.rollback_risk == "UNKNOWN" and action.rollback_duration == "UNKNOWN"
     assert action.approval_required and not action.toolkit_executed
     evidence = render_markdown(report(block=True))
     assert "KILL 11;" in evidence and '"session_id": 11' in evidence
@@ -103,6 +104,27 @@ def test_reduced_optional_visibility_is_partial_without_failing_core_evidence() 
     value = build_incident_summary(sample)
     assert value.data_completeness == "PARTIAL"
     assert value.missing_evidence == ()
+
+
+def test_manual_reference_survives_partial_full_profile_and_is_shared_by_presenters() -> None:
+    sample = report(block=True)
+    sample.details.update({"emergency_evidence_complete": True,
+                           "full_profile_evidence_status": "PARTIAL",
+                           "data_visibility": "PARTIAL"})
+    decisions = manual_action_decisions(sample)
+    sample.details["manual_action_decisions"] = decisions
+    summary = build_incident_summary(sample)
+    cli = render_emergency_triage(sample, capture_started_at=NOW.isoformat())
+    html = HtmlReportRenderer().render(build_report_model(sample, summary))
+    payload = render_json({"report": asdict(sample), "incident_summary": asdict(summary),
+                           "manual_action_decisions": decisions})
+    assert summary.data_completeness == "PARTIAL"
+    assert summary.recovery_actions[0].reference_command == "KILL 11;"
+    assert decisions[0]["status"] == "AVAILABLE"
+    assert "KILL 11;" in cli
+    assert "KILL 11;" in html and "<details" in html
+    assert "KILL 11;" in payload and '"status": "AVAILABLE"' in payload
+    assert "Toolkit 未执行" in cli
 
 
 def test_long_running_without_blocking_does_not_recommend_termination() -> None:

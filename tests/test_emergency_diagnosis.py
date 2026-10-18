@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from dba.collectors import CollectorResult
-from dba.core import DatabaseInstance, DatabaseType
+from dba.core import DatabaseInstance, DatabaseType, Finding, Severity
 from dba.incident import build_priority_candidates
 from dba.presentation import render_emergency_triage
 from dba.settings import SQLServerSettings, apply_diagnostic_threshold
@@ -18,7 +18,9 @@ INSTANCE = DatabaseInstance("db1", "DB1", DatabaseType.SQLSERVER, "localhost", 1
 
 
 def _slow_report() -> SlowReport:
-    return SlowReport(INSTANCE, NOW, "slow", (), {
+    return SlowReport(INSTANCE, NOW, "slow", (
+        Finding("LONG_RUNNING_SQL", Severity.WARNING, {"threshold_seconds": 10}, "review"),
+    ), {
         "version": "16.0", "emergency_evidence_status": "COMPLETE",
         "samples": [{"finished_at": NOW.isoformat()}],
         "all_sessions": [{"session_id": 10, "status": "sleeping", "login_name": "app",
@@ -38,15 +40,15 @@ def _slow_report() -> SlowReport:
 
 def test_priority_candidates_have_deterministic_categories_and_identity() -> None:
     candidates = build_priority_candidates(_slow_report())
-    assert [item["session_id"] for item in candidates] == [10, 20, 30, 40]
+    assert [item["session_id"] for item in candidates] == [10, 20, 40]
     assert [item["category"] for item in candidates] == [
-        "ROOT_BLOCKER", "IDLE_OPEN_TRANSACTION", "BLOCKED_VICTIM", "LONG_RUNNING_SQL"
+        "ROOT_BLOCKER", "IDLE_OPEN_TRANSACTION", "LONG_RUNNING_SQL"
     ]
     assert candidates[0]["blocked_session_count"] == 7
     assert candidates[0]["transaction_id"] == "tx10"
     assert candidates[0]["evidence_timestamp"] == NOW.isoformat()
-    assert candidates[2]["reason"].startswith("被阻塞")
-    assert candidates[3]["identity_recheck"] == "REQUIRED_BEFORE_MANUAL_ACTION"
+    assert candidates[2]["identity_recheck"] == "REQUIRED_BEFORE_MANUAL_ACTION"
+    assert candidates[2]["sql_id_type"] == "sql_handle"
 
 
 def test_candidates_are_bounded_to_five_and_root_order_uses_impact() -> None:
@@ -85,8 +87,18 @@ def test_console_candidate_categories_are_chinese() -> None:
     text = render_emergency_triage(_slow_report(), build_priority_candidates(_slow_report()),
                                   capture_started_at=NOW.isoformat())
     assert "根阻塞" in text
-    assert "被阻塞会话" in text
+    assert "被阻塞会话" not in text
     assert "ROOT_BLOCKER" not in text
+
+
+def test_emergency_summary_reports_supplemental_stage_accurately() -> None:
+    report = _slow_report()
+    report.details.update({"supplemental_pending": True, "supplemental_not_collected": ["connections"]})
+    pending = render_emergency_triage(report, capture_started_at=NOW.isoformat())
+    assert "补充证据：待采集" in pending and "正在采集补充证据" in pending
+    report.details["supplemental_pending"] = False
+    complete = render_emergency_triage(report, capture_started_at=NOW.isoformat())
+    assert "补充证据：无额外查询" in complete and "无额外补充查询" in complete
 
 
 @pytest.mark.parametrize("value", [True, False, 0, 86401, "5", 1.5])
