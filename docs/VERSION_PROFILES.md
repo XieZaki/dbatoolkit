@@ -221,3 +221,14 @@ row, truncated result or insufficient identity evidence is reported as
 ambiguous rather than selecting an arbitrary plan. The parser contract bounds
 XML bytes, element count and operator count; local `.sqlplan` output remains
 sensitive evidence.
+
+## P0 emergency diagnosis evidence split
+
+V0.9.1 P0 runs the existing version-resolved collectors synchronously in two
+stages. Slow emergency evidence includes sessions, requests/running SQL,
+blocking, and transaction evidence; disk-growth emergency evidence uses the
+profile's required storage sources plus available log/retention context.
+Results already collected are reused by supplemental collection. This does
+not add SQL, permission profiles, or version routes. Missing supplemental
+evidence is shown as not collected or partial, not as a query failure. Each
+stage remains subject to the same resolved profile and SQL Registry.

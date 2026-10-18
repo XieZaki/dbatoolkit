@@ -154,6 +154,21 @@ SLOW_REQUIRED_COLLECTORS: dict[str, tuple[str, ...]] = {
     "oracle_modern_slow": ("active_sessions", "active_requests"),
 }
 
+# Small synchronous first-pass evidence bundle. These are existing reviewed
+# Registry-backed collectors; the remaining mapped collectors are supplemental.
+SLOW_EMERGENCY_COLLECTORS: dict[str, tuple[str, ...]] = {
+    "sqlserver_2008r2_slow": ("active_sessions", "active_requests", "transactions"),
+    "sqlserver_shared_slow": ("active_sessions", "active_requests", "transactions"),
+    "mysql57_slow": ("active_sessions", "active_requests", "transactions", "blocking"),
+    "mysql80_slow": ("active_sessions", "active_requests", "transactions", "blocking"),
+    "mysql84_slow": ("active_sessions", "active_requests", "transactions", "blocking"),
+    "pg13_18_slow": ("active_sessions", "transactions", "blocking"),
+    "oracle11gr2_slow": ("active_sessions", "active_requests", "transactions", "blocking"),
+    "oracle12c_121_slow": ("active_sessions", "active_requests", "transactions", "blocking"),
+    "oracle12c_122_slow": ("active_sessions", "active_requests", "transactions", "blocking"),
+    "oracle_modern_slow": ("active_sessions", "active_requests", "transactions", "blocking"),
+}
+
 
 def validate_slow_binding(binding: ProfileBinding) -> tuple[str, ...]:
     errors: list[str] = []
@@ -204,6 +219,9 @@ def validate_slow_profiles(registry: Any, bindings: tuple[Any, ...]) -> tuple[st
             errors.append(f"{binding.db_type.value}/{binding.version_family}: invalid required/optional collector contract")
         if not (required | optional) <= set(scripts):
             errors.append(f"{binding.db_type.value}/{binding.version_family}: collector contract references unmapped SQL")
+        emergency = set(SLOW_EMERGENCY_COLLECTORS.get(binding.sql_profile_id, ()))
+        if not required <= emergency or not emergency <= set(scripts):
+            errors.append(f"{binding.db_type.value}/{binding.version_family}: invalid emergency collector contract")
         if contract is None or any(not dict(contract.aliases).get(field)
                                    for field in contract.required_fields):
             errors.append(f"{binding.db_type.value}/{binding.version_family}: invalid slow parser contract")
@@ -249,6 +267,13 @@ def optional_collectors_for_adapter(adapter: Any) -> tuple[str, ...]:
     if profile is None:
         return ()
     return SLOW_OPTIONAL_COLLECTORS.get(profile.sql_profile_id or "", ())
+
+
+def emergency_collectors_for_adapter(adapter: Any) -> tuple[str, ...]:
+    profile = profile_for_adapter(adapter)
+    if profile is None:
+        return ("active_sessions", "active_requests", "transactions", "blocking")
+    return SLOW_EMERGENCY_COLLECTORS.get(profile.sql_profile_id or "", ())
 
 
 def collection_completeness(

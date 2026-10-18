@@ -73,6 +73,16 @@ System tests are opt-in and skip in the standard command unless both safety gate
 
 Version capability behavior is exercised with faked server versions: SQL Server old-version unsupported behavior, PostgreSQL capability paths, and MySQL/Oracle version-sensitive results. This does not establish real compatibility for every listed server release. Unit and integration suites inject permission failures, vendor errors, timeouts, empty/NULL results, row truncation, cleanup failures, malformed responses, and incomplete evidence where covered by the relevant adapter tests.
 
+## V0.9.1 P0 emergency diagnosis
+
+The standard unit suite verifies the synchronous emergency/supplemental
+collector split, result reuse, stable five-candidate ordering, required versus
+optional evidence states, truncated/incomplete summaries, Chinese rendering,
+and JSON-only output. Live E2E uses only explicitly selected local Docker
+assets and creates no load or database objects. A multi-query capture is
+BEST_EFFORT, never an atomic snapshot. See `docs/EMERGENCY_DIAGNOSIS.md` for
+the operator workflow and safety boundaries.
+
 Concurrency and performance coverage is limited to deterministic session reuse / report collision cases and bounded synthetic result sizes; it is not a load benchmark. Windows is the primary host. Linux path, permissions, and IPC behavior are partially mocked on Windows and require a real Linux deployment check. No live SQL Server 2008 R2, PostgreSQL 13, MySQL 8.0, or Oracle compatibility matrix is claimed. System coverage only describes instances selected and run during a particular test report.
 
 V0.9.1 Phase B adds profile-routing regression and Fake Adapter integration

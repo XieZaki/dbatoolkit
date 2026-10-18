@@ -91,9 +91,8 @@ def payload(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 def required_sections(path: Path, passwords: tuple[str, ...]) -> None:
     contents = path.read_text(encoding="utf-8")
-    for title in ("Incident Summary", "Long Running Requests", "Blocking Analysis",
-                  "Root Cause Candidate", "Session Identity", "Findings",
-                  "Collection Quality"):
+    for title in ("故障概况", "锁与阻塞链", "现场诊断结论", "会话身份与来源",
+                  "诊断发现与建议", "证据完整性"):
         if title not in contents:
             raise RuntimeError("HTML report section missing")
     if (any(password in contents for password in passwords)

@@ -67,7 +67,8 @@ def _sqlserver_file_growth(row: dict[str, Any]) -> dict[str, Any]:
 
 def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResult, ...],
                       version: str, *, required_collectors: tuple[str, ...],
-                      optional_collectors: tuple[str, ...], profile_id: str) -> DiskGrowthReport:
+                      optional_collectors: tuple[str, ...], profile_id: str,
+                      emergency_collectors: tuple[str, ...] = (), emergency: bool = False) -> DiskGrowthReport:
     """Analyze only observed values; a failed/truncated source cannot prove absence."""
     results = {result.collector_name: result for result in collected}
     findings: list[Finding] = []
@@ -322,7 +323,9 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
     other["active_transaction_count"] = (len(transaction_rows)
                                           if transaction_result and transaction_result.success
                                           and not transaction_result.truncated else None)
-    samples = [{"source": result.collector_name, "row_count": result.row_count,
+    samples = [{"source": result.collector_name, "started_at": result.started_at.isoformat(),
+                "finished_at": result.finished_at.isoformat(), "elapsed_ms": result.elapsed_ms,
+                "row_count": result.row_count,
                 "success": result.success, "truncated": result.truncated,
                 "error_type": result.error_type} for result in collected]
     totals: dict[str, float] = {}
@@ -334,6 +337,10 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
             totals[category] = totals.get(category, 0) + size
     dominant = max(totals, key=totals.get) if totals and not incomplete else None  # type: ignore[arg-type]
     optional_missing = list(dict.fromkeys(unavailable_optional + failed_optional))
+    by_name = results
+    emergency_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                             for name in required_collectors)
+    full_names = sql_profile_for_disk(profile_id).ordered_scripts
     details = {"version": version, "version_profile": profile_id, "space": space, "log": log, "other": other,
                "samples": samples, "incomplete": incomplete,
                "required_evidence_complete": not incomplete,
@@ -344,12 +351,22 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
                "required_unavailable": missing_required + failed_required,
                "optional_unavailable": optional_missing,
                "not_applicable": not_applicable,
-               "unavailable": missing_required + failed_required}
+               "unavailable": missing_required + failed_required,
+               "diagnostic_phase": "EMERGENCY" if emergency else "FINAL",
+               "emergency_evidence_complete": emergency_complete,
+               "emergency_evidence_status": "COMPLETE" if emergency_complete else "INCOMPLETE",
+               "full_profile_evidence_complete": not incomplete and not optional_missing,
+               "full_profile_evidence_status": "COMPLETE" if not incomplete and not optional_missing else
+               "INCOMPLETE" if incomplete else "PARTIAL",
+               "supplemental_pending": bool(emergency),
+               "supplemental_not_collected": tuple(name for name in full_names if name not in by_name)
+               if emergency else ()}
     return DiskGrowthReport(instance, datetime.now(timezone.utc), "disk-growth",
                             tuple(findings), redact(details))
 
 
-def _collect_disk_growth(adapter: DiskAdapter) -> DiskGrowthReport:
+def _collect_disk_growth(adapter: DiskAdapter, *, emergency: bool = False,
+                         existing: tuple[CollectorResult, ...] = ()) -> DiskGrowthReport:
     profile = profile_for_disk(adapter)
     if profile is None:
         raise ToolkitError("VersionVerificationRequired",
@@ -371,9 +388,13 @@ def _collect_disk_growth(adapter: DiskAdapter) -> DiskGrowthReport:
                            })
     sql_profile = sql_profile_for_disk(profile.sql_profile_id)
     version = profile.detected_raw_version or adapter.get_server_version()
-    results: list[CollectorResult] = []
-    reconnect_after_optional_failure = False
-    for index, name in enumerate(sql_profile.ordered_scripts):
+    results: list[CollectorResult] = list(existing)
+    collected_names = {result.collector_name for result in results}
+    selected_names = sql_profile.emergency if emergency else sql_profile.ordered_scripts
+    reconnect_after_optional_failure = bool(existing and any(not result.success for result in existing))
+    for index, name in enumerate(selected_names):
+        if name in collected_names:
+            continue
         if reconnect_after_optional_failure:
             try:
                 adapter.connect()
@@ -407,19 +428,37 @@ def _collect_disk_growth(adapter: DiskAdapter) -> DiskGrowthReport:
                                      len(normalized), result.truncated, result.success,
                                      result.error_type, result.error_message)
         results.append(result)
+        collected_names.add(result.collector_name)
         if not result.success:
             if name in sql_profile.required:
                 break
-            if isinstance(adapter, OracleAdapter) and index + 1 < len(sql_profile.ordered_scripts):
-                # Oracle closes a connection after query errors. Keep optional evidence independent:
-                # a denied FRA view must not prevent a later, separately granted transaction query.
+            if index + 1 < len(selected_names):
+                # Driver adapters close a connection after query errors. Re-run
+                # connection preflight once before the next fixed optional query
+                # so one denied source does not hide independent evidence.
                 reconnect_after_optional_failure = True
-            else:
-                break  # Driver adapters close a failed connection; never reuse it.
-    return build_disk_report(adapter.instance, tuple(results), version,
-                             required_collectors=sql_profile.required,
-                             optional_collectors=sql_profile.optional,
-                             profile_id=profile.sql_profile_id)
+    optional = (tuple(name for name in sql_profile.emergency
+                      if name not in sql_profile.required and name in collected_names)
+                if emergency else sql_profile.optional)
+    report = build_disk_report(adapter.instance, tuple(results), version,
+                               required_collectors=sql_profile.required,
+                               optional_collectors=optional,
+                               profile_id=profile.sql_profile_id,
+                               emergency_collectors=sql_profile.emergency, emergency=emergency)
+    if emergency:
+        report.details["full_profile_evidence_complete"] = False
+        report.details["full_profile_evidence_status"] = "PENDING"
+        if not report.details.get("optional_unavailable"):
+            report.details["optional_evidence_status"] = "PENDING"
+        report.details["supplemental_pending"] = True
+    object.__setattr__(report, "_collector_results", tuple(results))
+    return report
+
+
+def collect_disk_growth_phase(adapter: DiskAdapter, *, emergency: bool,
+                              existing: tuple[CollectorResult, ...] = ()) -> DiskGrowthReport:
+    """Collect the fixed emergency set or remaining reviewed supplemental scripts."""
+    return _collect_disk_growth(adapter, emergency=emergency, existing=existing)
 
 
 class SQLServerDiskGrowthAnalyzer:

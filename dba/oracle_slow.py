@@ -19,6 +19,7 @@ from dba.oracle_collectors import (
 from dba.settings import OracleSettings
 from dba.slow_profiles import (
     collection_completeness,
+    emergency_collectors_for_adapter,
     optional_collectors_for_adapter,
     profile_for_adapter,
     required_collectors_for_adapter,
@@ -120,6 +121,10 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     quality = [f"{r.collector_name}: {'failed' if not r.success else 'truncated' if r.truncated else 'ok'}"
                for r in results]
     incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
+    command_evidence_complete = all(
+        name in by_name and by_name[name].success and not by_name[name].truncated
+        for name in ("active_sessions", "active_requests", "transactions", "blocking")
+    )
     if not lock_evidence:
         visibility = "PARTIAL"
     incomplete = incomplete or (rac_enabled and not rac_global_snapshot)
@@ -197,18 +202,22 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
         inst_id = _positive(root["inst_id"])
         safe = (session is not None and sid is not None and serial is not None
                 and inst_id is not None and not incomplete and not graph["anomalies"]
-                and root_key not in graph["unresolved"] and rac_global_snapshot)
+                and root_key not in graph["unresolved"] and rac_global_snapshot
+                and command_evidence_complete and bool(root.get("username"))
+                and bool(root.get("machine")) and bool(root.get("program")))
         # A local single-instance snapshot is sufficient when no remote blocker appears.
         local_instances = {_positive(s.get("inst_id")) for s in sessions}
         remote_edges = any(_positive(e.get("blocker_inst_id")) not in local_instances for e in edges)
         if not rac_enabled and not rac_global_snapshot and not remote_edges and len(local_instances) == 1:
             safe = (session is not None and sid is not None and serial is not None
-                    and not incomplete and not graph["anomalies"])
+                    and not incomplete and not graph["anomalies"]
+                    and command_evidence_complete and bool(root.get("username"))
+                    and bool(root.get("machine")) and bool(root.get("program")))
         if safe:
             suffix = f",@{inst_id}" if rac_global_snapshot else ""
             references = (ReferenceCommand(
                 f"ALTER SYSTEM KILL SESSION '{sid},{serial}{suffix}' IMMEDIATE;",
-                "仅供 DBA 人工核对 SID/SERIAL#/实例及回滚影响；Toolkit did NOT execute this command."),)
+                "仅供 DBA 人工核对 SID/SERIAL#/实例、USERNAME、MACHINE、PROGRAM、事务及 SQL 上下文和回滚影响；会话可能已变化，Toolkit did NOT execute this command."),)
         findings.append(Finding("ROOT_BLOCKER", Severity.WARNING, root,
                                 "重新核对会话身份与事务，必要时由 DBA 在原生客户端处理。",
                                 references, session=root_key))
@@ -288,3 +297,66 @@ def diagnose_slow(adapter: OracleAdapter) -> OracleSlowReport:
                              lock_evidence=adapter.capabilities["lock_evidence"],
                              required_collectors=tuple(required),
                              optional_collectors=optional_collectors_for_adapter(adapter))
+
+
+_STAGED_COLLECTORS = {
+    "active_sessions": ActiveSessionsCollector,
+    "active_requests": ActiveRequestsCollector,
+    "transactions": TransactionsCollector,
+    "blocking": BlockingCollector,
+    "previous_sql": PreviousSQLCollector,
+}
+
+
+def collect_slow_phase(adapter: OracleAdapter, names: tuple[str, ...],
+                       existing: tuple[CollectorResult, ...] = ()) -> tuple[CollectorResult, ...]:
+    results = list(existing)
+    have = {item.collector_name for item in results}
+    supplemental = bool(existing)
+    reconnect_pending = False
+    for name in names:
+        if name in have or name not in _STAGED_COLLECTORS:
+            continue
+        if reconnect_pending:
+            try:
+                adapter.connect()
+            except Exception:
+                break
+            reconnect_pending = False
+        result = _STAGED_COLLECTORS[name](adapter).collect(adapter.instance)
+        results.append(result)
+        have.add(name)
+        if not result.success:
+            if supplemental and name != names[-1]:
+                reconnect_pending = True
+            else:
+                break
+    return tuple(results)
+
+
+def build_slow_phase_report(adapter: OracleAdapter, results: tuple[CollectorResult, ...],
+                            *, emergency: bool) -> OracleSlowReport:
+    required = (emergency_collectors_for_adapter(adapter) if emergency else
+                required_collectors_for_adapter(
+                    adapter, ("active_sessions", "active_requests", "transactions", "blocking")))
+    optional = () if emergency else optional_collectors_for_adapter(adapter)
+    report = build_slow_report(
+        adapter.instance, results, adapter.settings, adapter.get_server_version(),
+        rac_global_snapshot=adapter.capabilities["rac_global_snapshot"],
+        rac_enabled=adapter.rac_enabled, lock_evidence=adapter.capabilities["lock_evidence"],
+        required_collectors=required, optional_collectors=optional)
+    core = emergency_collectors_for_adapter(adapter)
+    by_name = {item.collector_name: item for item in results}
+    complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                   for name in core) and not (adapter.rac_enabled and not adapter.capabilities["rac_global_snapshot"])
+    full_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                        for name in required + optional) and bool(adapter.capabilities["lock_evidence"])
+    report.details.update({"diagnostic_phase": "EMERGENCY" if emergency else "FINAL",
+                           "emergency_evidence_complete": complete,
+                           "emergency_evidence_status": "COMPLETE" if complete else "INCOMPLETE",
+                           "full_profile_evidence_complete": full_complete if not emergency else False,
+                           "full_profile_evidence_status": "PENDING" if emergency else
+                           "COMPLETE" if full_complete else "PARTIAL",
+                           "supplemental_not_collected": tuple(
+                               name for name in required + optional if name not in by_name) if emergency else ()})
+    return report

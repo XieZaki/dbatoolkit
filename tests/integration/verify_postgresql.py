@@ -150,7 +150,7 @@ def verify(config: dict[str, str]) -> dict[str, Any]:
                 payload = run_cli(["diagnose", "isolated-postgresql", "slow",
                                    "--format", "json", "--report", str(html_report)])
                 text = html_report.read_text(encoding="utf-8")
-                assert "Incident Summary" in text and "Findings" in text
+                assert "故障概况" in text and "诊断发现与建议" in text
                 for key in ("administrator_password", "monitor_password", "workload_password"):
                     assert config[key] not in text, "Credential leakage detected"
                 report["scenarios"].append({"name": name, "success": True,

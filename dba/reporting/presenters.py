@@ -20,6 +20,34 @@ from dba.reporting.model import (
 )
 from dba.reporting.normalizers import sqlserver_transaction_label
 
+_VALUE_LABELS = {
+    "TRANSACTION_LOG": "事务日志", "WAL": "WAL", "BINLOG": "Binlog",
+    "REDO": "Redo", "ARCHIVE": "归档", "FRA": "FRA", "UNDO": "Undo",
+    "TEMP": "临时空间", "DATA": "数据文件", "TABLE": "表", "INDEX": "索引",
+    "ROOT_BLOCKER": "根阻塞", "IDLE_OPEN_TRANSACTION": "未结束事务",
+    "BLOCKED_VICTIM": "被阻塞会话", "LONG_RUNNING_SQL": "长运行 SQL",
+}
+_FINDING_LABELS = {
+    "SQLSERVER_DATAFILE_NEAR_LIMIT": "SQL Server 数据文件接近容量上限",
+    "SQLSERVER_TEMPDB_HIGH_USAGE": "SQL Server TempDB 使用率较高",
+    "SQLSERVER_LOG_HIGH_USAGE": "SQL Server 事务日志使用率较高",
+    "SQLSERVER_LOG_REUSE_BLOCKED": "SQL Server 事务日志复用受阻",
+    "SQLSERVER_OLD_ACTIVE_TRANSACTION": "SQL Server 存在长期活动事务",
+    "PG_WAL_RETENTION_SLOT": "PostgreSQL 复制槽保留 WAL",
+    "PG_ARCHIVE_FAILURE": "PostgreSQL WAL 归档失败线索",
+    "PG_LONG_TRANSACTION": "PostgreSQL 存在长期事务",
+    "BINLOG_TOTAL_SIZE_HIGH": "MySQL Binlog 总量较大",
+    "REPLICA_RELAY_LOG_RISK": "MySQL 复制中继日志风险",
+    "LONG_TRANSACTION": "MySQL 存在长期事务",
+    "ORACLE_UNDO_HIGH_USAGE": "Oracle Undo 使用率较高",
+    "ORACLE_TEMP_HIGH_USAGE": "Oracle 临时空间使用率较高",
+    "ORACLE_TABLESPACE_HIGH_USAGE": "Oracle 表空间使用率较高",
+    "ORACLE_FRA_HIGH_USAGE": "Oracle FRA 使用率较高",
+    "ORACLE_FLASHBACK_HIGH_USAGE": "Oracle Flashback 日志使用率较高",
+    "ORACLE_ARCHIVE_DEST_FAILURE": "Oracle 归档目标异常",
+    "ORACLE_ARCHIVE_ACCUMULATION": "Oracle 归档量较大",
+}
+
 
 def _local_time(value: Any) -> str:
     if isinstance(value, datetime):
@@ -45,6 +73,8 @@ def _human(value: Any) -> str:
         return "; ".join(f"{_label(str(key))}: {_human(item)}" for key, item in value.items())
     if isinstance(value, (tuple, list, set)):
         return ", ".join(_human(item) for item in value) if value else "—"
+    if isinstance(value, str) and value in _VALUE_LABELS:
+        return _VALUE_LABELS[value]
     return str(redact(value))
 
 
@@ -428,7 +458,17 @@ def _transaction_section(details: dict[str, Any], database_type: str,
                          tables=(table,) if table else ())
 
 
-def _recovery_section(incident: IncidentSummary, details: dict[str, Any], scenario: str) -> ReportSection:
+def _recovery_section(incident: IncidentSummary, details: dict[str, Any], scenario: str,
+                      database_type: str = "") -> ReportSection:
+    identity = {
+        "sqlserver": "session_id、login_time、login_name、host_name、program_name、transaction identity",
+        "postgresql": "pid、backend_start、xact_start、usename、application_name",
+        "mysql": "connection_id、user、host、transaction id/start",
+        "oracle": "SID、SERIAL#、INST_ID（适用时）、USERNAME、事务和 SQL 上下文",
+    }.get(database_type, "会话标识、登录时间、用户、来源、事务及 SQL 上下文")
+    safety_fields = (("Manual Identity Recheck", identity),
+                     ("Termination Risk", "Kill != Immediate Recovery；可能发生回滚并增加 I/O、日志/Undo 压力和应用错误。"),
+                     ("Toolkit Executed", "NO"))
     actions = incident.recovery_actions
     if not actions:
         if scenario == "disk-growth":
@@ -443,7 +483,7 @@ def _recovery_section(incident: IncidentSummary, details: dict[str, Any], scenar
             reason = "No safe, evidence-backed recovery action was generated."
         return ReportSection("immediate-recovery", "Immediate Recovery", summary=reason,
                              fields=(("DBA Approval Required", "YES if action is later approved"),
-                                     ("Toolkit Executed", "NO")))
+                                     *safety_fields))
     rows = [{"session": action.target_session, "action": action.action_type,
              "reason": action.reason, "open_txn": action.open_transaction,
              "risk": action.rollback_risk, "duration": action.rollback_duration,
@@ -458,6 +498,8 @@ def _recovery_section(incident: IncidentSummary, details: dict[str, Any], scenar
                                      "(manual only)", action.reference_command, "sql")
                      for action in actions)
     return ReportSection("immediate-recovery", "Immediate Recovery", severity="WARNING",
+                         summary="Reference commands are text only. Recheck session identity immediately before manual use.",
+                         fields=safety_fields,
                          tables=(table,) if table else (), code_blocks=commands)
 
 
@@ -489,6 +531,9 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
         if name not in sampled:
             quality.append({"collector": name, "status": "OPTIONAL_UNAVAILABLE",
                             "impact": "Optional context was not collected."})
+    for name in details.get("supplemental_not_collected", []):
+        quality.append({"collector": name, "status": "NOT_COLLECTED",
+                        "impact": "应急初报后未采集；不表示查询失败。"})
     for note in details.get("quality", []):
         if isinstance(note, str):
             quality.append({"collector": "Snapshot", "status": "NOTE", "impact": note})
@@ -498,6 +543,9 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
     table = _table(quality, (("Collector", ("collector",)), ("Status", ("status",)),
                              ("Impact", ("impact",))))
     summary = f"Data completeness: {incident.data_completeness}."
+    if details.get("emergency_evidence_status"):
+        summary += (f" Emergency evidence: {details.get('emergency_evidence_status')}."
+                    f" Full profile evidence: {details.get('full_profile_evidence_status', 'UNKNOWN')}.")
     if report.scenario == "disk-growth":
         summary += (f" Required evidence: {incident.required_evidence_status}."
                     f" Optional evidence: {incident.optional_evidence_status}.")
@@ -513,11 +561,13 @@ def _finding_section(report: DiagnosticReport) -> ReportSection | None:
         return None
     rows = []
     for item in findings:
-        title = item.title.replace("_", " ").title()
+        title = _FINDING_LABELS.get(item.title, item.title.replace("_", " ").title())
         evidence_ref = "Root Blockers" if "BLOCK" in item.title else \
                        "Transaction Analysis" if "TRANSACTION" in item.title else \
                        "Request Runtime" if item.session else "Diagnostic Summary"
-        rows.append({"finding": title, "severity": item.severity.value,
+        severity = {"CRITICAL": "严重", "HIGH": "高", "WARNING": "警告",
+                    "INFO": "提示"}.get(item.severity.value, item.severity.value)
+        rows.append({"finding": title, "severity": severity,
                      "session": item.session or "—", "evidence": evidence_ref,
                      "recommendation": item.recommendation})
     table = _table(rows, (("Finding", ("finding",)), ("Severity", ("severity",)),
@@ -528,7 +578,42 @@ def _finding_section(report: DiagnosticReport) -> ReportSection | None:
 
 def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                    details: dict[str, Any], policy: HumanReportPolicy) -> list[ReportSection]:
-    sections: list[ReportSection] = [_recovery_section(incident, details, report.scenario)]
+    sections: list[ReportSection] = [_recovery_section(incident, details, report.scenario,
+                                                       report.instance.db_type.value)]
+    priority = [item for item in details.get("priority_candidates", []) if isinstance(item, dict)]
+    priority_rows = [{"rank": item.get("rank"), "session": item.get("session_id"),
+                      "category": _human(item.get("category")), "reason": item.get("reason"),
+                      "user": item.get("username"), "host": item.get("host"),
+                      "client_ip": item.get("client_ip"), "database": item.get("database"),
+                      "application": item.get("application"), "state": item.get("state"),
+                      "runtime": item.get("running_seconds"),
+                      "sql_id": item.get("sql_id"), "transaction_id": item.get("transaction_id"),
+                      "login_time": item.get("login_time"),
+                      "transaction_age": item.get("transaction_age_seconds"),
+                      "blocked_count": item.get("blocked_session_count"),
+                      "evidence_timestamp": item.get("evidence_timestamp"),
+                      "identity_quality": item.get("identity_quality"),
+                      "identity_reuse_note": item.get("identity_reuse_note"),
+                      "identity_recheck": "人工处置前必须重新核对会话身份"}
+                     for item in priority[:5]]
+    priority_table = _table(priority_rows, (("Rank", ("rank",)), ("Session", ("session",)),
+                                           ("Type", ("category",)), ("Reason", ("reason",)),
+                                           ("User", ("user",)), ("Host", ("host",)),
+                                           ("Client IP", ("client_ip",)), ("Database", ("database",)),
+                                           ("Application", ("application",)), ("State", ("state",)),
+                                           ("Runtime seconds", ("runtime",)),
+                                           ("SQL identity", ("sql_id",)),
+                                           ("Transaction identity", ("transaction_id",)),
+                                           ("Login time", ("login_time",)),
+                                           ("Transaction age seconds", ("transaction_age",)),
+                                           ("Blocked session count", ("blocked_count",)),
+                                           ("Evidence timestamp", ("evidence_timestamp",)),
+                                           ("Identity quality", ("identity_quality",)),
+                                           ("Identity reuse note", ("identity_reuse_note",)),
+                                           ("Identity recheck", ("identity_recheck",))))
+    sections.append(ReportSection("priority-candidates", "Priority Review Candidates",
+                                  summary="候选仅用于人工核查，不代表 Toolkit 已验证当前会话身份或建议自动终止。",
+                                  tables=(priority_table,) if priority_table else ()))
     if incident.root_cause_candidate:
         fields = tuple((_label(str(key)), _human(value))
                        for key, value in incident.root_cause_candidate.items())
@@ -559,7 +644,7 @@ def _disk_growth_sections(details: dict[str, Any]) -> list[ReportSection]:
         if isinstance(value, dict):
             rows = [{"area": label, "value": _human(item)} for label, item in value.items()]
         elif isinstance(value, list):
-            rows = [{"area": _human(_first(row, "area", "name", "database", "file")),
+            rows = [{"area": _human(_first(row, "area", "category", "name", "database", "file")),
                      "value": _human(_first(row, "size_mb", "size_bytes", "value", "status"))}
                     for row in _dict_rows(value)]
         else:
@@ -751,30 +836,60 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
     """Create a bounded presentation model; plan XML is never embedded in HTML."""
     instance = report.instance
     details = getattr(report, "details", {})
-    metadata = (("Database ID", instance.id), ("Instance", instance.name),
+    metadata: tuple[tuple[str, str], ...] = (("Database ID", instance.id), ("Instance", instance.name),
                 ("Database Type", instance.db_type.value),
                 ("Version", _human(details.get("version", "UNKNOWN"))),
                 ("Scenario", _label(report.scenario)), ("Generated At", _local_time(report.diagnosed_at)),
                 ("Environment", instance.environment or "UNKNOWN"),
-                ("Data Completeness", incident.data_completeness))
+                ("Data Completeness", incident.data_completeness),
+                ("Capture Started", str(details.get("capture_started_at", "N/A"))),
+                ("Triage Completed", str(details.get("triage_completed_at", "N/A"))),
+                ("Capture Finished", str(details.get("capture_finished_at", "N/A"))),
+                ("Snapshot Consistency", str(details.get("snapshot_consistency", "BEST_EFFORT"))))
     if report.scenario == "slow":
         sections = _slow_sections(report, incident, details, policy)
     elif report.scenario == "plan":
-        sections = [_recovery_section(incident, details, report.scenario),
+        sections = [_recovery_section(incident, details, report.scenario, instance.db_type.value),
                     *_plan_sections(details, plan_artifact, policy)]
     elif report.scenario == "replication":
         sections = _replication_sections(report, policy)
     else:
         sections = _disk_growth_sections(details)
-        sections.insert(0, _recovery_section(incident, details, report.scenario))
+        sections.insert(0, _recovery_section(incident, details, report.scenario, instance.db_type.value))
     findings = _finding_section(report)
     if findings:
         sections.append(findings)
     sections.append(_quality_section(report, incident, details))
-    if report.scenario == "slow" and "appendix" in {section.section_id for section in sections}:
-        sections = [replace(section, title="Appendix — Other Sessions")
-                    if section.section_id == "appendix" else section for section in sections]
-    return ReportModel("DBA Toolkit Diagnostic Report", metadata, incident, tuple(sections))
+    titles = {
+        "Immediate Recovery": "人工处置参考", "Root Cause Candidate": "现场诊断结论",
+        "Root Blockers": "根阻塞", "Blocking Analysis": "锁与阻塞链",
+        "Session Identity": "会话身份与来源", "Request Runtime": "请求运行信息",
+        "Workload Summary": "当前数据库状态", "Wait Analysis": "等待分析",
+        "Appendix — Other Sessions": "其他会话（附录）", "Transaction Analysis": "长期未提交事务",
+        "Execution Plan Follow-up": "执行计划后续检查", "Collection Quality": "证据完整性",
+        "Findings and Recommendations": "诊断发现与建议", "Database Space": "数据文件与表空间",
+        "Transaction Log": "事务日志与保留证据", "Other Storage Evidence": "空间与日志证据",
+        "Diagnostic Context": "未获取的证据与诊断上下文", "Priority Review Candidates": "优先核查对象",
+    }
+    headers = {"Rank": "排序", "Session": "会话", "Type": "类型", "Reason": "入选原因",
+               "User": "用户", "Host": "主机", "Client IP": "客户端 IP", "Database": "数据库",
+               "Application": "应用", "State": "状态",
+               "Runtime seconds": "运行秒数", "Transaction age seconds": "事务时长秒",
+               "SQL identity": "SQL 标识", "Transaction identity": "事务标识", "Login time": "登录时间",
+               "Blocked session count": "影响会话数", "Evidence timestamp": "证据时间",
+               "Identity quality": "身份信息质量", "Identity reuse note": "会话 ID 复用提示",
+               "Identity recheck": "身份复核", "Finding": "发现", "Severity": "严重程度",
+               "Recommendation": "建议", "Database ID": "数据库 ID", "Instance": "实例",
+               "Database Type": "数据库类型", "Version": "版本", "Scenario": "诊断场景",
+               "Generated At": "报告生成时间", "Environment": "环境", "Data Completeness": "证据完整性",
+               "Capture Started": "采集开始", "Triage Completed": "初报完成", "Capture Finished": "采集结束",
+               "Snapshot Consistency": "快照一致性", "Area": "资源类别", "Value": "观测值",
+               "Item": "条目", "Observed": "观测值"}
+    sections = [replace(section, title=titles.get(section.title, section.title),
+                        tables=tuple(ReportTable(tuple(headers.get(h, h) for h in table.headers), table.rows)
+                                     for table in section.tables)) for section in sections]
+    metadata = tuple((headers.get(key, key), value) for key, value in metadata)
+    return ReportModel("数据库应急诊断报告", metadata, incident, tuple(sections))
 
 
 def _map_section(section: ReportSection, *, max_chars: int, drop_sql: bool = False) -> ReportSection:

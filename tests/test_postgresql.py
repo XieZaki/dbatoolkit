@@ -13,7 +13,7 @@ from dba.core import DatabaseInstance, DatabaseType
 from dba.errors import ToolkitError
 from dba.postgresql import PostgreSQLAdapter
 from dba.postgresql_collectors import ActiveSessionsCollector, LongRunningCollector
-from dba.postgresql_slow import blocking_graph, build_slow_report, diagnose_slow
+from dba.postgresql_slow import blocking_graph, build_slow_report, collect_slow_phase, diagnose_slow
 from dba.postgresql_slow_reporter import render_console, render_markdown
 from dba.registry import SqlScriptRegistry
 from dba.settings import PostgreSQLSettings
@@ -116,6 +116,7 @@ def result(name: str, rows: list[dict[str, Any]], truncated: bool = False) -> Co
 def session(pid: int, state: str = "active", **extra: Any) -> dict[str, Any]:
     return {"pid": pid, "state": state, "datname": "postgres", "usename": "app",
             "application_name": "fixture", "client_addr": "127.0.0.1", "client_hostname": None,
+            "backend_start": "2026-01-01T00:00:00",
             "client_port": 40000 + pid, "query": "SELECT 1", "query_start": "2026-01-01",
             "xact_start": "2026-01-01", "transaction_age_seconds": 120,
             "wait_event_type": None, "wait_event": None, "duration_ms": 120000, **extra}
@@ -255,6 +256,19 @@ def test_optional_collector_failure_returns_incomplete_report() -> None:
     assert driver.connection.closed
 
 
+def test_supplemental_collection_reconnects_after_optional_failure() -> None:
+    target, driver = adapter()
+    target.connect()
+    existing = (result("active_sessions", [session(1)]),)
+    driver.connection.failures["long_running"] = TimeoutError(PASSWORD)
+    collected = collect_slow_phase(target, ("long_running", "transactions"), existing)
+    assert [item.collector_name for item in collected] == [
+        "active_sessions", "long_running", "transactions"
+    ]
+    assert not collected[1].success
+    assert collected[2].success
+
+
 def test_interrupt_closes_connection() -> None:
     target, driver = adapter()
     driver.connection.failures["active_sessions"] = KeyboardInterrupt()
@@ -266,7 +280,8 @@ def test_interrupt_closes_connection() -> None:
 
 @pytest.mark.integration
 def test_pg_cli_connection_collect_and_diagnose(tmp_path: Path,
-                                                capsys: pytest.CaptureFixture[str]) -> None:
+                                                capsys: pytest.CaptureFixture[str],
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
     inventory = tmp_path / "inventory.yaml"
     inventory.write_text(yaml.safe_dump({"databases": [
         {"id": "pg", "name": "PG", "db_type": "postgresql", "host": "test.invalid",
@@ -289,6 +304,34 @@ def test_pg_cli_connection_collect_and_diagnose(tmp_path: Path,
     assert main([*common, "diagnose", "pg", "slow", "--format", "json",
                  "--report", str(report)], provider=provider, driver=driver) == 0
     assert json.loads(capsys.readouterr().out)["success"] and report.exists()
+    import builtins
+
+    first_stage: list[tuple[str, ...]] = []
+    report_absent_at_triage: list[bool] = []
+    original_print = builtins.print
+    before = len(driver.connection.executed)
+
+    def observe_print(*args: Any, **kwargs: Any) -> None:
+        if args and isinstance(args[0], str) and args[0].startswith("数据库性能应急诊断"):
+            first_stage.append(tuple(driver.connection.executed[before:]))
+            report_absent_at_triage.append(not human_report.exists())
+        original_print(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "print", observe_print)
+    human_report = tmp_path / "slow-human.html"
+    assert main([*common, "diagnose", "pg", "slow", "--report", str(human_report)],
+                provider=provider, driver=driver) == 0
+    assert first_stage and "long_running" not in first_stage[0]
+    assert report_absent_at_triage == [True]
+    assert first_stage[0].count("active_sessions") == 1
+    assert first_stage[0].count("transactions") == 1
+    assert first_stage[0].count("blocking") == 1
+    after_human = driver.connection.executed[before:]
+    assert after_human.count("active_sessions") == 1
+    assert after_human.count("transactions") == 1
+    assert after_human.count("blocking") == 1
+    assert after_human.count("long_running") == 1
+    monkeypatch.setattr(builtins, "print", original_print)
     assert main([*common, "diagnose", "pg", "plan", "--session", "1", "--json"],
                 provider=provider, driver=driver) == 1
     assert "not implemented" in capsys.readouterr().out.lower()

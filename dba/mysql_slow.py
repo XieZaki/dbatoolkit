@@ -19,6 +19,7 @@ from dba.postgresql_slow import blocking_graph
 from dba.settings import MySQLSettings
 from dba.slow_profiles import (
     collection_completeness,
+    emergency_collectors_for_adapter,
     optional_collectors_for_adapter,
     profile_for_adapter,
     required_collectors_for_adapter,
@@ -94,7 +95,10 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     if graph["anomalies"]:
         findings.append(Finding("BLOCKING_GRAPH_ANOMALY", Severity.WARNING,
             {"anomalies": graph["anomalies"]}, "阻塞图有无效边或循环；重新采样。"))
-    complete_graph = not incomplete and not graph["anomalies"]
+    complete_graph = (not incomplete and not graph["anomalies"] and
+                      all(by_name.get(name) is not None and by_name[name].success
+                          and not by_name[name].truncated
+                          for name in ("active_sessions", "active_requests", "transactions", "blocking")))
     roots: list[dict[str, Any]] = []
     for root_pid in graph["roots"]:
         session = session_map.get(root_pid)
@@ -121,7 +125,8 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                               "仅供 DBA 人工审核；停止当前语句，保留连接，Toolkit 未执行。"),
              ReferenceCommand(f"KILL {root_pid};",
                               "仅供 DBA 人工审核；终止整个连接，Toolkit 未执行。"))
-            if session and complete_graph else ()
+            if (session and complete_graph and session.get("user_name") and session.get("host_raw")
+                and session.get("thread_id") is not None) else ()
         )
         findings.append(Finding("ROOT_BLOCKER", Severity.WARNING, root,
             "重新核对连接身份及回滚影响；Sleep 会话通常没有当前查询可供 KILL QUERY 取消。",
@@ -210,3 +215,62 @@ def diagnose_slow(adapter: MySQLAdapter) -> MySQLSlowReport:
     return build_slow_report(adapter.instance, tuple(results), adapter.settings,
                              version, adapter.statement_script, tuple(required),
                              optional_collectors_for_adapter(adapter))
+
+
+_STAGED_COLLECTORS = {
+    "active_sessions": ActiveSessionsCollector,
+    "active_requests": ActiveRequestsCollector,
+    "transactions": TransactionsCollector,
+    "blocking": BlockingCollector,
+}
+
+
+def collect_slow_phase(adapter: MySQLAdapter, names: tuple[str, ...],
+                       existing: tuple[CollectorResult, ...] = ()) -> tuple[CollectorResult, ...]:
+    results = list(existing)
+    have = {item.collector_name for item in results}
+    supplemental = bool(existing)
+    reconnect_pending = False
+    for name in names:
+        if name in have or name not in _STAGED_COLLECTORS:
+            continue
+        if reconnect_pending:
+            try:
+                adapter.connect()
+            except Exception:
+                break
+            reconnect_pending = False
+        result = _STAGED_COLLECTORS[name](adapter).collect(adapter.instance)
+        results.append(result)
+        have.add(name)
+        if not result.success:
+            if supplemental and name != names[-1]:
+                reconnect_pending = True
+            else:
+                break
+    return tuple(results)
+
+
+def build_slow_phase_report(adapter: MySQLAdapter, results: tuple[CollectorResult, ...],
+                            *, emergency: bool) -> MySQLSlowReport:
+    required = (emergency_collectors_for_adapter(adapter) if emergency else
+                required_collectors_for_adapter(
+                    adapter, ("active_sessions", "active_requests", "transactions", "blocking")))
+    optional = () if emergency else optional_collectors_for_adapter(adapter)
+    report = build_slow_report(adapter.instance, results, adapter.settings, adapter.get_server_version(),
+                               adapter.statement_script, required, optional)
+    core = emergency_collectors_for_adapter(adapter)
+    by_name = {item.collector_name: item for item in results}
+    complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                   for name in core)
+    full_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                        for name in required + optional)
+    report.details.update({"diagnostic_phase": "EMERGENCY" if emergency else "FINAL",
+                           "emergency_evidence_complete": complete,
+                           "emergency_evidence_status": "COMPLETE" if complete else "INCOMPLETE",
+                           "full_profile_evidence_complete": full_complete if not emergency else False,
+                           "full_profile_evidence_status": "PENDING" if emergency else
+                           "COMPLETE" if full_complete else "PARTIAL",
+                           "supplemental_not_collected": tuple(
+                               name for name in required + optional if name not in by_name) if emergency else ()})
+    return report

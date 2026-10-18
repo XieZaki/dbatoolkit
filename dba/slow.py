@@ -18,6 +18,7 @@ from dba.logging import redact
 from dba.settings import SQLServerSettings
 from dba.slow_profiles import (
     collection_completeness,
+    emergency_collectors_for_adapter,
     optional_collectors_for_adapter,
     profile_for_adapter,
     required_collectors_for_adapter,
@@ -266,13 +267,16 @@ def build_slow_report(
             by_name.get(name) is not None and by_name[name].success and not by_name[name].truncated
             for name in ("active_requests", "active_sessions", "transactions", "connections")
         ) and not graph["anomalies"]
+        identity_complete = all(session.get(key) not in (None, "") for key in (
+            "login_time", "login_name", "host_name", "program_name"
+        ))
         references = (
             (
                 ReferenceCommand(
                     f"KILL {sid};", "仅供 DBA 人工审核；重新确认 session 身份及回滚影响。"
                 ),
             )
-            if session and sid > 0 and affected and reference_evidence_complete
+            if session and sid > 0 and affected and reference_evidence_complete and identity_complete
             else ()
         )
         findings.append(
@@ -415,3 +419,68 @@ def diagnose_slow(adapter: SQLServerAdapter) -> SlowReport:
             break
     return build_slow_report(adapter.instance, tuple(results), adapter.settings, version,
                              tuple(required), optional_collectors_for_adapter(adapter))
+
+
+_STAGED_COLLECTORS = {
+    "active_requests": ActiveRequestsCollector,
+    "active_sessions": ActiveSessionsCollector,
+    "transactions": TransactionsCollector,
+    "connections": ConnectionsCollector,
+}
+
+
+def collect_slow_phase(adapter: SQLServerAdapter, names: tuple[str, ...],
+                       existing: tuple[CollectorResult, ...] = ()) -> tuple[CollectorResult, ...]:
+    """Collect only the requested reviewed SQL slots, preserving prior samples."""
+    results = list(existing)
+    have = {item.collector_name for item in results}
+    supplemental = bool(existing)
+    reconnect_pending = False
+    for name in names:
+        if name in have:
+            continue
+        if reconnect_pending:
+            try:
+                adapter.connect()
+            except Exception:
+                break
+            reconnect_pending = False
+        collector = _STAGED_COLLECTORS.get(name)
+        if collector is None:
+            continue
+        result = collector(adapter).collect(adapter.instance)
+        results.append(result)
+        have.add(name)
+        if not result.success:
+            if supplemental and name != names[-1]:
+                reconnect_pending = True
+            else:
+                break
+    return tuple(results)
+
+
+def build_slow_phase_report(adapter: SQLServerAdapter, results: tuple[CollectorResult, ...],
+                            *, emergency: bool) -> SlowReport:
+    version = adapter.get_server_version()
+    required = (emergency_collectors_for_adapter(adapter) if emergency else
+                required_collectors_for_adapter(
+                    adapter, ("active_requests", "active_sessions", "transactions", "connections")))
+    optional = () if emergency else optional_collectors_for_adapter(adapter)
+    report = build_slow_report(adapter.instance, results, adapter.settings, version, required, optional)
+    by_name = {item.collector_name: item for item in results}
+    core = emergency_collectors_for_adapter(adapter)
+    emergency_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                             for name in core)
+    full_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                        for name in required + optional)
+    report.details.update({
+        "diagnostic_phase": "EMERGENCY" if emergency else "FINAL",
+        "emergency_evidence_complete": emergency_complete,
+        "emergency_evidence_status": "COMPLETE" if emergency_complete else "INCOMPLETE",
+        "full_profile_evidence_complete": full_complete if not emergency else False,
+        "full_profile_evidence_status": ("PENDING" if emergency else
+                                          "COMPLETE" if full_complete else "PARTIAL"),
+        "supplemental_not_collected": tuple(
+            name for name in required + optional if name not in by_name) if emergency else (),
+    })
+    return report

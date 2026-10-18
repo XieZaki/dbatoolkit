@@ -153,7 +153,7 @@ def verify(config: dict[str, str]) -> dict[str, Any]:
                 payload = run_cli(["diagnose", "isolated-mysql", "slow",
                                    "--format", "json", "--report", str(html_report)])
                 content = html_report.read_text(encoding="utf-8")
-                assert "Incident Summary" in content and "Findings" in content
+                assert "故障概况" in content and "诊断发现与建议" in content
                 for key in ("administrator_password", "monitor_password", "workload_password"):
                     assert config[key] not in content, "Credential leakage detected"
                 detail = payload["report"]["details"]

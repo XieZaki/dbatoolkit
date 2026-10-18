@@ -15,6 +15,16 @@ class DiskGrowthSqlProfile:
     optional: tuple[str, ...]
 
     @property
+    def emergency(self) -> tuple[str, ...]:
+        """Existing minimum sources useful for an initial space/retention triage."""
+        priority = {"disk_tempdb", "disk_temp_usage", "disk_transactions", "transactions",
+                    "disk_slots", "disk_slots_17_plus", "disk_archiver", "disk_binlog_config",
+                    "disk_binlog_config_legacy", "disk_binlogs", "disk_fra", "disk_fra_usage",
+                    "disk_archive", "disk_archive_volume", "disk_redo"}
+        names = self.required + tuple(name for name in self.optional if name in priority)
+        return tuple(dict.fromkeys(names))
+
+    @property
     def ordered_scripts(self) -> tuple[str, ...]:
         return self.required + self.optional
 
@@ -98,6 +108,9 @@ def validate_disk_binding(binding: Any) -> tuple[str, ...]:
     if sql_profile is not None:
         if not sql_profile.required or set(sql_profile.required) & set(sql_profile.optional):
             errors.append(f"invalid disk-growth collector roles: {binding.sql_profile_id}")
+        if not set(sql_profile.required) <= set(sql_profile.emergency) \
+                or not set(sql_profile.emergency) <= set(sql_profile.required + sql_profile.optional):
+            errors.append(f"invalid emergency disk-growth collector roles: {binding.sql_profile_id}")
     return tuple(errors)
 
 

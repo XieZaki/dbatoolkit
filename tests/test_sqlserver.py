@@ -755,7 +755,7 @@ def test_cli_check_and_status_human_and_json(
                 provider=MemoryCredentialProvider(), driver=FakeDriver()) == 0
     current = json.loads(capsys.readouterr().out)
     assert current["success"] and current["active_requests"] == 2
-    assert current["long_running"] == 1
+    assert current["long_running"] == 2
     assert current["database_states"] == {"ONLINE": 1}
 
 
@@ -892,7 +892,7 @@ def test_long_requests_preserve_truncation(
     adapter.registry = SqlScriptRegistry(tmp_path / "sql")
     with adapter:
         result = LongRunningRequestsCollector(adapter).collect(adapter.instance)
-        assert result.truncated and result.row_count == 1
+        assert result.truncated and result.row_count == 2
 
 
 def test_preflight_truncation_fails_closed(adapter: SQLServerAdapter, driver: FakeDriver) -> None:

@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from dba.core import DiagnosticReport
 from dba.incident import IncidentSummary
 from dba.logging import redact
 
@@ -451,6 +452,113 @@ def render_incident_summary(value: IncidentSummary | dict[str, Any], verbose: bo
                 lines.append(f"  {item.get('collector')}: success={item.get('success')}, "
                              f"truncated={item.get('truncated')}, rows={item.get('row_count')}")
     lines.extend(["", "Detailed Report", f"  {data.get('report_path') or 'Unavailable'}"])
+    return "\n".join(lines)
+
+
+def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str, Any], ...] = (),
+                           *, capture_started_at: str, slow_threshold: int = 10) -> str:
+    """Render the bounded Chinese first-pass response from current evidence."""
+    details = getattr(report, "details", {})
+    title = "数据库性能应急诊断" if report.scenario == "slow" else "数据库空间应急诊断"
+    candidate_labels = {
+        "ROOT_BLOCKER": "根阻塞", "IDLE_OPEN_TRANSACTION": "未结束事务",
+        "BLOCKED_VICTIM": "被阻塞会话", "LONG_RUNNING_SQL": "长运行 SQL",
+    }
+    finding_labels = {
+        "SQLSERVER_DATAFILE_NEAR_LIMIT": "SQL Server 数据文件接近容量上限",
+        "SQLSERVER_TEMPDB_HIGH_USAGE": "SQL Server TempDB 使用率较高",
+        "SQLSERVER_LOG_HIGH_USAGE": "SQL Server 事务日志使用率较高",
+        "SQLSERVER_LOG_REUSE_BLOCKED": "SQL Server 事务日志复用受阻",
+        "SQLSERVER_OLD_ACTIVE_TRANSACTION": "SQL Server 存在长期活动事务",
+        "PG_WAL_RETENTION_SLOT": "PostgreSQL 复制槽保留 WAL",
+        "PG_ARCHIVE_FAILURE": "PostgreSQL WAL 归档失败线索",
+        "PG_LONG_TRANSACTION": "PostgreSQL 存在长期事务",
+        "BINLOG_TOTAL_SIZE_HIGH": "MySQL Binlog 总量较大",
+        "REPLICA_RELAY_LOG_RISK": "MySQL 复制中继日志风险",
+        "LONG_TRANSACTION": "MySQL 存在长期事务",
+        "ORACLE_UNDO_HIGH_USAGE": "Oracle Undo 使用率较高",
+        "ORACLE_TEMP_HIGH_USAGE": "Oracle 临时空间使用率较高",
+        "ORACLE_TABLESPACE_HIGH_USAGE": "Oracle 表空间使用率较高",
+        "ORACLE_FRA_HIGH_USAGE": "Oracle FRA 使用率较高",
+        "ORACLE_FLASHBACK_HIGH_USAGE": "Oracle Flashback 日志使用率较高",
+        "ORACLE_ARCHIVE_DEST_FAILURE": "Oracle 归档目标异常",
+        "ORACLE_ARCHIVE_ACCUMULATION": "Oracle 归档量较大",
+    }
+    lines = [title, "=" * 52, f"实例：{report.instance.id}",
+             f"数据库版本：{details.get('version', 'UNKNOWN')}", f"采集开始：{capture_started_at}"]
+    if report.scenario == "slow":
+        lines.append(f"慢 SQL 阈值：{slow_threshold} 秒")
+        concurrency = details.get("concurrency", {})
+        if isinstance(concurrency, dict):
+            count = next((concurrency[key] for key in
+                          ("connected_sessions", "total_connections", "total_sessions") if key in concurrency), None)
+            blocked = next((concurrency[key] for key in
+                            ("blocked_requests", "blocked_sessions", "blocked_statements") if key in concurrency), None)
+            tx = next((concurrency[key] for key in
+                       ("open_transactions", "active_transactions", "idle_transactions") if key in concurrency), None)
+            if count is not None:
+                lines.append(f"活动/连接会话：{count}")
+            if blocked is not None:
+                lines.append(f"阻塞会话/请求：{blocked}")
+            if tx is not None:
+                lines.append(f"事务相关计数：{tx}")
+        lines.extend(("", "【现场初步判断】"))
+        if details.get("emergency_evidence_complete") is not True:
+            lines.append("应急核心证据不完整；当前结论未知，不能据此判断无阻塞或数据库健康。")
+        elif details.get("roots"):
+            lines.append(f"观测到 {len(details['roots'])} 个阻塞根候选，请核对会话身份及事务上下文。")
+        elif details.get("idle_transactions"):
+            lines.append("观测到与未结束事务关联的会话，请核对事务归属和持续时间。")
+        else:
+            lines.append("本次应急采样未观察到阻塞根或已确认的空闲事务；结论仅适用于当前快照。")
+        lines.extend(("", "【优先核查对象】"))
+        if not candidates:
+            lines.append("当前证据没有可列出的会话候选。")
+        for item in candidates:
+            category = candidate_labels.get(str(item.get("category")), "待核查会话")
+            lines.append(f"{item['rank']}. 会话 {item['session_id']}｜{category}")
+            lines.append(f"   原因：{item['reason']}")
+            lines.append(f"   用户：{item.get('username') or 'N/A'}；主机：{item.get('host') or 'N/A'}；IP：{item.get('client_ip') or 'N/A'}；应用：{item.get('application') or 'N/A'}；状态：{item.get('state') or 'N/A'}")
+            lines.append(f"   SQL 标识：{item.get('sql_id') or 'N/A'}；事务标识：{item.get('transaction_id') or 'N/A'}；运行秒数：{item.get('running_seconds') if item.get('running_seconds') is not None else 'N/A'}")
+            lines.append(f"   登录时间：{item.get('login_time') or 'N/A'}；事务时长：{item.get('transaction_age_seconds') if item.get('transaction_age_seconds') is not None else 'N/A'} 秒；影响会话：{item.get('blocked_session_count', 0)}")
+            lines.append(f"   身份质量：{item.get('identity_quality', 'UNKNOWN')}；{item.get('identity_reuse_note')}")
+        lines.extend(("", "【处置提示】",
+                      "人工操作前重新核对会话 ID、登录时间、用户、主机、应用及事务身份。",
+                      "终止可能触发回滚、额外 I/O、日志/Undo 压力和应用错误；终止不保证立即恢复。Toolkit 未执行任何处置命令。"))
+    else:
+        findings = [finding_labels.get(finding.title, "未分类空间或日志线索")
+                    for finding in report.findings[:5]]
+        category_names = {"TRANSACTION_LOG": "事务日志", "WAL": "WAL", "BINLOG": "Binlog",
+                          "REDO": "Redo", "ARCHIVE": "归档", "FRA": "FRA", "UNDO": "Undo",
+                          "TEMP": "临时空间", "DATA": "数据文件", "TABLE": "表", "INDEX": "索引"}
+        space = details.get("space", [])
+        categories = sorted({category_names.get(str(row.get("category")), str(row.get("category")))
+                             for row in space if isinstance(row, dict) and row.get("category")}) \
+            if isinstance(space, list) else []
+        lines.extend(("", "【当前主要线索】",
+                      "；".join(findings) if findings else
+                      "本次未观察到已确认空间风险。" if details.get("emergency_evidence_complete") else
+                      "应急必需空间证据不完整，当前结论未知。",
+                      f"已观测资源类别：{'、'.join(categories) if categories else 'N/A'}",
+                      f"空间记录：{len(space) if isinstance(space, list) else 0} 项",
+                      "增长率：无法确定（本次为当前状态采样，无历史快照）。",
+                      "当前证据可提示保留因素，但不能单独证明具体会话导致空间增长。",
+                      "不得未经人工验证删除复制槽、日志文件或修改数据库配置。Toolkit 未执行任何处置命令。"))
+        log = details.get("log", {})
+        if isinstance(log, dict) and log:
+            reason = log.get("log_reuse_wait_desc", log.get("archive_mode", log.get("last_failed_time")))
+            if reason is not None:
+                lines.insert(-4, f"日志/归档保留线索：{reason}")
+        other = details.get("other", {})
+        if isinstance(other, dict):
+            slots = other.get("slots")
+            if isinstance(slots, list) and slots:
+                lines.insert(-4, f"复制槽记录：{len(slots)} 项；需人工确认用途和下游消费状态。")
+    lines.extend(("", "【证据状态】",
+                  f"应急核心证据：{'完整' if details.get('emergency_evidence_complete') else '不完整 / 未知'}",
+                  "补充证据：采集中" if details.get("supplemental_pending") else "补充证据：已完成",
+                  "采样为串行 BEST-EFFORT 快照，不是原子快照。", "=" * 52,
+                  "正在继续采集补充证据并生成详细中文 HTML 报告…"))
     return "\n".join(lines)
 
 

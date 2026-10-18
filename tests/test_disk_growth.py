@@ -545,5 +545,5 @@ def test_cli_oracle_disk_growth(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert main(args, provider=Provider(), driver=driver) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["report"]["scenario"] == "disk-growth"
-    assert "Diagnostic Context" in report_path.read_text(encoding="utf-8")
+    assert 'id="diagnostic-context"' in report_path.read_text(encoding="utf-8")
     assert "TOPSECRET" not in report_path.read_text(encoding="utf-8")

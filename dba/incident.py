@@ -375,3 +375,108 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
         source=source, immediate_action=immediate, recovery_actions=tuple(actions),
         termination_risk=risk, report_path=report_path, secondary_signals=secondary,
         collector_summary=collector_summary)
+
+
+def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any], ...]:
+    """Create a deterministic five-row review queue from captured slow evidence."""
+    if report.scenario != "slow":
+        return ()
+    details = getattr(report, "details", {})
+    samples = [item for item in details.get("samples", []) if isinstance(item, dict)]
+    timestamps = [str(item.get("finished_at")) for item in samples if item.get("finished_at")]
+    captured = max(timestamps, default=report.diagnosed_at.isoformat())
+    sessions = details.get("all_sessions", details.get("sessions", []))
+    session_map: dict[str, dict[str, Any]] = {}
+    session_id_counts: dict[str, int] = {}
+    for row in sessions if isinstance(sessions, list) else []:
+        if isinstance(row, dict):
+            sid = _first(row, "session_id", "pid", "processlist_id", "sid")
+            if sid is not None:
+                sid_text = str(sid)
+                session_id_counts[sid_text] = session_id_counts.get(sid_text, 0) + 1
+                inst_id = row.get("inst_id")
+                key = f"{inst_id}:{sid_text}" if inst_id is not None else sid_text
+                session_map[key] = row
+    selected: dict[str, dict[str, Any]] = {}
+
+    def add(row: dict[str, Any], kind: str, priority: int, reason: str) -> None:
+        sid = _first(row, "session_id", "pid", "processlist_id", "sid")
+        if sid is None:
+            return
+        inst_id = row.get("inst_id")
+        identity_key = f"{inst_id}:{sid}" if inst_id is not None else str(sid)
+        previous = selected.get(identity_key)
+        if previous is not None and int(previous["selection_priority"]) <= priority:
+            return
+        session_key = f"{inst_id}:{sid}" if inst_id is not None else str(sid)
+        session = session_map.get(session_key, {})
+        if not session and inst_id is None and session_id_counts.get(str(sid)) == 1:
+            # A single unqualified session row can safely enrich a row whose
+            # source omits instance identity. Multiple matches are ambiguous.
+            session = next((item for key, item in session_map.items()
+                            if key.endswith(f":{sid}") or key == str(sid)), {})
+        request_rows = details.get("all_requests", details.get("active_requests", details.get("top_queries", [])))
+        request = next((item for item in request_rows if isinstance(item, dict)
+                        and str(_first(item, "session_id", "pid", "processlist_id", "sid")) == str(sid)
+                        and (item.get("inst_id") == inst_id if inst_id is not None
+                             else item.get("inst_id") is None)), {}) \
+            if isinstance(request_rows, list) else {}
+        blocked = row.get("blocked_count", row.get("blocked_session_count", 0))
+        running = _first(row, "duration_seconds", "time_seconds")
+        if running is None:
+            elapsed = _first(row, "elapsed_ms", "duration_ms")
+            running = round(elapsed / 1000, 1) if type(elapsed) in (int, float) else None
+        selected[identity_key] = {
+            "session_id": sid, "category": kind, "reason": reason,
+            "session_key": identity_key,
+            "blocked_session_count": blocked if type(blocked) is int else 0,
+            "sql_id": _first(row, "sql_id", "sql_handle", "query_id", "thread_id") or
+                      _first(request, "sql_id", "sql_handle", "query_id", "thread_id"),
+            "transaction_id": _first(row, "transaction_id", "trx_id", "xid"),
+            "username": _first(row, "login_name", "usename", "user_name", "username") or
+                        _first(session, "login_name", "usename", "user_name", "username"),
+            "database": _first(row, "database_name", "datname") or
+                        _first(session, "database_name", "datname"),
+            "host": _first(row, "host_name", "client_hostname", "host_raw", "machine") or
+                    _first(session, "host_name", "client_hostname", "host_raw", "machine"),
+            "client_ip": _first(row, "client_net_address", "client_addr", "host_ip") or
+                         _first(session, "client_net_address", "client_addr", "host_ip"),
+            "application": _first(row, "program_name", "application_name", "program", "module") or
+                           _first(session, "program_name", "application_name", "program", "module"),
+            "state": _first(row, "status", "state", "state_name", "command_name") or
+                     _first(session, "status", "state", "state_name", "command_name"),
+            "running_seconds": running,
+            "transaction_age_seconds": row.get("transaction_age_seconds"),
+            "login_time": _first(row, "login_time", "backend_start", "connect_time") or
+                          _first(session, "login_time", "backend_start", "connect_time"),
+            "selection_priority": priority, "evidence_timestamp": captured,
+            "evidence_quality": details.get("emergency_evidence_status", "UNKNOWN"),
+            "identity_recheck": "REQUIRED_BEFORE_MANUAL_ACTION",
+            "identity_quality": "IDENTITY_INCOMPLETE" if not (
+                _first(row, "login_time", "backend_start", "connect_time") or
+                _first(session, "login_time", "backend_start", "connect_time")) else "RECHECK_REQUIRED",
+            "identity_reuse_note": "会话 ID 可能已复用；必须在人工操作前重新核对当前会话身份。",
+        }
+
+    for row in details.get("roots", []):
+        if isinstance(row, dict):
+            add(row, "ROOT_BLOCKER", 0, "已采样阻塞关系表明该会话为根阻塞候选。")
+    for row in details.get("idle_transactions", []):
+        if isinstance(row, dict):
+            add(row, "IDLE_OPEN_TRANSACTION", 1, "会话与未结束事务证据关联。")
+    requests = details.get("all_requests", details.get("active_requests", details.get("top_queries", [])))
+    for row in requests if isinstance(requests, list) else []:
+        if not isinstance(row, dict):
+            continue
+        blocker = _first(row, "blocking_session_id", "blocking_pid", "blocker_pid")
+        if blocker not in (None, 0, "0", ""):
+            add(row, "BLOCKED_VICTIM", 2, "被阻塞会话是受害方，不应作为根因处理。")
+        elif _first(row, "duration_seconds", "time_seconds", "elapsed_ms", "duration_ms"):
+            add(row, "LONG_RUNNING_SQL", 3, "长运行 SQL 是核查线索，不构成终止建议。")
+    ordered = sorted(selected.values(), key=lambda row: (
+        int(row["selection_priority"]), -int(row["blocked_session_count"]),
+        -int(row["transaction_age_seconds"] or 0) if type(row["transaction_age_seconds"]) is int else 0,
+        str(row["session_key"])))[:5]
+    for rank, row in enumerate(ordered, 1):
+        row["rank"] = rank
+    return tuple(ordered)

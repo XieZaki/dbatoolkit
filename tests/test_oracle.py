@@ -383,6 +383,7 @@ def test_idle_transaction_root_reference_and_report() -> None:
     instance, _, _, _ = fixture()
     sessions = [{"inst_id": 1, "sid": 10, "serial_number": 99,
                  "status": "INACTIVE", "username": "APP", "machine": "host",
+                 "program": "client",
                  "prev_sql_id": "abc"},
                 {"inst_id": 1, "sid": 20, "serial_number": 100, "status": "ACTIVE"}]
     results = (_result("active_sessions", sessions),

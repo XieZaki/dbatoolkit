@@ -18,6 +18,7 @@ from dba.postgresql_collectors import (
 from dba.settings import PostgreSQLSettings
 from dba.slow_profiles import (
     collection_completeness,
+    emergency_collectors_for_adapter,
     optional_collectors_for_adapter,
     profile_for_adapter,
     required_collectors_for_adapter,
@@ -155,7 +156,8 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                               "仅供 DBA 人工审核；cancel 只尝试取消当前查询，Toolkit 未执行。"),
              ReferenceCommand(f"SELECT pg_terminate_backend({root_pid});",
                               "仅供 DBA 人工审核；terminate 将结束会话，Toolkit 未执行。"))
-            if session and complete_graph and not graph["anomalies"] else ()
+            if (session and complete_graph and not graph["anomalies"]
+                and session.get("backend_start") is not None and session.get("usename")) else ()
         )
         findings.append(Finding("ROOT_BLOCKER", Severity.WARNING, root,
             "确认 PID、连接来源、事务及受影响会话；人工决定处理。", references,
@@ -237,3 +239,61 @@ def diagnose_slow(adapter: PostgreSQLAdapter) -> PostgreSQLSlowReport:
             break
     return build_slow_report(adapter.instance, tuple(results), adapter.settings,
                              version, tuple(required), optional_collectors_for_adapter(adapter))
+
+
+_STAGED_COLLECTORS = {
+    "active_sessions": ActiveSessionsCollector,
+    "long_running": LongRunningCollector,
+    "transactions": TransactionsCollector,
+    "blocking": BlockingCollector,
+}
+
+
+def collect_slow_phase(adapter: PostgreSQLAdapter, names: tuple[str, ...],
+                       existing: tuple[CollectorResult, ...] = ()) -> tuple[CollectorResult, ...]:
+    results = list(existing)
+    have = {item.collector_name for item in results}
+    supplemental = bool(existing)
+    reconnect_pending = False
+    for name in names:
+        if name in have or name not in _STAGED_COLLECTORS:
+            continue
+        if reconnect_pending:
+            try:
+                adapter.connect()
+            except Exception:
+                break
+            reconnect_pending = False
+        result = _STAGED_COLLECTORS[name](adapter).collect(adapter.instance)
+        results.append(result)
+        have.add(name)
+        if not result.success:
+            if supplemental and name != names[-1]:
+                reconnect_pending = True
+            else:
+                break
+    return tuple(results)
+
+
+def build_slow_phase_report(adapter: PostgreSQLAdapter, results: tuple[CollectorResult, ...],
+                            *, emergency: bool) -> PostgreSQLSlowReport:
+    required = (emergency_collectors_for_adapter(adapter) if emergency else
+                required_collectors_for_adapter(adapter, ("active_sessions", "long_running", "transactions", "blocking")))
+    optional = () if emergency else optional_collectors_for_adapter(adapter)
+    report = build_slow_report(adapter.instance, results, adapter.settings, adapter.get_server_version(),
+                               required, optional)
+    core = emergency_collectors_for_adapter(adapter)
+    by_name = {item.collector_name: item for item in results}
+    complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                   for name in core)
+    full_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
+                        for name in required + optional)
+    report.details.update({"diagnostic_phase": "EMERGENCY" if emergency else "FINAL",
+                           "emergency_evidence_complete": complete,
+                           "emergency_evidence_status": "COMPLETE" if complete else "INCOMPLETE",
+                           "full_profile_evidence_complete": full_complete if not emergency else False,
+                           "full_profile_evidence_status": "PENDING" if emergency else
+                           "COMPLETE" if full_complete else "PARTIAL",
+                           "supplemental_not_collected": tuple(
+                               name for name in required + optional if name not in by_name) if emergency else ()})
+    return report

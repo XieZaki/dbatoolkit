@@ -35,6 +35,8 @@ Replication diagnosis is observational only. It reads status from the selected I
 
 `diagnose` 默认提供事故处置摘要；Human HTML 是有行数和体积预算的 DBA 分析报告，不是原始采集数据仓库。`--json` 提供机器可读诊断数据，运行日志使用 JSONL。报告名为 `reports/<database_id>_<scenario>_<本地时间>.html`，同一秒冲突时追加 `_02` 等后缀。明确诊断 SQL Server 执行计划且 XML 可用时，会在同目录生成配对 `.sqlplan`；HTML 不嵌入原始 XML。Reference Kill/Cancel/Terminate 命令只有在阻塞根会话、受影响会话和采样完整性均有证据时才会显示；命令始终要求 DBA 人工审核，Toolkit 不执行。
 
+Slow 与 Disk-Growth 默认采用同步分阶段应急诊断：先采集核心证据并在终端输出中文初报，再补充证据并写出中文 HTML；`--json` 仍只输出单个 JSON 对象。初报和完整 Profile 证据状态分开显示，串行采样标记为 `BEST_EFFORT`，不代表原子快照。操作边界与阈值配置见 [应急诊断简要说明](docs/EMERGENCY_DIAGNOSIS.md)。
+
 SQL Server 真实连接安装 `python -m pip install -e ".[sqlserver]"`，并通过企业批准渠道安装 Microsoft ODBC Driver 18（优先）或 Driver 17（兼容回退）。PostgreSQL、MySQL、Oracle、MongoDB、Redis 分别使用 `postgresql`、`mysql`、`oracle`、`mongodb`、`redis` extra；`all-db` 安装六库 Python 驱动。Oracle 固定默认 Thin Mode，无需 Instant Client。完整离线流程见 [部署文档](docs/DEPLOYMENT.md)。
 
 多运维机首次部署、升级、回滚和 Git 敏感数据检查见 [Repository & Release 流程](docs/REPOSITORY.md)。Windows/Linux 升级脚本只使用本地 wheelhouse，不拉取代码、不改本地 Inventory 或 Credential Store。

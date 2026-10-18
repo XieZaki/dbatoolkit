@@ -183,7 +183,7 @@ def verify(config: dict[str, str]) -> dict[str, Any]:
                 text = html_report.read_text(encoding="utf-8")
                 for key in ("monitor_password", "administrator_password", "workload_password"):
                     assert config[key] not in captured + text, "Credential leakage detected"
-                assert "Incident Summary" in text and "Blocking Analysis" in text
+                assert "故障概况" in text and "锁与阻塞链" in text
                 payload_report = payload["report"]
                 report["scenarios"].append(
                     {

@@ -130,6 +130,7 @@ def test_idle_transaction_evidence_source_age_and_last_sql() -> None:
                 "session_id": 51,
                 "status": "sleeping",
                 "open_transaction_count": 1,
+                "login_time": "2026-10-13T09:00:00",
                 "host_name": "app",
                 "login_name": "business",
                 "program_name": "client",
@@ -291,7 +292,7 @@ def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Non
     assert payload["incident_summary"]["data_completeness"] == "COMPLETE"
     assert payload["incident_summary"]["report_path"] == str(output)
     html = output.read_text(encoding="utf-8")
-    assert "Incident Summary" in html and "Blocking Analysis" in html
+    assert "故障概况" in html and "锁与阻塞链" in html
     assert set(driver.connection.executed) <= {
         "monitor_capabilities",
         "monitor_permissions",
@@ -313,7 +314,7 @@ def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Non
     console_driver.connection.results.update(transactions=[], connections=[])
     assert main(human_args, provider=MemoryCredentialProvider(), driver=console_driver) == 0
     human_output = capsys.readouterr().out
-    assert "Incident Summary" in human_output and "Detailed Report" in human_output
+    assert "数据库性能应急诊断" in human_output and "详细中文报告已写入" in human_output
     assert "Current SQL" not in human_output and "Blocking Tree" not in human_output
     for option in ("--execute", "--force"):
         with pytest.raises(SystemExit) as exc:

@@ -3,11 +3,12 @@ import re
 import time
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
 from dba import __version__
+from dba.collectors import CollectorResult
 from dba.connection import public_connection_settings, resolve_connection_settings
 from dba.core import DatabaseType, DiagnosticReport
 from dba.credential_session import (
@@ -24,7 +25,7 @@ from dba.credentials import (
     prompt_credential_for_storage,
     validate_alias,
 )
-from dba.disk_growth import diagnose_disk_growth
+from dba.disk_growth import collect_disk_growth_phase
 from dba.disk_growth_profiles import validate_disk_profiles
 from dba.encrypted_credentials import (
     CredentialResolver,
@@ -36,15 +37,17 @@ from dba.environment import driver_info
 from dba.errors import ToolkitError
 from dba.execution_plan import diagnose_plan
 from dba.execution_plan_profiles import validate_plan_profiles
-from dba.incident import build_incident_summary
+from dba.incident import build_incident_summary, build_priority_candidates
 from dba.inventory import Inventory, ValidationError
 from dba.logging import configure_logging, redact
 from dba.mysql import MySQLAdapter
 from dba.mysql_collectors import COLLECTORS as MYSQL_COLLECTORS
-from dba.mysql_slow import diagnose_slow as diagnose_mysql_slow
+from dba.mysql_slow import build_slow_phase_report as build_mysql_slow_phase_report
+from dba.mysql_slow import collect_slow_phase as collect_mysql_slow_phase
 from dba.oracle import OracleAdapter
 from dba.oracle_collectors import COLLECTORS as ORACLE_COLLECTORS
-from dba.oracle_slow import diagnose_slow as diagnose_oracle_slow
+from dba.oracle_slow import build_slow_phase_report as build_oracle_slow_phase_report
+from dba.oracle_slow import collect_slow_phase as collect_oracle_slow_phase
 from dba.permissions import (
     ALL_FEATURES,
     OraclePrincipal,
@@ -61,11 +64,13 @@ from dba.permissions import (
 from dba.permissions import REGISTRY as PERMISSION_REGISTRY
 from dba.postgresql import PostgreSQLAdapter
 from dba.postgresql_collectors import COLLECTORS as PG_COLLECTORS
-from dba.postgresql_slow import diagnose_slow as diagnose_pg_slow
+from dba.postgresql_slow import build_slow_phase_report as build_pg_slow_phase_report
+from dba.postgresql_slow import collect_slow_phase as collect_pg_slow_phase
 from dba.presentation import (
     CheckResult,
     OutputMode,
     StatusResult,
+    render_emergency_triage,
     render_human,
     render_incident_summary,
     render_json,
@@ -75,9 +80,22 @@ from dba.replication import diagnose_replication
 from dba.replication_collectors import validate_replication_profiles
 from dba.reporting import HtmlReportRenderer, build_report_model, render_bounded
 from dba.runtime import RuntimeStatus, database_runtime_status, doctor, runtime_info
-from dba.settings import MySQLSettings, OracleSettings, PostgreSQLSettings, SQLServerSettings
-from dba.slow import diagnose_slow
-from dba.slow_profiles import validate_slow_profiles
+from dba.settings import (
+    MySQLSettings,
+    OracleSettings,
+    PostgreSQLSettings,
+    SQLServerSettings,
+    apply_diagnostic_threshold,
+    validate_diagnostic_settings,
+)
+from dba.slow import build_slow_phase_report as build_sqlserver_slow_phase_report
+from dba.slow import collect_slow_phase as collect_sqlserver_slow_phase
+from dba.slow_profiles import (
+    emergency_collectors_for_adapter,
+    optional_collectors_for_adapter,
+    required_collectors_for_adapter,
+    validate_slow_profiles,
+)
 from dba.sqlserver import SQLServerAdapter
 from dba.sqlserver_collectors import COLLECTORS
 from dba.versioning import (
@@ -173,13 +191,13 @@ def _emit(args: Any, command: str, result: Any) -> None:
 
 def _runtime_defaults(database_type: DatabaseType, path: Path | None) -> object:
     if database_type == DatabaseType.SQLSERVER:
-        return SQLServerSettings.load(path) if path else SQLServerSettings()
+        return apply_diagnostic_threshold(SQLServerSettings.load(path) if path else SQLServerSettings(), path)
     if database_type == DatabaseType.POSTGRESQL:
-        return PostgreSQLSettings.load(path) if path else PostgreSQLSettings()
+        return apply_diagnostic_threshold(PostgreSQLSettings.load(path) if path else PostgreSQLSettings(), path)
     if database_type == DatabaseType.MYSQL:
-        return MySQLSettings.load(path) if path else MySQLSettings()
+        return apply_diagnostic_threshold(MySQLSettings.load(path) if path else MySQLSettings(), path)
     if database_type == DatabaseType.ORACLE:
-        return OracleSettings.load(path) if path else OracleSettings()
+        return apply_diagnostic_threshold(OracleSettings.load(path) if path else OracleSettings(), path)
     if database_type in {DatabaseType.MONGODB, DatabaseType.REDIS}:
         return object()
     raise ToolkitError("NotImplemented", "Connection settings are not implemented for this database type.")
@@ -658,6 +676,10 @@ def main(
     permission_credential: Credential | None = None
     instance_for_hint = None
     adapter_instance: Any | None = None
+    diagnostic_timing: dict[str, Any] | None = None
+    triage_completed_at: str | None = None
+    capture_started_at: str | None = None
+    capture_finished_at: str | None = None
     try:
         inventory = Inventory.load(args.inventory)
         if args.command == "list":
@@ -684,6 +706,7 @@ def main(
                 ).get("selected_native_driver")
             _emit(args, "show", redact({**asdict(shown), "effective_connection": effective}))
         elif args.command == "validate":
+            validate_diagnostic_settings(args.settings)
             registry = SqlScriptRegistry(args.sql_root)
             scripts = registry.validate()
             profile_errors = PROFILE_RESOLVER.validate()
@@ -1370,13 +1393,43 @@ def main(
                                 },
                             )
                         cast(Any, adapter).disk_growth_profile = profile
-                        report = diagnose_disk_growth(adapter)
+                        stage_started = time.monotonic()
+                        capture_started_at = datetime.now(timezone.utc).isoformat()
+                        report = collect_disk_growth_phase(adapter, emergency=True)
+                        report.details.update({"capture_started_at": capture_started_at,
+                                               "snapshot_consistency": "BEST_EFFORT"})
+                        triage_completed_at = datetime.now(timezone.utc).isoformat()
+                        first_summary_monotonic: float | None = None
+                        if args.format == "console" and not args.json and not args.quiet:
+                            print(render_emergency_triage(report, capture_started_at=capture_started_at), flush=True)
+                            first_summary_monotonic = time.monotonic()
+                        disk_results = cast(tuple[CollectorResult, ...],
+                                            getattr(report, "_collector_results", ()))
+                        if report.details.get("emergency_evidence_complete"):
+                            report = collect_disk_growth_phase(cast(Any, adapter), emergency=False,
+                                                               existing=disk_results)
+                        else:
+                            report.details["full_profile_evidence_complete"] = False
+                            report.details["full_profile_evidence_status"] = "INCOMPLETE"
+                        report.details.update({"capture_started_at": capture_started_at,
+                                               "triage_completed_at": triage_completed_at,
+                                               "capture_finished_at": datetime.now(timezone.utc).isoformat(),
+                                               "snapshot_consistency": "BEST_EFFORT",
+                                               "supplemental_pending": False})
+                        capture_finished_at = report.details["capture_finished_at"]
+                        diagnostic_timing = {
+                            "time_to_first_summary_ms": round((first_summary_monotonic - started) * 1000)
+                            if first_summary_monotonic is not None else None,
+                            "collection_ms": round((time.monotonic() - stage_started) * 1000),
+                            "full_collection_ms": round((time.monotonic() - started) * 1000),
+                            "report_write_ms": None,
+                        }
                         output = {"success": not report.details["incomplete"], "report": asdict(report)}
                         output["version_profile"] = asdict(profile)
                         output["permission_readiness"] = {
                             "status": assessment["status"].value,
                             "missing_optional": assessment["missing_optional"],
-                            "data_visibility": report.details.get("data_visibility", "UNKNOWN"),
+                            "data_visibility": cast(Any, report).details.get("data_visibility", "UNKNOWN"),
                         }
                     elif args.scenario == "slow":
                         profile, detection = resolve_profile_for_adapter(adapter, "slow")
@@ -1424,16 +1477,67 @@ def main(
                                     "dba_approval_required": True,
                                 },
                             )
-                        report = (diagnose_oracle_slow(adapter) if isinstance(adapter, OracleAdapter)
-                                  else diagnose_mysql_slow(adapter) if isinstance(adapter, MySQLAdapter)
-                                  else diagnose_pg_slow(adapter) if isinstance(adapter, PostgreSQLAdapter)
-                                  else diagnose_slow(adapter))
-                        output = {"success": not report.details["incomplete"], "report": asdict(report)}
+                        stage_started = time.monotonic()
+                        capture_started_at = datetime.now(timezone.utc).isoformat()
+                        emergency_names = emergency_collectors_for_adapter(adapter)
+                        phase_collect: Any
+                        phase_build: Any
+                        if isinstance(adapter, OracleAdapter):
+                            phase_collect = collect_oracle_slow_phase
+                            phase_build = build_oracle_slow_phase_report
+                        elif isinstance(adapter, MySQLAdapter):
+                            phase_collect = collect_mysql_slow_phase
+                            phase_build = build_mysql_slow_phase_report
+                        elif isinstance(adapter, PostgreSQLAdapter):
+                            phase_collect = collect_pg_slow_phase
+                            phase_build = build_pg_slow_phase_report
+                        else:
+                            phase_collect = collect_sqlserver_slow_phase
+                            phase_build = build_sqlserver_slow_phase_report
+                        collected = phase_collect(cast(Any, adapter), emergency_names)
+                        report = phase_build(adapter, collected, emergency=True)
+                        cast(Any, report).details.update({"capture_started_at": capture_started_at,
+                                                          "snapshot_consistency": "BEST_EFFORT"})
+                        emergency_candidates = build_priority_candidates(report)
+                        cast(Any, report).details["priority_candidates"] = emergency_candidates
+                        triage_completed_at = datetime.now(timezone.utc).isoformat()
+                        first_summary_monotonic = None
+                        if args.format == "console" and not args.json and not args.quiet:
+                            threshold = getattr(adapter.settings, "long_running_seconds", 10)
+                            print(render_emergency_triage(
+                                report, emergency_candidates, capture_started_at=capture_started_at,
+                                slow_threshold=threshold), flush=True)
+                            first_summary_monotonic = time.monotonic()
+                        core_complete = cast(Any, report).details.get("emergency_evidence_complete") is True
+                        if core_complete:
+                            full_names = tuple(dict.fromkeys(
+                                required_collectors_for_adapter(adapter, ())
+                                + optional_collectors_for_adapter(adapter)))
+                            collected = phase_collect(cast(Any, adapter), full_names, collected)
+                            report = phase_build(cast(Any, adapter), collected, emergency=False)
+                        else:
+                            cast(Any, report).details["full_profile_evidence_complete"] = False
+                            cast(Any, report).details["full_profile_evidence_status"] = "INCOMPLETE"
+                        cast(Any, report).details.update({"priority_candidates": build_priority_candidates(report),
+                                               "capture_started_at": capture_started_at,
+                                               "triage_completed_at": triage_completed_at,
+                                               "capture_finished_at": datetime.now(timezone.utc).isoformat(),
+                                               "snapshot_consistency": "BEST_EFFORT",
+                                               "supplemental_pending": False})
+                        capture_finished_at = cast(Any, report).details["capture_finished_at"]
+                        diagnostic_timing = {
+                            "time_to_first_summary_ms": round((first_summary_monotonic - started) * 1000)
+                            if first_summary_monotonic is not None else None,
+                            "collection_ms": round((time.monotonic() - stage_started) * 1000),
+                            "full_collection_ms": round((time.monotonic() - started) * 1000),
+                            "report_write_ms": None,
+                        }
+                        output = {"success": not cast(Any, report).details["incomplete"], "report": asdict(report)}
                         output["version_profile"] = asdict(profile)
                         output["permission_readiness"] = {
                             "status": assessment["status"].value,
                             "missing_optional": assessment["missing_optional"],
-                            "data_visibility": report.details.get("data_visibility", "UNKNOWN"),
+                            "data_visibility": cast(Any, report).details.get("data_visibility", "UNKNOWN"),
                         }
                     elif args.scenario == "replication":
                         report = diagnose_replication(adapter)
@@ -1558,8 +1662,24 @@ def main(
                                            plan_artifact=(plan_artifact_path.name
                                                           if plan_artifact_path else None))
                 html_content = render_bounded(model, HtmlReportRenderer().render)
+                report_write_started = time.monotonic()
                 with report_path.open("x", encoding="utf-8") as report_file:
                     report_file.write(html_content)
+                report_write_duration_ms = round((time.monotonic() - report_write_started) * 1000)
+                report_written_at = datetime.now(timezone.utc).isoformat()
+                if diagnostic_timing is not None:
+                    diagnostic_timing["report_write_duration_ms"] = report_write_duration_ms
+                    diagnostic_timing["total_report_ms"] = round((time.monotonic() - started) * 1000)
+                    cast(Any, report).details["report_written_at"] = report_written_at
+                    cast(Any, report).details["diagnostic_timings_ms"] = diagnostic_timing
+                    output["report"] = asdict(report)
+                    output["capture_started_at"] = capture_started_at
+                    output["triage_completed_at"] = triage_completed_at
+                    output["capture_finished_at"] = capture_finished_at
+                    output["report_written_at"] = report_written_at
+                    output["snapshot_consistency"] = "BEST_EFFORT"
+                    output["diagnostic_timings_ms"] = diagnostic_timing
+                    output["triage_time_to_first_summary_ms"] = diagnostic_timing["time_to_first_summary_ms"]
                 if plan_artifact_path is not None and plan_xml is not None:
                     created_plan = False
                     try:
@@ -1578,6 +1698,11 @@ def main(
 
                         print(render_replication_summary(report, report_path=str(report_path),
                                                          verbose=args.verbose))
+                    elif args.scenario in {"slow", "disk-growth"}:
+                        if args.quiet:
+                            print(f"{'READY' if output.get('success') else 'PARTIAL'}  {report_path}", flush=True)
+                        else:
+                            print(f"\n详细中文报告已写入：{report_path}", flush=True)
                     else:
                         print(render_incident_summary(incident_summary, verbose=args.verbose))
                 else:

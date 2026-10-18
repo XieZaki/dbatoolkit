@@ -64,10 +64,11 @@ def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() 
     report = _report()
     summary = build_incident_summary(report, "reports/sqlserver2022_slow.html")
     page = HtmlReportRenderer().render(build_report_model(report, summary))
-    assert page.index("Incident Summary") < page.index("Immediate Recovery")
-    assert page.index("Immediate Recovery") < page.index("Root Cause Candidate")
-    assert "Blocking Analysis" in page and "Session Identity" in page
-    assert "Transaction Analysis" in page and "Request Runtime" in page
+    assert '<html lang="zh-CN">' in page
+    assert page.index("故障概况") < page.index("人工处置参考")
+    assert page.index("人工处置参考") < page.index("现场诊断结论")
+    assert "锁与阻塞链" in page and "会话身份与来源" in page
+    assert "长期未提交事务" in page and "请求运行信息" in page
     assert "59" in page and "67" in page
     assert "Long Running Requests" in page and "Blocked 2" in page and "Non-Blocked 1" in page
     assert "KILL 57;" in page and "Toolkit Executed" in page and "Rollback Risk" in page
@@ -88,9 +89,9 @@ def test_human_report_tables_have_fixed_columns_and_hide_unrelated_session_field
         build_incident_summary(report, "reports/report.html")))
     assert "secret internal field" not in page
     assert "must not appear" not in page
-    assert "Session Identity" in page and "Request Runtime" in page
+    assert "会话身份与来源" in page and "请求运行信息" in page
     assert "Open Txn" not in page or "Open Transaction" in page
-    assert "Appendix — Other Sessions" in page
+    assert "其他会话（附录）" in page
 
 
 def test_report_policy_bounds_high_concurrency_and_discloses_omissions() -> None:
@@ -119,7 +120,7 @@ def test_report_policy_bounds_high_concurrency_and_discloses_omissions() -> None
     page = render_bounded(build_report_model(report, summary, policy=policy),
                           HtmlReportRenderer().render, policy)
     assert "omitted from the human report" in page.lower()
-    assert "Immediate Recovery" in page and "Root Cause Candidate" in page
+    assert "人工处置参考" in page and "现场诊断结论" in page
     assert "Long Running Requests 303 · Blocked 302 · Non-Blocked 1" in page
     assert len(page.encode("utf-8")) < policy.hard_report_bytes
     assert page.count("<tr>") < 100
@@ -134,10 +135,10 @@ def test_hard_report_size_fallback_keeps_incident_and_recovery() -> None:
     policy = HumanReportPolicy(soft_report_bytes=4096, hard_report_bytes=16 * 1024)
     page = render_bounded(build_report_model(report, summary, policy=policy),
                           HtmlReportRenderer().render, policy)
-    assert "Incident Summary" in page
-    assert "Immediate Recovery" in page
-    assert "Root Cause Candidate" in page
-    assert "Collection Quality" in page
+    assert "故障概况" in page
+    assert "人工处置参考" in page
+    assert "现场诊断结论" in page
+    assert "证据完整性" in page
     assert "Report evidence was reduced" in page
     assert len(page.encode("utf-8")) <= policy.hard_report_bytes
 
@@ -186,7 +187,7 @@ def test_default_human_report_budget_for_high_session_counts(session_count: int)
         "roots": [57], "children": {57: list(range(1, blocked_count + 1))}, "anomalies": []}
     summary = build_incident_summary(report, "reports/synthetic.html")
     page = render_bounded(build_report_model(report, summary), HtmlReportRenderer().render)
-    assert "Immediate Recovery" in page and "Root Cause Candidate" in page
+    assert "人工处置参考" in page and "现场诊断结论" in page
     assert "Omitted" in page or "omitted" in page
     assert len(page.encode("utf-8")) <= DEFAULT_HUMAN_REPORT_POLICY.hard_report_bytes
     assert len(page.encode("utf-8")) < 5 * 1024 * 1024

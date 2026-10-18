@@ -1,7 +1,38 @@
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
+from typing import Any, cast
 
 from dba.inventory import ValidationError, load_yaml
+
+
+def _diagnostic_threshold(data: object) -> int | None:
+    if not isinstance(data, dict) or "diagnostics" not in data:
+        return None
+    diagnostics = data["diagnostics"]
+    if not isinstance(diagnostics, dict) or set(diagnostics) != {"slow"}:
+        raise ValidationError("diagnostics must contain only slow.threshold_seconds")
+    slow = diagnostics["slow"]
+    if not isinstance(slow, dict) or set(slow) != {"threshold_seconds"}:
+        raise ValidationError("diagnostics.slow must contain threshold_seconds")
+    value = slow["threshold_seconds"]
+    if type(value) is not int or not 1 <= value <= 86400:
+        raise ValidationError("diagnostics.slow.threshold_seconds must be an integer in 1..86400")
+    return value
+
+
+def apply_diagnostic_threshold(settings: object, path: Path | None) -> object:
+    """Apply the shared slow threshold without changing per-engine settings contracts."""
+    if path is None:
+        return settings
+    data = load_yaml(path)
+    threshold = _diagnostic_threshold(data)
+    return cast(Any, replace(cast(Any, settings), long_running_seconds=threshold)) \
+        if threshold is not None else settings
+
+
+def validate_diagnostic_settings(path: Path | None) -> None:
+    if path is not None:
+        _diagnostic_threshold(load_yaml(path))
 
 
 @dataclass(frozen=True)
@@ -10,7 +41,7 @@ class SQLServerSettings:
     query_timeout: int = 10
     encrypt: bool = True
     trust_server_certificate: bool = False
-    long_running_seconds: int = 60
+    long_running_seconds: int = 10
     slow_top_n: int = 10
     high_concurrency_threshold: int = 50
     plan_cardinality_ratio_warning: int = 10
@@ -47,7 +78,7 @@ class SQLServerSettings:
     def load(cls, path: Path) -> "SQLServerSettings":
         data = load_yaml(path)
         if not isinstance(data, dict) or "sqlserver" not in data or not set(data) <= {
-            "sqlserver", "postgresql", "mysql", "oracle"
+            "sqlserver", "postgresql", "mysql", "oracle", "diagnostics"
         }:
             raise ValidationError("Settings must contain sqlserver and optional postgresql")
         values = data["sqlserver"]
@@ -61,7 +92,7 @@ class PostgreSQLSettings:
     connect_timeout: int = 5
     query_timeout: int = 10
     sslmode: str = "verify-full"
-    long_running_seconds: int = 60
+    long_running_seconds: int = 10
     slow_top_n: int = 10
     high_concurrency_threshold: int = 50
     idle_transaction_seconds: int = 60
@@ -81,7 +112,7 @@ class PostgreSQLSettings:
     def load(cls, path: Path) -> "PostgreSQLSettings":
         data = load_yaml(path)
         if not isinstance(data, dict) or "postgresql" not in data or not set(data) <= {
-            "sqlserver", "postgresql", "mysql", "oracle"
+            "sqlserver", "postgresql", "mysql", "oracle", "diagnostics"
         }:
             raise ValidationError("Settings must contain postgresql and optional sqlserver")
         values = data["postgresql"]
@@ -99,7 +130,7 @@ class MySQLSettings:
     ssl_ca: str | None = None
     ssl_verify_cert: bool = True
     ssl_verify_identity: bool = True
-    long_running_seconds: int = 60
+    long_running_seconds: int = 10
     slow_top_n: int = 10
     high_concurrency_threshold: int = 50
     idle_transaction_seconds: int = 60
@@ -123,7 +154,7 @@ class MySQLSettings:
     def load(cls, path: Path) -> "MySQLSettings":
         data = load_yaml(path)
         if not isinstance(data, dict) or "mysql" not in data or not set(data) <= {
-            "sqlserver", "postgresql", "mysql", "oracle"
+            "sqlserver", "postgresql", "mysql", "oracle", "diagnostics"
         }:
             raise ValidationError("Settings must contain mysql and optional other database sections")
         values = data["mysql"]
@@ -136,7 +167,7 @@ class MySQLSettings:
 class OracleSettings:
     connect_timeout: int = 5
     call_timeout: int = 10
-    long_running_seconds: int = 60
+    long_running_seconds: int = 10
     slow_top_n: int = 10
     high_concurrency_threshold: int = 50
     idle_transaction_seconds: int = 60
@@ -151,7 +182,7 @@ class OracleSettings:
     def load(cls, path: Path) -> "OracleSettings":
         data = load_yaml(path)
         if not isinstance(data, dict) or "oracle" not in data or not set(data) <= {
-            "sqlserver", "postgresql", "mysql", "oracle"
+            "sqlserver", "postgresql", "mysql", "oracle", "diagnostics"
         }:
             raise ValidationError("Settings must contain oracle and optional other database sections")
         values = data["oracle"]
