@@ -372,7 +372,14 @@ def _collect_disk_growth(adapter: DiskAdapter) -> DiskGrowthReport:
     sql_profile = sql_profile_for_disk(profile.sql_profile_id)
     version = profile.detected_raw_version or adapter.get_server_version()
     results: list[CollectorResult] = []
-    for name in sql_profile.ordered_scripts:
+    reconnect_after_optional_failure = False
+    for index, name in enumerate(sql_profile.ordered_scripts):
+        if reconnect_after_optional_failure:
+            try:
+                adapter.connect()
+            except ToolkitError:
+                break
+            reconnect_after_optional_failure = False
         if (name == "disk_binlogs" and results
                 and any(result.collector_name in {"disk_binlog_config", "disk_binlog_config_legacy"}
                         and result.rows and not result.rows[0].get("binary_log_enabled")
@@ -401,7 +408,14 @@ def _collect_disk_growth(adapter: DiskAdapter) -> DiskGrowthReport:
                                      result.error_type, result.error_message)
         results.append(result)
         if not result.success:
-            break  # Driver adapters close a failed connection; never reuse it.
+            if name in sql_profile.required:
+                break
+            if isinstance(adapter, OracleAdapter) and index + 1 < len(sql_profile.ordered_scripts):
+                # Oracle closes a connection after query errors. Keep optional evidence independent:
+                # a denied FRA view must not prevent a later, separately granted transaction query.
+                reconnect_after_optional_failure = True
+            else:
+                break  # Driver adapters close a failed connection; never reuse it.
     return build_disk_report(adapter.instance, tuple(results), version,
                              required_collectors=sql_profile.required,
                              optional_collectors=sql_profile.optional,

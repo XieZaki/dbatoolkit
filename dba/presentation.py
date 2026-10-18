@@ -143,14 +143,14 @@ def render_human(command: str, value: Any) -> str:
             if row.get("missing_required"):
                 lines.append(_line(f"{row['feature']} missing", ", ".join(row["missing_required"])))
             if row.get("required_privileges"):
-                lines.extend([_line(f"{row['feature']} required permissions", ""),
+                lines.extend([f"  {row['feature']} required permissions",
                               *[f"  {item}" for item in row["required_privileges"]]])
             if row.get("missing_optional"):
                 lines.append(_line(f"{row['feature']} optional", ", ".join(row["missing_optional"])))
             if row.get("impact") and row.get("status") in {"PARTIAL", "MISSING", "UNKNOWN"}:
                 lines.append(_line(f"{row['feature']} impact", row["impact"]))
             if row.get("reference_grant"):
-                lines.extend([_line(f"{row['feature']} reference grants", ""),
+                lines.extend([f"  {row['feature']} reference grants",
                               row["reference_grant"], "Toolkit did NOT execute this script."])
         runtime = data.get("runtime_verification")
         version = data.get("version_profile")

@@ -25,6 +25,7 @@ from dba.disk_growth_profiles import sql_profile_for_disk, validate_disk_profile
 from dba.disk_growth_reporter import render_console, render_markdown
 from dba.incident import build_incident_summary
 from dba.inventory import ValidationError
+from dba.oracle import OracleAdapter
 from dba.presentation import render_human
 from dba.registry import SqlScriptRegistry
 from dba.security import check_sql
@@ -353,6 +354,56 @@ def test_oracle_zero_transaction_rows_are_valid_evidence() -> None:
     assert summary.status == "HEALTHY" and summary.data_completeness == "PARTIAL"
 
 
+def test_oracle_optional_failure_reconnects_for_later_transaction_evidence() -> None:
+    registry = SqlScriptRegistry(ROOT / "sql")
+
+    class FakeOracleAdapter(OracleAdapter):
+        def __init__(self) -> None:
+            self.instance = instance(DatabaseType.ORACLE)
+            self.registry = registry
+            self.disk_growth_profile = resolved_disk_profile(DatabaseType.ORACLE)
+            self.reconnects = 0
+            self.seen: list[str] = []
+
+        def connect(self) -> None:
+            self.reconnects += 1
+
+        def disconnect(self) -> None:
+            return None
+
+        def get_server_version(self) -> str:
+            return "23.26.3.0.0"
+
+        def health_check(self) -> bool:
+            return True
+
+        def execute_readonly(self, script: Any) -> CollectorResult:
+            name = script.metadata.name
+            self.seen.append(name)
+            if name == "disk_tablespaces":
+                return result(name, {"tablespace_name": "APP", "contents": "PERMANENT",
+                                     "used_percent": 50})
+            if name == "disk_files":
+                return result(name, {"file_name": "app01.dbf", "size_bytes": 1000})
+            if name == "disk_temp":
+                return result(name, {"tablespace_name": "TEMP", "size_bytes": 100,
+                                     "free_bytes": 80})
+            if name == "disk_fra":
+                return result(name, success=False)
+            return result(name)
+
+    adapter = FakeOracleAdapter()
+    report = diagnose_disk_growth(adapter)
+    summary = build_incident_summary(report)
+
+    assert adapter.reconnects == 1
+    assert adapter.seen[-1] == "disk_transactions"
+    assert report.details["other"]["active_transaction_count"] == 0
+    assert "disk_transactions" not in report.details["optional_unavailable"]
+    assert "disk_transactions" not in summary.missing_evidence
+    assert summary.status == "HEALTHY"
+
+
 def test_oracle_one_transaction_row_is_reported_as_available_evidence() -> None:
     tx = result("disk_transactions", {"xid": "1.2.3", "transaction_age_seconds": 4000,
                                        "used_ublk": 4, "used_urec": 2})
@@ -444,6 +495,8 @@ def test_oracle_permission_cli_shows_current_optional_impact_and_required_contra
     assert "disk-growth required permissions" in human
     assert "disk-growth reference grants" in human
     assert "Toolkit did NOT execute this script." in human
+    assert "required permissionsUNKNOWN" not in human
+    assert "reference grantsUNKNOWN" not in human
 
 
 @pytest.mark.parametrize(("status", "expected"), [
