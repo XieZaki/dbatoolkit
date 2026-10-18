@@ -1,5 +1,6 @@
 import argparse
 import re
+import sys
 import time
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -264,6 +265,16 @@ def _oracle_principal_output(adapter: Any, credential: Credential | None) -> dic
     return result
 
 
+def _configure_windows_pipe_encoding() -> None:
+    """Keep human-readable UTF-8 output when Windows redirects CLI streams."""
+    if not sys.platform.startswith("win"):
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not stream.isatty() and callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -271,6 +282,7 @@ def main(
     driver: Any | None = None,
     credential_store: CredentialStore | None = None,
 ) -> int:
+    _configure_windows_pipe_encoding()
     parser = argparse.ArgumentParser(
         prog="dba", description=("Common DBA commands. Missing database credentials can be entered "
                                 "interactively when a command first needs them."),

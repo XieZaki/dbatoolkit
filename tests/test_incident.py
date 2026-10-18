@@ -96,6 +96,15 @@ def test_incomplete_evidence_never_surfaces_termination_command() -> None:
     assert unavailable.observed_now == "UNKNOWN"
 
 
+def test_reduced_optional_visibility_is_partial_without_failing_core_evidence() -> None:
+    sample = report()
+    sample.details["data_visibility"] = "PARTIAL"
+    sample.details["full_profile_evidence_status"] = "PARTIAL"
+    value = build_incident_summary(sample)
+    assert value.data_completeness == "PARTIAL"
+    assert value.missing_evidence == ()
+
+
 def test_long_running_without_blocking_does_not_recommend_termination() -> None:
     value = build_incident_summary(report(long_running=True))
     assert value.primary_problem == "LONG_RUNNING_SQL"

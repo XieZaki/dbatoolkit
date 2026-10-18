@@ -82,7 +82,11 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                        statement_script == "active_requests_no_waits" else
                        "active_requests: thread fallback; statement timer, rows and wait detail unavailable")
     incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
-    incomplete = incomplete or limited
+    if limited and visibility == "FULL":
+        # The compatibility statement remains usable, but it omits wait detail;
+        # expose reduced visibility without treating successful core queries as
+        # a failed diagnosis.
+        visibility = "PARTIAL"
     concurrency = {"total_connections": len(sessions), "active_statements": len(requests),
                    "running_statements": len(requests) - len(waiting),
                    "waiting_statements": len(waiting), "blocked_sessions": len(blocked_pids),
@@ -263,8 +267,9 @@ def build_slow_phase_report(adapter: MySQLAdapter, results: tuple[CollectorResul
     by_name = {item.collector_name: item for item in results}
     complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
                    for name in core)
-    full_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
-                        for name in required + optional)
+    full_complete = (all(name in by_name and by_name[name].success and not by_name[name].truncated
+                         for name in required + optional)
+                     and adapter.statement_script == "active_requests")
     report.details.update({"diagnostic_phase": "EMERGENCY" if emergency else "FINAL",
                            "emergency_evidence_complete": complete,
                            "emergency_evidence_status": "COMPLETE" if complete else "INCOMPLETE",

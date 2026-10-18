@@ -483,6 +483,21 @@ def test_wait_consumer_fallback_keeps_instrumented_statements() -> None:
     assert ActiveRequestsCollector(target).collect(INSTANCE).rows[0]["rows_examined"] == 3
 
 
+def test_missing_wait_instrumentation_is_partial_not_failed_core_evidence() -> None:
+    target, driver = adapter()
+    driver.connection.results["preflight"] = [{**PREFLIGHT, "waits_consumer": 0}]
+    target.connect()
+    report = build_slow_report(
+        INSTANCE,
+        (result("active_sessions", [session(1)]), result("active_requests", []),
+         result("transactions", []), result("blocking", [])),
+        target.settings, "8.4.11", target.statement_script,
+        ("active_sessions", "active_requests", "transactions", "blocking"), (),
+    )
+    assert not report.details["incomplete"]
+    assert report.details["data_visibility"] == "PARTIAL"
+
+
 def test_server_numeric_duration_preserves_integer_comparison() -> None:
     target, driver = adapter(settings=MySQLSettings(long_running_seconds=1))
     target.connect()

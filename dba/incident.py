@@ -110,6 +110,9 @@ def _quality(details: dict[str, Any], scenario: str) -> tuple[str, tuple[str, ..
     samples = details.get("samples", [])
     bad_samples = any(not item.get("success", True) or item.get("truncated")
                       for item in samples if isinstance(item, dict))
+    if (details.get("data_visibility") == "PARTIAL"
+            or details.get("full_profile_evidence_status") == "PARTIAL"):
+        return "PARTIAL", ()
     graph = details.get("blocking_graph", {})
     graph_anomaly = isinstance(graph, dict) and bool(graph.get("anomalies"))
     if not details.get("incomplete") and not bad_samples and not graph_anomaly:
