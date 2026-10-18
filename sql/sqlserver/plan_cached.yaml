@@ -5,3 +5,14 @@ timeout_seconds: 10
 max_rows: 2
 reviewed: true
 description: One bound still-connected user session recent SQL handle and cached last-execution statistics with size-gated XML Showplan; no arbitrary cache scan.
+feature: plan
+version_families:
+  - 2008r2
+  - "2012"
+  - "2014"
+  - "2016"
+  - "2017"
+  - "2019"
+  - "2022"
+runtime_variants:
+  - default

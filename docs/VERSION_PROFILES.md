@@ -1,10 +1,11 @@
 # Version Profiles (V0.9.1)
 
 Phase A added version declaration and detection. Phase B migrated replication;
-Phase C migrated `slow`; Phase D migrates `disk-growth`. Each migrated feature
+Phase C migrated `slow`; Phase D migrated `disk-growth`; Phase E migrates the
+existing SQL Server `plan` feature. Each migrated feature
 selects reviewed SQL, permission requirements, parser contract,
 required/optional collectors and support state together through the immutable
-`DiagnosticProfileResolver`. SQL Server plan remains on its existing path.
+`DiagnosticProfileResolver`.
 
 ## Inventory declaration
 
@@ -202,3 +203,21 @@ the absence of live old-version servers in the current test environment.
 `SUPPORTED`, `UNIT_TESTED`, `INTEGRATION_TESTED` and `E2E_VERIFIED` describe
 different evidence levels. No older release is described as live verified
 without an actual target run.
+
+## SQL Server Plan support matrix
+
+| Version family | Support | Routed SQL / permission / parser | Evidence |
+|---|---|---|---|
+| SQL Server 2008 R2 | SUPPORTED | Shared reviewed `plan_request` + `plan_cached`; `VIEW SERVER STATE`; `sqlserver_showplan_v1` | Unit/Profile/Registry validation; no real 2008 R2 E2E |
+| SQL Server 2012, 2014, 2016, 2017, 2019 | SUPPORTED | Same shared SQL and parser; `VIEW SERVER STATE` | Unit/Profile/Registry validation; no real old-version Plan E2E |
+| SQL Server 2022 | SUPPORTED | Same shared SQL and parser; `VIEW SERVER PERFORMANCE STATE` | SQL Server 2022 plan E2E exists in `docs/VERIFICATION_V0_4.md`; V0.9.1 route now uses verified profile |
+| SQL Server 2025 | UNKNOWN | No SQL, permission or parser fallback | Fail closed until official compatibility and integration evidence exist |
+
+Plan uses only the existing active-request and connected-session cached-plan
+DMV queries. A cache miss is reported as unavailable; Toolkit never submits the
+captured statement to SQL Server. The shared SQL returns session/request,
+SQL/plan handles, query hashes and statement offsets. More than one matching
+row, truncated result or insufficient identity evidence is reported as
+ambiguous rather than selecting an arbitrary plan. The parser contract bounds
+XML bytes, element count and operator count; local `.sqlplan` output remains
+sensitive evidence.

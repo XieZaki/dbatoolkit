@@ -529,6 +529,26 @@ _DISK_GROWTH_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
         REGISTRY[DatabaseType.ORACLE]["disk-growth"].objects),
 }
 
+_PLAN_PROFILE_REQUIREMENTS: dict[str, FeaturePermissions] = {
+    "sqlserver_plan_legacy": FeaturePermissions(
+        ("VIEW SERVER STATE",), (),
+        "Existing cached or active execution plans may be unavailable.",
+        ("sys.dm_exec_requests", "sys.dm_exec_connections", "sys.dm_exec_query_stats",
+         "sys.dm_exec_sql_text", "sys.dm_exec_query_plan"),
+        version_constraints=("SQL Server 2008 R2-2019: VIEW SERVER STATE",),
+        permission_reasons=(("VIEW SERVER STATE", "Required by the reviewed SQL Server plan DMV queries."),),
+    ),
+    "sqlserver_plan_2022": FeaturePermissions(
+        ("VIEW SERVER PERFORMANCE STATE",), (),
+        "Existing cached or active execution plans may be unavailable.",
+        ("sys.dm_exec_requests", "sys.dm_exec_connections", "sys.dm_exec_query_stats",
+         "sys.dm_exec_sql_text", "sys.dm_exec_query_plan"),
+        version_constraints=("SQL Server 2022: VIEW SERVER PERFORMANCE STATE",),
+        permission_reasons=(("VIEW SERVER PERFORMANCE STATE",
+                             "Required by the reviewed SQL Server 2022 plan DMV queries."),),
+    ),
+}
+
 for _profile_id, _objects in {
     "oracle11gr2_replication": ("SYS.V_$DATAGUARD_STATS", "SYS.V_$MANAGED_STANDBY",
                                 "SYS.V_$ARCHIVE_DEST_STATUS"),
@@ -558,7 +578,10 @@ def requirements_for_profile(profile_id: str) -> FeaturePermissions:
             try:
                 return _DISK_GROWTH_PROFILE_REQUIREMENTS[profile_id]
             except KeyError:
-                raise ValueError("Resolved profile has no permission definition") from None
+                try:
+                    return _PLAN_PROFILE_REQUIREMENTS[profile_id]
+                except KeyError:
+                    raise ValueError("Resolved profile has no permission definition") from None
 
 
 def render_profile_sql(profile_id: str, database_type: DatabaseType, account: str | OraclePrincipal,

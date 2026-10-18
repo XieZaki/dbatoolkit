@@ -301,6 +301,23 @@ def _disk_growth_binding(
                           "disk_growth_normalized_v1", profile_id, variant, required)
 
 
+def _sqlserver_plan_binding(family: str) -> ProfileBinding:
+    if family == "2025":
+        return ProfileBinding(DatabaseType.SQLSERVER, family, "plan", SupportState.UNKNOWN,
+                              "", "", "", "unverified")
+    permission_id = "sqlserver_plan_2022" if family == "2022" else "sqlserver_plan_legacy"
+    privileges = requirements_for_profile(permission_id).required
+    return ProfileBinding(DatabaseType.SQLSERVER, family, "plan", SupportState.SUPPORTED,
+                          "sqlserver_plan_shared", permission_id, "sqlserver_showplan_v1",
+                          "sqlserver_plan_shared", required_privileges=privileges)
+
+
+_SQLSERVER_PLAN_BINDINGS = tuple(
+    _sqlserver_plan_binding(family)
+    for family in ("2008r2", "2012", "2014", "2016", "2017", "2019", "2022", "2025")
+)
+
+
 _DISK_GROWTH_BINDINGS: tuple[ProfileBinding, ...] = (
     _disk_growth_binding(DatabaseType.SQLSERVER, "2008r2", "sqlserver_disk_2008r2",
                          "sqlserver_disk_pre2014_permissions"),
@@ -351,7 +368,7 @@ PROFILE_BINDINGS: tuple[ProfileBinding, ...] = (
                    required_privileges=("VIEW SERVER PERFORMANCE STATE", "VIEW ANY DATABASE")),
     ProfileBinding(DatabaseType.SQLSERVER, "2025", "slow", SupportState.UNKNOWN,
                    "", "", "", "unverified"),
-    _legacy_binding(DatabaseType.SQLSERVER, "2022", "plan"),
+    *_SQLSERVER_PLAN_BINDINGS,
     ProfileBinding(DatabaseType.SQLSERVER, "2008r2", "replication", SupportState.UNSUPPORTED,
                    "", "", "", "unsupported", "default"),
     ProfileBinding(DatabaseType.MYSQL, "5.7", "slow", SupportState.SUPPORTED,
@@ -488,6 +505,9 @@ class DiagnosticProfileResolver:
                 elif binding.feature == "disk-growth":
                     from dba.disk_growth_profiles import validate_disk_binding
                     errors.extend(validate_disk_binding(binding))
+                elif binding.feature == "plan":
+                    from dba.execution_plan_profiles import validate_plan_binding
+                    errors.extend(validate_plan_binding(binding))
                 elif referenced != expected:
                     errors.append(f"cross-route or unknown profile reference: {key}")
                 if binding.feature == "replication":
@@ -499,6 +519,14 @@ class DiagnosticProfileResolver:
                         if tuple(permission.required) != binding.required_privileges:
                             errors.append(f"route permission contract mismatch: {key}")
                 elif binding.feature == "slow":
+                    try:
+                        permission = requirements_for_profile(binding.permission_profile_id)
+                    except ValueError:
+                        errors.append(f"missing permission profile: {key}")
+                    else:
+                        if tuple(permission.required) != binding.required_privileges:
+                            errors.append(f"route permission contract mismatch: {key}")
+                elif binding.feature == "plan":
                     try:
                         permission = requirements_for_profile(binding.permission_profile_id)
                     except ValueError:

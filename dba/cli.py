@@ -35,6 +35,7 @@ from dba.encrypted_credentials import (
 from dba.environment import driver_info
 from dba.errors import ToolkitError
 from dba.execution_plan import diagnose_plan
+from dba.execution_plan_profiles import validate_plan_profiles
 from dba.incident import build_incident_summary
 from dba.inventory import Inventory, ValidationError
 from dba.logging import configure_logging, redact
@@ -698,6 +699,9 @@ def main(
             disk_errors = validate_disk_profiles(registry, PROFILE_RESOLVER.bindings)
             if disk_errors:
                 raise ValidationError("Disk-growth profile registry invalid: " + "; ".join(disk_errors))
+            plan_errors = validate_plan_profiles(registry, PROFILE_RESOLVER.bindings)
+            if plan_errors:
+                raise ValidationError("Execution-plan profile registry invalid: " + "; ".join(plan_errors))
             warnings = inventory.version_family_warnings()
             validation_result = {"success": True, "instance_count": len(inventory.instances),
                                 "sql_script_count": len(scripts), "warnings": warnings}
@@ -845,6 +849,13 @@ def main(
                             disk_profile, disk_detection = resolve_profile_for_adapter(adapter, "disk-growth")
                         except ProfileResolutionError:
                             disk_profile = None
+                    plan_profile = None
+                    plan_detection = None
+                    if "plan" in requested:
+                        try:
+                            plan_profile, plan_detection = resolve_profile_for_adapter(adapter, "plan")
+                        except ProfileResolutionError:
+                            plan_profile = None
                     supported = [feature for feature in requested if feature in definitions
                                  and feature_supported(instance.db_type, feature, server_version)]
                     if not requested:
@@ -852,11 +863,15 @@ def main(
                     observed = set(getattr(adapter, "permission_observations", set()))
                     rows = []
                     for feature in requested:
-                        if feature in {"replication", "slow", "disk-growth"}:
+                        if feature in {"replication", "slow", "disk-growth", "plan"} \
+                                and feature in definitions:
                             profile = (replication_profile if feature == "replication" else
                                        slow_profile if feature == "slow" else disk_profile)
                             detection = (replication_detection if feature == "replication" else
-                                         slow_detection if feature == "slow" else disk_detection)
+                                         slow_detection if feature == "slow" else
+                                         disk_detection if feature == "disk-growth" else plan_detection)
+                            if feature == "plan":
+                                profile = plan_profile
                             if profile is None or profile.version_status == VersionStatus.MISMATCH:
                                 unknown_row: dict[str, Any] = {
                                     "feature": feature, "status": PermissionStatus.UNKNOWN.value,
@@ -938,8 +953,9 @@ def main(
                         assert permission_credential is not None
                         selected_profile = (replication_profile if args.feature == "replication"
                                             else slow_profile if args.feature == "slow"
-                                            else disk_profile if args.feature == "disk-growth" else None)
-                        if args.feature in {"replication", "slow", "disk-growth"} and selected_profile is not None \
+                                            else disk_profile if args.feature == "disk-growth"
+                                            else plan_profile if args.feature == "plan" else None)
+                        if args.feature in {"replication", "slow", "disk-growth", "plan"} and selected_profile is not None \
                                 and selected_profile.version_status in {VersionStatus.VERIFIED,
                                                                         VersionStatus.UNVERIFIED} \
                                 and selected_profile.permission_profile_id:
@@ -961,7 +977,12 @@ def main(
                                     or disk_profile is None
                                     or disk_profile.version_status not in {VersionStatus.VERIFIED,
                                                                            VersionStatus.UNVERIFIED}
-                                    or not disk_profile.permission_profile_id):
+                                    or not disk_profile.permission_profile_id
+                                    or ("plan" in supported and (
+                                        plan_profile is None
+                                        or plan_profile.version_status not in {VersionStatus.VERIFIED,
+                                                                               VersionStatus.UNVERIFIED}
+                                        or not plan_profile.permission_profile_id))):
                                 generated = None
                             else:
                                 privileges: list[str] = []
@@ -975,6 +996,9 @@ def main(
                                         requirements_for_profile(disk_profile.permission_profile_id)
                                         if feature == "disk-growth" and disk_profile is not None
                                         and disk_profile.permission_profile_id else
+                                        requirements_for_profile(plan_profile.permission_profile_id)
+                                        if feature == "plan" and plan_profile is not None
+                                        and plan_profile.permission_profile_id else
                                         requirements_for(instance.db_type, feature, server_version)
                                     )
                                     for privilege in requirement.required:
@@ -1018,6 +1042,12 @@ def main(
                         DatabaseType.SQLSERVER, DatabaseType.MYSQL,
                         DatabaseType.POSTGRESQL, DatabaseType.ORACLE,
                     } else None
+                    try:
+                        plan_profile = PROFILE_RESOLVER.resolve(
+                            instance.db_type, instance.version_family, detected, "plan"
+                        )
+                    except ProfileResolutionError:
+                        plan_profile = None
                     version_profile = build_version_profile(
                         instance.db_type, instance.version_family, detected,
                         error_type=detection.error_type,
@@ -1068,6 +1098,16 @@ def main(
                                 "version_profile": asdict(disk_profile),
                                 "missing_required": (), "missing_optional": (),
                                 "impact": "Version verification is required before assessing disk-growth permissions.",
+                            })
+                            continue
+                        if feature == "plan" and plan_profile is not None \
+                                and plan_profile.version_status != VersionStatus.VERIFIED:
+                            permission_rows.append({
+                                "feature": feature, "status": PermissionStatus.UNKNOWN.value,
+                                "support_state": plan_profile.support_state.value,
+                                "version_profile": asdict(plan_profile),
+                                "missing_required": (), "missing_optional": (),
+                                "impact": "Version verification is required before assessing Plan permissions.",
                             })
                             continue
                         if version_verification in {VersionStatus.MISMATCH, VersionStatus.UNVERIFIED,
@@ -1123,6 +1163,40 @@ def main(
                                                     ),
                                                     **({"impact": _disk_growth_permission_impact(assessment["status"])}
                                                        if assessment["status"] != PermissionStatus.READY else {})})
+                            continue
+                        if feature == "plan" and plan_profile is not None:
+                            if plan_profile.support_state != SupportState.SUPPORTED \
+                                    or not plan_profile.permission_profile_id:
+                                permission_rows.append({
+                                    "feature": "plan",
+                                    "status": (PermissionStatus.UNSUPPORTED.value
+                                               if plan_profile.support_state == SupportState.UNSUPPORTED
+                                               else PermissionStatus.UNKNOWN.value),
+                                    "support_state": plan_profile.support_state.value,
+                                    "version_profile": asdict(plan_profile),
+                                    "missing_required": (), "missing_optional": (),
+                                    "impact": "No reviewed Plan permission contract is available for this route.",
+                                })
+                                continue
+                            requirement = requirements_for_profile(plan_profile.permission_profile_id)
+                            assessment = assess_permissions(requirement, observed)
+                            plan_permission_row: dict[str, Any] = {
+                                "feature": feature, **assessment,
+                                "support_state": plan_profile.support_state.value,
+                                "version_profile": asdict(plan_profile),
+                                "required_privileges": requirement.required,
+                                "missing_reasons": privilege_reasons(
+                                    requirement, assessment["missing_required"]
+                                ),
+                            }
+                            if assessment["status"] != PermissionStatus.READY:
+                                plan_permission_row["impact"] = requirement.impact
+                                plan_permission_row["reference_grant"] = render_profile_sql(
+                                    plan_profile.permission_profile_id, instance.db_type,
+                                    _grant_account(instance, adapter, permission_credential),
+                                    instance.database, adapter.get_server_version(),
+                                )
+                            permission_rows.append(plan_permission_row)
                             continue
                         requirement = requirements_for(
                             instance.db_type, feature, adapter.get_server_version()
@@ -1378,9 +1452,62 @@ def main(
                                   "report": asdict(report)}
                     else:
                         assert isinstance(adapter, SQLServerAdapter)
-                        plan_report, plan_xml = diagnose_plan(adapter, args.session)
+                        if args.session is None:
+                            raise ToolkitError("InvalidSession", "Plan diagnosis requires --session <session_id>.")
+                        plan_profile, detection = resolve_profile_for_adapter(adapter, "plan")
+                        if plan_profile.version_status != VersionStatus.VERIFIED:
+                            raise ToolkitError(
+                                "VersionVerificationRequired",
+                                "Plan diagnosis requires a declared version_family matching the detected server version.",
+                                permission_readiness={
+                                    "feature": "plan", "status": PermissionStatus.UNKNOWN.value,
+                                    "version_detection": asdict(detection),
+                                    "version_profile": asdict(plan_profile),
+                                    "toolkit_executed_grant": False,
+                                },
+                            )
+                        if plan_profile.support_state != SupportState.SUPPORTED \
+                                or not plan_profile.permission_profile_id:
+                            raise ToolkitError(
+                                "FeatureSupportUnknown",
+                                "No reviewed SQL Server Plan profile is available for this version.",
+                                permission_readiness={
+                                    "feature": "plan", "status": (
+                                        PermissionStatus.UNSUPPORTED.value
+                                        if plan_profile.support_state == SupportState.UNSUPPORTED
+                                        else PermissionStatus.UNKNOWN.value
+                                    ),
+                                    "version_profile": asdict(plan_profile),
+                                    "toolkit_executed_grant": False,
+                                },
+                            )
+                        plan_requirements = requirements_for_profile(plan_profile.permission_profile_id)
+                        plan_assessment = assess_permissions(
+                            plan_requirements, getattr(adapter, "permission_observations", set())
+                        )
+                        if plan_assessment["status"] == PermissionStatus.MISSING:
+                            missing = plan_assessment["missing_required"]
+                            raise ToolkitError(
+                                "MissingPermission",
+                                "Required monitoring permissions are missing for Plan diagnosis.",
+                                permission_readiness={
+                                    "feature": "plan", **plan_assessment,
+                                    "required_privileges": plan_requirements.required,
+                                    "missing_reasons": privilege_reasons(plan_requirements, missing),
+                                    "impact": plan_requirements.impact,
+                                    "version_profile": asdict(plan_profile),
+                                    "suggested_grant": render_profile_sql(
+                                        plan_profile.permission_profile_id, instance.db_type,
+                                        _grant_account(instance, adapter, permission_credential),
+                                        instance.database, adapter.get_server_version(),
+                                    ),
+                                    "toolkit_executed_grant": False,
+                                    "dba_approval_required": True,
+                                },
+                            )
+                        plan_report, plan_xml = diagnose_plan(adapter, args.session, plan_profile)
                         report = plan_report
-                        output = {"success": plan_report.details["plan_available"],
+                        output = {"success": plan_report.details["plan_status"] == "PLAN_AVAILABLE",
                                   "report": asdict(plan_report)}
                 else:
                     result = (ORACLE_COLLECTORS[args.collector](adapter).collect(instance)
@@ -1555,6 +1682,60 @@ def main(
                                             "error_type": exc.error_type,
                                             "vendor_code": error_payload.get("vendor_code")
                                             if error_payload else None}})
+            return 0
+        if (args.command == "permissions" and args.feature == "plan"
+                and instance_for_hint is not None
+                and instance_for_hint.db_type == DatabaseType.SQLSERVER
+                and isinstance(exc, ToolkitError)
+                and exc.error_type in {"DriverUnavailable", "PreflightFailed", "PreflightDenied",
+                                       "ConnectionFailed", "ConnectionTimeout", "QueryFailed",
+                                       "QueryTimeout", "CapabilityUnavailable", "MissingPermission"}):
+            profile = PROFILE_RESOLVER.resolve(
+                DatabaseType.SQLSERVER, instance_for_hint.version_family, None, "plan"
+            )
+            plan_feature_row: dict[str, Any] = {
+                "feature": "plan", "status": PermissionStatus.UNKNOWN.value,
+                "support_state": profile.support_state.value,
+                "version_profile": asdict(profile), "missing_required": (),
+                "missing_optional": (), "runtime_verification": "FAILED",
+                "evidence": str(exc),
+            }
+            if profile.support_state == SupportState.SUPPORTED and profile.permission_profile_id:
+                requirement = requirements_for_profile(profile.permission_profile_id)
+                observed = set(getattr(adapter_instance, "permission_observations", set()))
+                assessment = assess_permissions(requirement, observed)
+                missing = tuple(assessment["missing_required"])
+                if not missing:
+                    detail_upper = str(exc).upper()
+                    missing = tuple(item for item in requirement.required if item.upper() in detail_upper)
+                status = (PermissionStatus.MISSING if missing else PermissionStatus.UNKNOWN)
+                plan_feature_row.update({
+                    "status": status.value,
+                    "required_privileges": requirement.required,
+                    "missing_required": missing,
+                    "impact": requirement.impact,
+                    "reference_grant": render_profile_sql(
+                        profile.permission_profile_id, instance_for_hint.db_type,
+                        _grant_account(instance_for_hint, adapter_instance, permission_credential),
+                        instance_for_hint.database,
+                    ),
+                    "toolkit_executed_grant": False,
+                    "dba_approval_required": True,
+                })
+            else:
+                plan_feature_row["impact"] = "No reviewed Plan permission contract is available for the declared SQL Server family."
+            offline_output = {
+                "success": True, "database_id": instance_for_hint.id,
+                "features": [plan_feature_row],
+                "runtime_verification": {"status": "FAILED", "error_type": exc.error_type,
+                                          "message": str(exc)},
+                "toolkit_executes_grants": False,
+            }
+            _emit(args, "permissions", redact(offline_output))
+            logger.warning("SQL Server Plan permission profile rendered without runtime version verification.",
+                           extra={"event": {"module": "permissions", "database_id": instance_for_hint.id,
+                                            "version_status": profile.version_status.value,
+                                            "error_type": exc.error_type}})
             return 0
         detail = (
             str(exc)

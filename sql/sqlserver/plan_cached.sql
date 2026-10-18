@@ -1,7 +1,10 @@
-SELECT TOP (1) c.session_id, CAST(NULL AS int) AS request_id,
+SELECT TOP (2) c.session_id, CAST(NULL AS int) AS request_id,
     q.last_execution_time AS start_time, q.last_elapsed_time / 1000 AS elapsed_ms,
     q.last_worker_time / 1000 AS cpu_ms, q.last_logical_reads AS logical_reads,
     q.last_physical_reads AS reads, q.last_logical_writes AS writes,
+    q.statement_start_offset, q.statement_end_offset,
+    CONVERT(varchar(130), q.query_hash, 1) AS query_hash,
+    CONVERT(varchar(130), q.query_plan_hash, 1) AS query_plan_hash,
     CAST(NULL AS nvarchar(60)) AS wait_type, CAST(NULL AS int) AS wait_ms,
     DB_NAME(t.dbid) AS database_name, s.status, CAST(NULL AS nvarchar(32)) AS command,
     LEFT(t.text, 16384) AS sql_text,
@@ -22,4 +25,5 @@ LEFT JOIN sys.dm_exec_query_stats AS q ON q.sql_handle = c.most_recent_sql_handl
 OUTER APPLY sys.dm_exec_sql_text(q.sql_handle) AS t
 OUTER APPLY sys.dm_exec_query_plan(q.plan_handle) AS p
 WHERE c.session_id = ? AND c.session_id <> @@SPID AND s.is_user_process = 1
-ORDER BY q.last_execution_time DESC, c.connect_time DESC;
+ORDER BY q.last_execution_time DESC, c.connect_time DESC,
+    q.plan_handle DESC, q.statement_start_offset ASC, q.statement_end_offset ASC;

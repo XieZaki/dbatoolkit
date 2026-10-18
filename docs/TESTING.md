@@ -27,7 +27,7 @@ All test files must use only declared markers (`--strict-markers` is enabled). D
 | Slow diagnosis | Yes | Yes | Yes | Partial | `test_slow.py`, per-database fake CLI/diagnose coverage; no database is contacted by default. |
 | Disk growth | Yes | Yes | Yes | Partial | `test_disk_growth.py` and database adapter tests. |
 | Replication | Yes | Yes | Yes | Yes | `test_replication.py` and MySQL CLI tests cover configured/unconfigured state, version/capability behavior, lag uncertainty, and bounded reports. |
-| Execution plan | Yes | Partial | SQL Server only | Partial | `test_execution_plan.py`, SQL Server adapter tests; live plan collection requires a safe SQL Server asset and a suitable test session. |
+| Execution plan | Yes | Partial | SQL Server only | Partial | `test_execution_plan.py` covers version/profile permission routing, mismatch fail-closed, SQL applicability metadata, bounded parser and ambiguity; live plan collection requires a safe SQL Server asset and suitable session. Only SQL Server 2022 has recorded real plan E2E; older families remain unverified. |
 | Database errors and redaction | Yes | Yes | Yes | Yes | `test_database_errors.py` and adapter tests; vendor evidence is retained in sanitized form. |
 | Human, JSON, HTML reports | Yes | Yes | Yes | Yes | `test_presentation.py`, `test_html_reports.py`, `test_incident.py`; static and generated reports are checked for escaping and bounds. |
 | Secret scanner / repository safety | Yes | Partial | N/A | Yes | `test_repository_safety.py` and `scripts/check_repository_secrets.py`; scanner evaluates tracked files only. |

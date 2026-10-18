@@ -1,6 +1,6 @@
 """Bounded SQL Server Showplan XML parsing and evidence-only analysis."""
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -8,9 +8,11 @@ from xml.etree import ElementTree as ET
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DiagnosticReport, Finding, Severity
 from dba.errors import ToolkitError
+from dba.execution_plan_profiles import execution_plan_profile, parser_contract
 from dba.logging import redact
 from dba.settings import SQLServerSettings
 from dba.sqlserver import SQLServerAdapter
+from dba.versioning import ResolvedDiagnosticProfile, SupportState, VersionStatus
 
 
 def _tag(element: ET.Element) -> str:
@@ -91,6 +93,7 @@ class PlanSample:
     row: dict[str, Any] | None
     note: str | None
     samples: tuple[CollectorResult, ...]
+    status: str = "PLAN_NOT_AVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -99,8 +102,11 @@ class PlanReport(DiagnosticReport):
 
 
 class ExecutionPlanParser:
-    def __init__(self, max_xml_size: int) -> None:
+    def __init__(self, max_xml_size: int, *, max_elements: int = 50000,
+                 max_operators: int = 10000) -> None:
         self.max_xml_size = max_xml_size
+        self.max_elements = max_elements
+        self.max_operators = max_operators
 
     def parse(self, xml: str) -> ParsedPlan:
         if not isinstance(xml, str) or len(xml.encode("utf-8")) > self.max_xml_size:
@@ -117,7 +123,7 @@ class ExecutionPlanParser:
         # SQL text and plan attributes can contain marked credentials. Sanitize
         # decoded XML attributes before writing any XML artifact.
         all_elements = list(root.iter())
-        if len(all_elements) > 50000:
+        if len(all_elements) > self.max_elements:
             raise ToolkitError("PlanTooLarge", "Execution plan contains too many XML elements.")
         for element in all_elements:
             element.attrib.update({key: str(redact(value)) for key, value in element.attrib.items()})
@@ -130,7 +136,7 @@ class ExecutionPlanParser:
         for relop in all_elements:
             if _tag(relop) != "RelOp":
                 continue
-            if len(nodes) >= 10000:
+            if len(nodes) >= self.max_operators:
                 raise ToolkitError("PlanTooLarge", "Execution plan contains too many operators.")
             own = _own(relop)
             objects = [item for item in own if _tag(item) == "Object"]
@@ -203,43 +209,83 @@ class ExecutionPlanParser:
 
 
 class ExecutionPlanCollector:
-    def __init__(self, adapter: SQLServerAdapter) -> None:
+    def __init__(self, adapter: SQLServerAdapter, profile: ResolvedDiagnosticProfile) -> None:
         self.adapter = adapter
+        if (profile.db_type.value != "sqlserver" or profile.feature != "plan"
+                or profile.version_status != VersionStatus.VERIFIED
+                or profile.support_state != SupportState.SUPPORTED
+                or not profile.sql_profile_id or not profile.parser_contract_id):
+            raise ToolkitError("VersionVerificationRequired",
+                              "Plan collection requires a verified supported diagnostic profile.")
+        try:
+            self.sql_profile = execution_plan_profile(profile.sql_profile_id)
+            self.parser = parser_contract(profile.parser_contract_id)
+        except ValueError as exc:
+            raise ToolkitError("ProfileResolutionError", str(exc)) from None
+        self.profile = profile
 
     def collect(self, session_id: int) -> PlanSample:
         if type(session_id) is not int or not 1 <= session_id <= 32767:
             raise ToolkitError("InvalidSession", "Session ID must be a positive SQL Server session ID.")
-        params = (self.adapter.settings.plan_max_xml_size,
-                  self.adapter.settings.plan_max_xml_size, session_id)
-        active = self.adapter.execute_readonly(self.adapter.registry.get("plan_request"),
+        max_xml_size = min(self.adapter.settings.plan_max_xml_size, self.parser.max_xml_bytes)
+        params = (max_xml_size, max_xml_size, session_id)
+        active_script = self.adapter.registry.get(self.sql_profile.request_script)
+        cached_script = self.adapter.registry.get(self.sql_profile.cached_script)
+        for script in (active_script, cached_script):
+            metadata = script.metadata
+            if (metadata.feature != self.profile.feature
+                    or self.profile.detected_version_family not in metadata.version_families
+                    or self.profile.runtime_variant not in metadata.runtime_variants):
+                raise ToolkitError("ProfileRegistryMismatch",
+                                  "Plan SQL metadata does not match the resolved version profile.")
+        active = self.adapter.execute_readonly(active_script,
                                                plan_parameters=params)
         if not active.success:
             raise ToolkitError(active.error_type or "QueryFailed", active.error_message or "Plan probe failed.")
         results = [active]
+        if active.truncated or len(active.rows) > 1:
+            return PlanSample(session_id, "active_request", True, None,
+                              "Multiple active requests matched this session; plan identity is ambiguous.",
+                              (active,), "PLAN_AMBIGUOUS")
         active_row = active.rows[0] if active.rows else None
         if active_row is not None and (active_row.get("plan_xml") or active_row.get("plan_oversize")):
             note = "Execution plan unavailable: XML exceeds configured size limit." if active_row.get("plan_oversize") else None
-            return PlanSample(session_id, "active_request", True, active_row, note, tuple(results))
-        cached = self.adapter.execute_readonly(self.adapter.registry.get("plan_cached"),
+            status = "PLAN_NOT_AVAILABLE" if note else "PLAN_AVAILABLE"
+            return PlanSample(session_id, "active_request", True, active_row, note, tuple(results), status)
+        cached = self.adapter.execute_readonly(cached_script,
                                                plan_parameters=params)
         results.append(cached)
         if not cached.success:
             raise ToolkitError(cached.error_type or "QueryFailed", cached.error_message or "Cached plan probe failed.")
+        if cached.truncated or len(cached.rows) > 1:
+            return PlanSample(session_id, "cached_ambiguous", active_row is not None, None,
+                              "Multiple cached plans matched this session; no plan was selected.",
+                              tuple(results), "PLAN_AMBIGUOUS")
         cached_row = cached.rows[0] if cached.rows else None
         if active_row is not None:
-            if cached_row and cached_row.get("plan_xml") and cached_row.get("sql_handle") == active_row.get("sql_handle"):
+            same_statement = bool(
+                cached_row and cached_row.get("sql_handle") == active_row.get("sql_handle")
+                and isinstance(active_row.get("statement_start_offset"), int)
+                and isinstance(active_row.get("statement_end_offset"), int)
+                and cached_row.get("statement_start_offset") == active_row.get("statement_start_offset")
+                and cached_row.get("statement_end_offset") == active_row.get("statement_end_offset")
+                and cached_row.get("query_hash") == active_row.get("query_hash")
+            )
+            if cached_row and cached_row.get("plan_xml") and same_statement:
                 return PlanSample(session_id, "cached_same_sql", True, cached_row,
-                                  "Current plan unavailable; matched cached SQL handle.", tuple(results))
+                                  "Current plan unavailable; cached SQL handle and statement offsets matched.",
+                                  tuple(results), "PLAN_AVAILABLE")
             return PlanSample(session_id, "active_request", True, active_row,
-                              "Execution plan unavailable.", tuple(results))
+                              "Execution plan unavailable.", tuple(results), "PLAN_NOT_AVAILABLE")
         if cached_row and (cached_row.get("plan_xml") or cached_row.get("plan_oversize")):
             note = ("Active request no longer exists. Execution plan unavailable: XML exceeds configured size limit."
                     if cached_row.get("plan_oversize") else
                     "Active request no longer exists; latest cached plan belongs to this connected session.")
+            status = "PLAN_NOT_AVAILABLE" if cached_row.get("plan_oversize") else "PLAN_AVAILABLE"
             return PlanSample(session_id, "cached_last_execution", False, cached_row,
-                              note, tuple(results))
+                              note, tuple(results), status)
         note = "Active request no longer exists. Execution plan unavailable."
-        return PlanSample(session_id, None, False, cached_row, note, tuple(results))
+        return PlanSample(session_id, None, False, cached_row, note, tuple(results), "PLAN_NOT_AVAILABLE")
 
 
 class ExecutionPlanAnalyzer:
@@ -316,12 +362,22 @@ class ExecutionPlanAnalyzer:
                      "note": "Missing Index information is advisory evidence only."},
                     "仅作证据；结合现有索引、写入负载和工作负载人工评估。"))
         row = sample.row or {}
+        confidence = (
+            "AMBIGUOUS" if sample.status == "PLAN_AMBIGUOUS"
+            else "HIGH" if sample.source == "active_request" and row.get("plan_handle")
+            and row.get("statement_start_offset") is not None
+            else "MEDIUM" if sample.source == "cached_same_sql"
+            else "AMBIGUOUS" if sample.source == "cached_last_execution"
+            else "UNKNOWN"
+        )
         sorted_nodes = sorted(plan.nodes, key=lambda n: n.estimated_total_subtree_cost or 0,
                               reverse=True)[:self.settings.plan_top_operators] if plan else []
         return PlanReport(instance, datetime.now(timezone.utc), "plan", tuple(findings), redact({
             "session_id": sample.session_id, "source": sample.source,
             "request_found": sample.request_found, "note": sample.note,
-            "plan_available": plan is not None, "plan_oversize": bool(row.get("plan_oversize")),
+            "plan_status": sample.status, "plan_available": plan is not None,
+            "confidence": confidence,
+            "plan_oversize": bool(row.get("plan_oversize")),
             "metrics_scope": "current_request" if sample.source == "active_request" else "cached_last_execution",
             "request": {k: v for k, v in row.items() if k not in {"plan_xml", "plan_oversize"}},
             "operator_count": len(plan.nodes) if plan else 0,
@@ -333,9 +389,16 @@ class ExecutionPlanAnalyzer:
         }))
 
 
-def diagnose_plan(adapter: SQLServerAdapter, session_id: int) -> tuple[PlanReport, str | None]:
-    sample = ExecutionPlanCollector(adapter).collect(session_id)
+def diagnose_plan(adapter: SQLServerAdapter, session_id: int,
+                  profile: ResolvedDiagnosticProfile) -> tuple[PlanReport, str | None]:
+    collector = ExecutionPlanCollector(adapter, profile)
+    sample = collector.collect(session_id)
     xml = sample.row.get("plan_xml") if sample.row else None
-    parsed = ExecutionPlanParser(adapter.settings.plan_max_xml_size).parse(xml) if xml else None
-    return ExecutionPlanAnalyzer(adapter.settings).analyze(sample, parsed, adapter.instance), (
+    parsed = (ExecutionPlanParser(
+        min(adapter.settings.plan_max_xml_size, collector.parser.max_xml_bytes),
+        max_elements=collector.parser.max_elements, max_operators=collector.parser.max_operators,
+    ).parse(xml) if xml else None)
+    report = ExecutionPlanAnalyzer(adapter.settings).analyze(sample, parsed, adapter.instance)
+    report = replace(report, details={**report.details, "version_profile": asdict(profile)})
+    return report, (
         parsed.sanitized_xml if parsed else None)
