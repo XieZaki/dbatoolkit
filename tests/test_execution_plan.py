@@ -290,8 +290,12 @@ def test_cli_plan_unavailable_and_invalid_session(tmp_path: Path, capsys: pytest
         "credential_alias": "monitor"}]}))
     args = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql"),
             "diagnose", "test", "plan", "--session", "51", "--report", str(tmp_path / "missing.html"), "--json"]
-    assert main(args, provider=MemoryCredentialProvider(), driver=driver) == 1
-    assert "Active request no longer exists." in capsys.readouterr().out
+    assert main(args, provider=MemoryCredentialProvider(), driver=driver) == 0
+    unavailable = json.loads(capsys.readouterr().out)
+    assert unavailable["success"] is True
+    assert unavailable["report"]["details"]["plan_status"] == "PLAN_NOT_AVAILABLE"
+    assert unavailable["report"]["details"]["plan_available"] is False
+    assert "Active request no longer exists." in unavailable["report"]["details"]["note"]
     assert "Execution plan unavailable." in (tmp_path / "missing.html").read_text(encoding="utf-8")
     args[args.index("--session") + 1] = "0"
     assert main(args, provider=MemoryCredentialProvider(), driver=driver) == 1

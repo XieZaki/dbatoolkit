@@ -1507,8 +1507,10 @@ def main(
                             )
                         plan_report, plan_xml = diagnose_plan(adapter, args.session, plan_profile)
                         report = plan_report
-                        output = {"success": plan_report.details["plan_status"] == "PLAN_AVAILABLE",
-                                  "report": asdict(plan_report)}
+                        # A valid probe with no reusable plan is an ordinary diagnostic
+                        # outcome, not a database/CLI failure. Availability is explicit
+                        # in plan_status and plan_available.
+                        output = {"success": True, "report": asdict(plan_report)}
                 else:
                     result = (ORACLE_COLLECTORS[args.collector](adapter).collect(instance)
                               if isinstance(adapter, OracleAdapter)

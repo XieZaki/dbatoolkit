@@ -92,6 +92,11 @@ MySQL 5.7 legacy lock views, normalized evidence aliases, required versus
 optional collector failures and fail-closed version gating. These tests use
 Fake Adapters and do not replace live E2E verification.
 
+Plan CLI returns success when the reviewed probe completed but no current or
+cached plan exists; `plan_status=PLAN_NOT_AVAILABLE` and `plan_available=false`
+describe that ordinary evidence state. Query, permission, version and parser
+failures remain failures.
+
 The initial Oracle 26ai system run recorded four missing required disk-growth
 object grants before those core grants were provided. That result is historical,
 not a statement of current readiness. Re-run `dba check oraclefree`,
