@@ -224,8 +224,10 @@ def _blocking_sections(roots: list[Any], children: dict[str, list[Any]],
                               "parent": parent_of.get(sid, "—"),
                               "wait": _first(request, "wait_type", "wait_event", "current_wait"),
                               "wait_resource": request.get("wait_resource"),
-                              "elapsed": _duration_ms(_first(request, "elapsed_ms", "duration_ms")),
-                              "login": _first(session, "login_name", "usename", "user_name")})
+                              "elapsed": (_duration_ms(_first(request, "elapsed_ms", "duration_ms"))
+                                         if _first(request, "elapsed_ms", "duration_ms") is not None else
+                                         _duration_seconds(request.get("duration_seconds"))),
+                              "login": _first(session, "login_name", "usename", "user_name", "username")})
         tree_rows.append({"root": root_id, "session": "—", "role": "Display summary",
                           "parent": "—", "wait": "—", "wait_resource": "—",
                           "elapsed": _omitted(len(ordered), len(shown), "blocking nodes"),
@@ -253,9 +255,8 @@ def _blocking_sections(roots: list[Any], children: dict[str, list[Any]],
 
 def _long_running_rows(report: DiagnosticReport, details: dict[str, Any]) -> list[dict[str, Any]]:
     configured = _dict_rows(details.get("long_running"))
-    if report.instance.db_type.value == "mysql":
-        # MySQL annotates exact standalone SLEEP statements as intentional waits;
-        # preserve that classification from the analyzer's threshold result.
+    if report.instance.db_type.value in {"mysql", "oracle"}:
+        # These analyzers exclude confirmed blocked victims and exact intentional waits.
         return configured
     finding = next((item for item in report.findings if item.title == "LONG_RUNNING_SQL"), None)
     threshold = finding.evidence.get("threshold_seconds") if finding else None
@@ -328,11 +329,13 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                         ("Database", ("database",)), ("Status", ("status",)),
                         ("Login", ("login",)), ("Host", ("host",)),
                         ("Program", ("program",)), ("Client IP", ("client_ip",)))
-    if report.instance.db_type.value != "postgresql":
+    if report.instance.db_type.value == "sqlserver":
         identity_columns += (("Session Open Transaction Count", ("open_txn",)),)
     identity_table = _table(related_rows, identity_columns)
     identity_summary = ("PostgreSQL 会话身份来自 pg_stat_activity 采样；backend_start 和 xact_start 用于人工复核。"
                         if report.instance.db_type.value == "postgresql" else
+                        "Oracle 会话身份按 INST_ID/SID 区分；事务关联依据会话地址及 SERIAL#/LOGON_TIME 交叉核验。"
+                        if report.instance.db_type.value == "oracle" else
                         "会话级 open_transaction_count 与事务 DMV 返回的事务行数语义不同。")
     sections.append(ReportSection(
         "session-sources", "Session Identity",
@@ -341,6 +344,7 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
         tables=(identity_table,) if identity_table else ()))
 
     runtime_rows = []
+    database_type = report.instance.db_type.value
     visible_related_ids = {str(row["session"]) for row in related_rows}
     for sid in sorted(related, key=session_order):
         if sid not in visible_related_ids:
@@ -348,28 +352,37 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
         row = request_by_id.get(sid, {})
         if not row:
             continue
-        runtime_rows.append({"session": sid, "status": _first(row, "status", "state"),
+        runtime_rows.append({"session": sid, "status": _first(row, "session_status", "status", "state"),
                              "elapsed": _duration_ms(_first(row, "elapsed_ms", "duration_ms"))
                                        if _first(row, "elapsed_ms", "duration_ms") is not None else
                                        _duration_seconds(row.get("duration_seconds")),
-                             "wait": _first(row, "wait_type", "wait_event", "current_wait"),
+                             "wait": _first(row, "wait_type", "wait_event", "event", "current_wait"),
                              "wait_resource": row.get("wait_resource"),
-                             "blocked_by": _first(row, "blocking_session_id", "blocking_pid",
-                                                  "blocking_sid"),
+                             "blocked_by": (f"{row.get('blocking_instance')}:{row.get('blocking_session')}"
+                                            if database_type == "oracle" and row.get("blocking_session") is not None
+                                            else _first(row, "blocking_session_id", "blocking_pid",
+                                                        "blocking_sid")),
+                             "sql_id": row.get("sql_id"), "sql": row.get("sql_text"),
                              "cpu": _first(row, "cpu_time_ms", "cpu_ms", "cpu_time"),
                              "logical_reads": _first(row, "logical_reads"),
                              "reads": _first(row, "reads"), "writes": _first(row, "writes")})
-    runtime_table = _table(runtime_rows, (("Session", ("session",)), ("Status", ("status",)),
-                                          ("Elapsed", ("elapsed",)), ("Wait", ("wait",)),
-                                          ("Wait Resource", ("wait_resource",)),
-                                          ("Blocked By", ("blocked_by",)), ("CPU", ("cpu",)),
-                                          ("Logical Reads", ("logical_reads",)),
-                                          ("Reads", ("reads",)), ("Writes", ("writes",))))
+    runtime_columns = [("Session", ("session",)), ("Status", ("status",)),
+                       ("Elapsed", ("elapsed",)), ("Wait", ("wait",)),
+                       ("Blocked By", ("blocked_by",))]
+    if database_type == "oracle":
+        runtime_columns.extend([("SQL ID", ("sql_id",)), ("SQL", ("sql",))])
+    elif database_type == "sqlserver":
+        runtime_columns.extend([("Wait Resource", ("wait_resource",)), ("CPU", ("cpu",)),
+                                ("Logical Reads", ("logical_reads",)), ("Reads", ("reads",)),
+                                ("Writes", ("writes",))])
+    runtime_table = _table(runtime_rows, tuple(runtime_columns))
     if runtime_table:
         runtime_summary = ("MySQL Performance Schema 提供当前语句耗时和可见等待事件；等待 consumer 未启用时等待详情不可用。"
                            if report.instance.db_type.value == "mysql" else
                            "PostgreSQL pg_stat_activity 提供当前 backend 的语句耗时与 wait event；不表示累计 CPU 或 I/O 计数。"
                            if report.instance.db_type.value == "postgresql" else
+                           "Oracle V$SESSION/V$SQL 当前 SQL 与等待信息；耗时为本次执行时长，V$SQL 资源计数在本报告中不投影。"
+                           if report.instance.db_type.value == "oracle" else
                            "CPU、logical reads、reads、writes 为 DMV 当前累计值；单次采样为零不代表历史没有资源消耗。")
         sections.append(ReportSection(
             "request-runtime", "Request Runtime",
@@ -672,6 +685,9 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                       "sql_id_type": item.get("sql_id_type"),
                       "login_time": item.get("login_time"),
                       "transaction_age": item.get("transaction_age_seconds"),
+                      "oracle_inst_id": item.get("oracle_inst_id"),
+                      "oracle_serial_number": item.get("oracle_serial_number"),
+                      "transaction_start_time": item.get("transaction_start_time"),
                       "blocked_count": item.get("blocked_session_count"),
                       "evidence_timestamp": item.get("evidence_timestamp"),
                       "identity_quality": item.get("identity_quality"),
@@ -691,6 +707,9 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                                            ("Transaction identity", ("transaction_id",)),
                                            ("Login time", ("login_time",)),
                                            ("Transaction age seconds", ("transaction_age",)),
+                                           ("Oracle INST_ID", ("oracle_inst_id",)),
+                                           ("Oracle SERIAL#", ("oracle_serial_number",)),
+                                           ("Transaction start time", ("transaction_start_time",)),
                                            ("Blocked session count", ("blocked_count",)),
                                            ("Evidence timestamp", ("evidence_timestamp",)),
                                            ("Identity quality", ("identity_quality",)),
@@ -701,18 +720,23 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                                   tables=(priority_table,) if priority_table else ()))
     victims = _dict_rows(details.get("blocked_victims"))
     if victims:
-        victim_rows = [{"session": row.get("processlist_id"),
+        is_oracle = report.instance.db_type.value == "oracle"
+        victim_rows = [{"session": (f"{row.get('inst_id')}:{row.get('sid')}"
+                                    if is_oracle else row.get("processlist_id")),
                         "direct_blocker": row.get("direct_blocker_id"),
                         "root_blocker": row.get("root_blocker_id"),
+                        "status": row.get("status"), "wait_event": row.get("event"),
                         "request_runtime": _duration_ms(row.get("duration_ms"))
                                            if row.get("duration_ms") is not None else None,
                         "wait_detail": "可用" if row.get("wait_detail_available") else "不可用"}
                        for row in victims]
-        table = _table(victim_rows, (("Session", ("session",)),
-                                     ("Direct Blocker", ("direct_blocker",)),
-                                     ("Root Blocker", ("root_blocker",)),
-                                     ("Request Runtime", ("request_runtime",)),
-                                     ("Wait Detail", ("wait_detail",))))
+        victim_columns = [("Session", ("session",)), ("Direct Blocker", ("direct_blocker",)),
+                          ("Root Blocker", ("root_blocker",))]
+        if is_oracle:
+            victim_columns.extend([("Status", ("status",)), ("Wait Event", ("wait_event",))])
+        victim_columns.extend([("Request Runtime", ("request_runtime",)),
+                               ("Wait Detail", ("wait_detail",))])
+        table = _table(victim_rows, tuple(victim_columns))
         sections.append(ReportSection("blocked-victims", "Blocked Victims",
                                       summary="按已采样阻塞关系单独列出受害会话，不生成终止建议。",
                                       tables=(table,) if table else ()))
@@ -722,9 +746,12 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
     active_waits = _dict_rows(details.get("active_waits"))
     if active_waits:
         is_postgresql = report.instance.db_type.value == "postgresql"
-        wait_rows = [{"session": _first(row, "pid", "processlist_id"),
+        is_oracle = report.instance.db_type.value == "oracle"
+        wait_rows = [{"session": (f"{row.get('inst_id')}:{row.get('sid')}"
+                                  if is_oracle else _first(row, "pid", "processlist_id")),
                       "state": _first(row, "state", "state_name"),
-                      "runtime": _duration_ms(row.get("duration_ms")),
+                      "runtime": (row.get("duration_seconds") if is_oracle else
+                                  _duration_ms(row.get("duration_ms"))),
                       "wait": _first(row, "wait_event", "wait_event_type"),
                       "sql": row.get("sql"),
                       "interpretation": row.get("request_interpretation")}
@@ -732,11 +759,13 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
         table = _table(wait_rows, (("Session", ("session",)), ("Status", ("state",)),
                                    ("Request Runtime", ("runtime",)),
                                    *(((("Wait Event", ("wait",)), ("SQL", ("sql",)))
-                                      if is_postgresql else ())),
+                                      if is_postgresql or is_oracle else ())),
                                    ("Interpretation", ("interpretation",))))
         sections.append(ReportSection("active-waits", "Active Wait Statements",
                                       summary=("仅对无锁阻塞且精确匹配 pg_sleep(...) 的 PostgreSQL 查询分类；SQL 来自已脱敏采样。"
                                                if is_postgresql else
+                                               "仅对无锁阻塞、完整 SQL 精确匹配 DBMS_SESSION.SLEEP(:1)，且等待事件为 PL/SQL lock timer 的请求分类。"
+                                               if is_oracle else
                                                "仅对明确独立 SELECT SLEEP(...) 且状态为 User sleep 的语句分类。"),
                                       tables=(table,) if table else ()))
     if incident.root_cause_candidate:

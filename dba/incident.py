@@ -400,12 +400,12 @@ def manual_action_decisions(report: DiagnosticReport) -> tuple[dict[str, Any], .
         report_details = getattr(report, "details", {})
         emergency_complete = report_details.get(
             "emergency_evidence_complete", not report_details.get("incomplete", False))
-        is_postgresql = report.instance.db_type.value == "postgresql"
+        producer_gated = report.instance.db_type.value in {"postgresql", "oracle"}
         graph = report_details.get("blocking_graph", {})
         graph_reliable = not isinstance(graph, dict) or not graph.get("anomalies")
-        # PostgreSQL's producer decision has stronger PID/session/transaction
-        # correlation rules and must never be overridden by phase completeness.
-        available = (bool(commands) and producer_approved and graph_reliable if is_postgresql else
+        # PostgreSQL and Oracle producers validate session/transaction identity;
+        # snapshot completeness must never override an explicit suppression.
+        available = (bool(commands) and producer_approved and graph_reliable if producer_gated else
                      bool(commands) and (producer_approved or emergency_complete) and graph_reliable)
         unavailable_reason = ("blocking graph contains invalid or cyclic edges" if not graph_reliable else
                               detail.get("reason",
@@ -502,7 +502,9 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
             next((key for key in ("sql_id", "sql_handle", "query_id", "digest")
                   if request.get(key) is not None), None)
         selected[identity_key] = {
-            "session_id": sid, "category": kind, "categories": [kind],
+            "session_id": (f"{inst_id}:{sid}" if report.instance.db_type.value == "oracle"
+                           and inst_id is not None else sid),
+            "category": kind, "categories": [kind],
             "reason": reason, "reasons": [reason],
             "session_key": identity_key,
             "blocked_session_count": blocked if type(blocked) is int else 0,
@@ -529,6 +531,11 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
                      _first(session, "status", "state", "state_name", "command_name"),
             "running_seconds": running,
             "transaction_age_seconds": row.get("transaction_age_seconds"),
+            "oracle_inst_id": row.get("inst_id") if report.instance.db_type.value == "oracle" else None,
+            "oracle_serial_number": row.get("serial_number")
+            if report.instance.db_type.value == "oracle" else None,
+            "transaction_start_time": row.get("transaction_start_time")
+            if report.instance.db_type.value == "oracle" else None,
             "login_time": _first(row, "login_time", "backend_start", "connect_time") or
                           _first(session, "login_time", "backend_start", "connect_time"),
             "selection_priority": priority, "evidence_timestamp": captured,

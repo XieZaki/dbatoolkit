@@ -1,5 +1,6 @@
 import json
 from dataclasses import asdict
+from html import unescape
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import Credential, CredentialProvider, MockCredentialProvider, Mode
 from dba.errors import ToolkitError
+from dba.incident import build_incident_summary, manual_action_decisions
 from dba.oracle import OracleAdapter
 from dba.oracle_collectors import (
     ActiveRequestsCollector,
@@ -20,8 +22,9 @@ from dba.oracle_collectors import (
 from dba.oracle_slow import blocking_graph, build_slow_report
 from dba.oracle_slow_reporter import render_markdown
 from dba.permissions import OraclePrincipal, render_oracle_principal, render_profile_sql
-from dba.presentation import render_human
+from dba.presentation import render_emergency_triage, render_human, render_json
 from dba.registry import SqlScriptRegistry
+from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.settings import OracleSettings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -379,32 +382,50 @@ def test_blocking_rac_cycles_and_missing_root() -> None:
     assert cycle["cycles"]
 
 
+def test_oracle_blocking_profiles_sample_blocker_serial_for_identity_recheck() -> None:
+    for name in ("blocking", "blocking_basic"):
+        sql = (ROOT / "sql" / "oracle" / f"{name}.sql").read_text(encoding="utf-8")
+        assert "blocker_serial_number" in sql
+        assert "LEFT JOIN v$session b" in sql
+
+
 def test_idle_transaction_root_reference_and_report() -> None:
     instance, _, _, _ = fixture()
     sessions = [{"inst_id": 1, "sid": 10, "serial_number": 99,
+                 "logon_time": "2026-01-01 00:00:00", "saddr": b"session10", "taddr": b"tx10",
                  "status": "INACTIVE", "username": "APP", "machine": "host",
                  "program": "client",
                  "prev_sql_id": "abc"},
-                {"inst_id": 1, "sid": 20, "serial_number": 100, "status": "ACTIVE"}]
+                {"inst_id": 1, "sid": 20, "serial_number": 100, "status": "ACTIVE",
+                 "state": "WAITING", "event": "enq: TX - row lock contention"}]
     results = (_result("active_sessions", sessions),
-               _result("active_requests", [{"inst_id": 1, "sid": 20,
+               _result("active_requests", [{"inst_id": 1, "sid": 20, "serial_number": 100,
                                             "duration_seconds": 70, "sql_text": "SELECT 1"}]),
                _result("transactions", [{"inst_id": 1, "sid": 10,
+                                         "serial_number": 99, "logon_time": "2026-01-01 00:00:00",
+                                         "saddr": b"session10", "taddr": b"tx10",
+                                         "transaction_addr": b"tx10", "xidusn": 1, "xidslot": 2,
+                                         "xidsqn": 3,
                                          "transaction_start_time": "2026-01-01",
                                          "transaction_age_seconds": 90, "used_ublk": 3,
                                          "used_urec": 4}]),
                _result("blocking", [{"inst_id": 1, "blocked_sid": 20,
-                                     "blocker_inst_id": 1, "blocker_sid": 10}]),
+                                     "blocked_serial_number": 100,
+                                     "blocker_inst_id": 1, "blocker_sid": 10,
+                                     "blocker_serial_number": 99}]),
                _result("previous_sql", [{"inst_id": 1, "sid": 10,
                                          "previous_sql_text": "SELECT 2"}]))
     report = build_slow_report(instance, results, OracleSettings(), "19.0")
     titles = {finding.title for finding in report.findings}
-    assert {"BLOCKING", "ROOT_BLOCKER", "IDLE_TRANSACTION", "LONG_RUNNING_SQL",
+    assert {"BLOCKING", "ROOT_BLOCKER", "IDLE_TRANSACTION",
             "WAITING_SQL"} <= titles
+    assert "LONG_RUNNING_SQL" not in titles
     root = next(f for f in report.findings if f.title == "ROOT_BLOCKER")
     assert root.reference_commands[0].manual_only
     assert not hasattr(root.reference_commands[0], "execute")
     assert root.reference_commands[0].text == "ALTER SYSTEM KILL SESSION '10,99' IMMEDIATE;"
+    assert root.evidence["transaction_id"] == "1:2:3"
+    assert root.evidence["unfinished_transaction_confirmed"] is True
     assert "client_ip" in render_markdown(report)
     assert "Toolkit did NOT execute" in render_markdown(report)
 
@@ -422,6 +443,143 @@ def test_no_reference_when_snapshot_missing_root_or_cycle() -> None:
     rac = build_slow_report(instance, results, OracleSettings(), "19.0", rac_enabled=True)
     assert rac.details["incomplete"]
     assert not any(f.reference_commands for f in rac.findings)
+
+
+def _oracle_chain_results(*, identity_complete: bool = True) -> tuple[CollectorResult, ...]:
+    root = {"inst_id": 1, "sid": 227, "serial_number": 37872, "status": "INACTIVE",
+            "username": "APP", "machine": "app-host", "program": "client",
+            "logon_time": "2026-01-01 00:00:00", "saddr": b"root-session", "taddr": b"root-tx"}
+    if identity_complete:
+        tx = {"inst_id": 1, "sid": 227, "serial_number": 37872,
+              "logon_time": root["logon_time"], "saddr": root["saddr"], "taddr": root["taddr"],
+              "transaction_addr": root["taddr"], "xidusn": 4, "xidslot": 2, "xidsqn": 781,
+              "transaction_start_time": "2026-01-01 00:00:02", "transaction_age_seconds": 21}
+    else:
+        tx = {"inst_id": 1, "sid": 227, "serial_number": 37872,
+              "transaction_start_time": "2026-01-01 00:00:02", "transaction_age_seconds": 21}
+    sessions = [root,
+                {"inst_id": 1, "sid": 58, "serial_number": 38001, "status": "ACTIVE",
+                 "state": "WAITING", "event": "enq: TX - row lock contention"},
+                {"inst_id": 1, "sid": 46, "serial_number": 38002, "status": "ACTIVE",
+                 "state": "WAITING", "event": "enq: TX - row lock contention"},
+                {"inst_id": 1, "sid": 55, "serial_number": 38003, "status": "ACTIVE",
+                 "state": "WAITING", "event": "PL/SQL lock timer"},
+                {"inst_id": 1, "sid": 57, "serial_number": 38004, "status": "ACTIVE",
+                 "state": "WAITING", "event": "db file sequential read"}]
+    requests = [
+        {"inst_id": 1, "sid": 58, "serial_number": 38001, "duration_seconds": 20,
+         "sql_text": "SELECT id FROM DBA_INCIDENT_LAB WHERE id=:1 FOR UPDATE WAIT 310"},
+        {"inst_id": 1, "sid": 46, "serial_number": 38002, "duration_seconds": 19,
+         "sql_text": "SELECT id FROM DBA_INCIDENT_LAB WHERE id=:1 FOR UPDATE WAIT 310"},
+        {"inst_id": 1, "sid": 55, "serial_number": 38003, "duration_seconds": 21,
+         "state": "WAITING", "event": "PL/SQL lock timer",
+         "sql_text": "BEGIN DBMS_SESSION.SLEEP(:1); END;", "sql_text_truncated": 0},
+        {"inst_id": 1, "sid": 57, "serial_number": 38004, "duration_seconds": 15,
+         "state": "WAITING", "event": "db file sequential read", "sql_text": "SELECT * FROM T"},
+    ]
+    edges = [{"inst_id": 1, "blocked_sid": 58, "blocked_serial_number": 38001,
+              "blocker_inst_id": 1, "blocker_sid": 227, "blocker_serial_number": 37872},
+             {"inst_id": 1, "blocked_sid": 46, "blocked_serial_number": 38002,
+              "blocker_inst_id": 1, "blocker_sid": 58, "blocker_serial_number": 38001}]
+    return (_result("active_sessions", sessions), _result("active_requests", requests),
+            _result("transactions", [tx]), _result("blocking", edges),
+            _result("previous_sql", []))
+
+
+def test_oracle_root_gate_requires_correlated_transaction_identity() -> None:
+    instance, _, _, _ = fixture()
+    unsafe = build_slow_report(instance, _oracle_chain_results(identity_complete=False),
+                               OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in unsafe.findings if item.title == "ROOT_BLOCKER")
+    assert not root.reference_commands
+    assert root.evidence["manual_action"]["status"] == "SUPPRESSED"
+    assert "事务地址/XID" in root.evidence["manual_action"]["reason"]
+    assert manual_action_decisions(unsafe)[0]["status"] == "SUPPRESSED"
+
+
+def test_oracle_chain_victims_sleep_and_long_sql_are_separate() -> None:
+    instance, _, _, _ = fixture()
+    report = build_slow_report(instance, _oracle_chain_results(), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert root.evidence["blocked_count"] == 2
+    assert root.evidence["direct_blocked_count"] == 1
+    assert root.evidence["indirect_blocked_count"] == 1
+    assert root.evidence["unfinished_transaction_confirmed"] is True
+    assert root.evidence["transaction_id"] == "4:2:781"
+    assert root.reference_commands[0].text == "ALTER SYSTEM KILL SESSION '227,37872' IMMEDIATE;"
+    assert [row["session_key"] for row in report.details["blocked_victims"]] == ["1:46", "1:58"]
+    assert [row["sid"] for row in report.details["active_waits"]] == [55]
+    assert [row["sid"] for row in report.details["long_running"]] == [57]
+    assert "KILL SESSION" not in " ".join(row["sql_text"] for row in report.details["long_running"])
+
+
+def test_oracle_suppression_is_shared_by_cli_html_and_json() -> None:
+    instance, _, _, _ = fixture()
+    report = build_slow_report(instance, _oracle_chain_results(identity_complete=False),
+                               OracleSettings(), "23.0.0.0.0")
+    report.details["manual_action_decisions"] = manual_action_decisions(report)
+    summary = build_incident_summary(report)
+    cli = render_emergency_triage(report, capture_started_at="sample")
+    model = build_report_model(report, summary)
+    html = HtmlReportRenderer().render(model)
+    payload = render_json({"report": report, "incident_summary": summary,
+                           "manual_action_decisions": report.details["manual_action_decisions"]})
+    assert "具体命令：暂不生成" in cli
+    assert "事务地址/XID" in cli
+    assert "ALTER SYSTEM KILL SESSION '227,37872' IMMEDIATE;" not in cli
+    assert "ALTER SYSTEM KILL SESSION '227,37872' IMMEDIATE;" not in html
+    assert "ALTER SYSTEM KILL SESSION '227,37872' IMMEDIATE;" not in payload
+    assert '"status": "SUPPRESSED"' in payload
+
+
+def test_oracle_allowed_reference_is_identical_across_cli_html_and_json() -> None:
+    instance, _, _, _ = fixture()
+    report = build_slow_report(instance, _oracle_chain_results(), OracleSettings(), "23.0.0.0.0")
+    report.details["manual_action_decisions"] = manual_action_decisions(report)
+    summary = build_incident_summary(report)
+    cli = render_emergency_triage(report, capture_started_at="sample")
+    model = build_report_model(report, summary)
+    html = HtmlReportRenderer().render(model)
+    payload = render_json({"report": report, "incident_summary": summary,
+                           "manual_action_decisions": report.details["manual_action_decisions"]})
+    command = "ALTER SYSTEM KILL SESSION '227,37872' IMMEDIATE;"
+    assert report.details["manual_action_decisions"][0]["commands"] == (command,)
+    assert summary.recovery_actions[0].reference_command == command
+    recovery = next(section for section in model.sections if section.section_id == "immediate-recovery")
+    assert recovery.code_blocks and recovery.code_blocks[0].content == command
+    assert command in cli, repr(cli[-1500:])
+    assert command in unescape(html)
+    assert command in payload
+    assert "Oracle Profile 路由版本" in cli and "产品发行名称未独立核实" in cli
+    assert "事务 DMV" not in html and "CPU、logical reads、reads、writes" not in html
+
+
+@pytest.mark.parametrize("change", ["missing_serial", "duplicate_session", "duplicate_tx",
+                                     "address_mismatch", "request_identity_conflict", "rac"])
+def test_oracle_identity_conflicts_never_issue_reference(change: str) -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    sessions = [dict(row) for row in results[0].rows]
+    requests = [dict(row) for row in results[1].rows]
+    transactions = [dict(row) for row in results[2].rows]
+    if change == "missing_serial":
+        sessions[0]["serial_number"] = None
+    elif change == "duplicate_session":
+        sessions.append(dict(sessions[0]))
+    elif change == "duplicate_tx":
+        transactions.append(dict(transactions[0]))
+    elif change == "address_mismatch":
+        transactions[0]["taddr"] = b"other-tx"
+    elif change == "request_identity_conflict":
+        requests.append({"inst_id": 1, "sid": 227, "serial_number": 999,
+                         "duration_seconds": 1, "sql_text": "SELECT 1"})
+    results[0] = _result("active_sessions", sessions)
+    results[1] = _result("active_requests", requests)
+    results[2] = _result("transactions", transactions)
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "19.0",
+                               rac_enabled=change == "rac")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert not root.reference_commands
 
 
 @pytest.mark.integration

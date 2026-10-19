@@ -1,5 +1,6 @@
 SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'INSTANCE')) AS inst_id,
- s.sid, s.serial# AS serial_number, s.sql_id, s.sql_child_number AS child_number,
+ s.sid, s.serial# AS serial_number, s.logon_time,
+ s.sql_id, s.sql_child_number AS child_number,
  SUBSTR(q.sql_text, 1, 1000) AS sql_text,
  CASE WHEN s.sql_exec_start IS NOT NULL
   THEN ROUND((SYSDATE - s.sql_exec_start) * 86400)
@@ -11,6 +12,8 @@ SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'INSTANCE')) AS inst_id,
  q.disk_reads AS sql_cumulative_disk_reads, q.executions AS sql_cumulative_executions,
  q.rows_processed AS sql_cumulative_rows_processed,
  s.module, s.machine, s.program, s.username, s.event, s.wait_class, s.state,
+ s.status AS session_status,
+ CASE WHEN q.sql_text IS NULL OR LENGTH(q.sql_text) >= 1000 THEN 1 ELSE 0 END AS sql_text_truncated,
  s.blocking_session, s.blocking_instance
 FROM v$session s LEFT JOIN v$sql q
  ON q.sql_id = s.sql_id AND q.child_number = s.sql_child_number

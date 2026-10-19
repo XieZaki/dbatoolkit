@@ -1,5 +1,6 @@
 SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'INSTANCE')) AS inst_id,
- s.sid, s.serial# AS serial_number, s.username, s.status, s.schemaname,
+ s.sid, s.serial# AS serial_number, s.saddr, s.taddr,
+ s.username, s.status, s.schemaname,
  s.osuser, s.machine, s.program, s.module, s.action, s.client_identifier,
  s.service_name, s.sql_id, s.sql_child_number, s.prev_sql_id,
  s.prev_child_number, s.event, s.wait_class, s.state, s.seconds_in_wait,

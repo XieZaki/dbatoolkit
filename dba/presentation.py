@@ -489,8 +489,12 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
         "ORACLE_ARCHIVE_DEST_FAILURE": "Oracle 归档目标异常",
         "ORACLE_ARCHIVE_ACCUMULATION": "Oracle 归档量较大",
     }
+    version_label = (f"Oracle Profile 路由版本：{details.get('version', 'UNKNOWN')}"
+                     "（来源 V$INSTANCE.VERSION；产品发行名称未独立核实）"
+                     if report.instance.db_type.value == "oracle" else
+                     f"数据库版本：{details.get('version', 'UNKNOWN')}")
     lines = [title, "=" * 52, f"实例：{report.instance.id}",
-             f"数据库版本：{details.get('version', 'UNKNOWN')}", f"采集开始：{capture_started_at}"]
+             version_label, f"采集开始：{capture_started_at}"]
     if report.scenario == "slow":
         lines.append(f"慢 SQL 阈值：{slow_threshold} 秒")
         concurrency = details.get("concurrency", {})
@@ -525,6 +529,9 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                                   for value in category_values)
             lines.append(f"{item['rank']}. 会话 {item['session_id']}｜{category}")
             lines.append(f"   原因：{item['reason']}")
+            if report.instance.db_type.value == "oracle":
+                lines.append(f"   INST_ID / SID / SERIAL#：{item.get('oracle_inst_id') or '未知'} / {str(item['session_id']).split(':')[-1]} / {item.get('oracle_serial_number') or '未知'}")
+                lines.append(f"   事务开始时间：{item.get('transaction_start_time') or '未知'}")
             lines.append(f"   用户：{item.get('username') or 'N/A'}；主机：{item.get('host') or 'N/A'}；IP：{item.get('client_ip') or 'N/A'}；应用：{item.get('application') or 'N/A'}；状态：{item.get('state') or 'N/A'}")
             if item.get("mysql_connection_id") is not None:
                 lines.append(f"   MySQL 连接 ID：{item['mysql_connection_id']}；Performance Schema THREAD_ID：{item.get('performance_schema_thread_id') or 'N/A'}；InnoDB 事务 ID：{item.get('transaction_id') or 'N/A'}")
@@ -546,9 +553,15 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                 if not isinstance(victim, dict):
                     continue
                 elapsed = victim.get("duration_ms")
+                if elapsed is None and type(victim.get("duration_seconds")) in (int, float):
+                    elapsed = float(victim["duration_seconds"]) * 1000
                 elapsed_text = f"{float(elapsed) / 1000:g} 秒" \
                     if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) else "未知"
-                lines.append(f"{rank}. 会话{victim.get('processlist_id')}；直接阻塞者：{victim.get('direct_blocker_id') or '未知'}；根阻塞者：{victim.get('root_blocker_id') or '未知'}；当前请求时长：{elapsed_text}")
+                if report.instance.db_type.value == "oracle":
+                    victim_name = f"{victim.get('inst_id') or '未知'}:{victim.get('sid') or '未知'}"
+                    lines.append(f"{rank}. 会话 {victim_name}；直接阻塞者：{victim.get('direct_blocker_id') or '未知'}；根阻塞者：{victim.get('root_blocker_id') or '未知'}；状态：{victim.get('status') or '未知'}；等待事件：{victim.get('event') or '未知'}")
+                else:
+                    lines.append(f"{rank}. 会话{victim.get('processlist_id')}；直接阻塞者：{victim.get('direct_blocker_id') or '未知'}；根阻塞者：{victim.get('root_blocker_id') or '未知'}；当前请求时长：{elapsed_text}")
         active_waits = details.get("active_waits", [])
         if isinstance(active_waits, list) and active_waits:
             lines.extend(("", "【主动等待语句】"))
@@ -557,7 +570,9 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                     duration = wait.get("duration_ms")
                     duration_text = f"{float(duration) / 1000:g}" \
                         if isinstance(duration, (int, float)) and not isinstance(duration, bool) else "未知"
-                    pid = _first(wait, "pid", "processlist_id")
+                    pid = (f"{wait.get('inst_id')}:{wait.get('sid')}"
+                           if report.instance.db_type.value == "oracle" else
+                           _first(wait, "pid", "processlist_id"))
                     state = _first(wait, "state", "state_name") or "未知"
                     event = _first(wait, "wait_event", "wait_event_type")
                     lines.append(f"PID {pid}；状态：{state}；运行时间：{duration_text} 秒；等待事件：{event or '未知'}；未观察到锁阻塞。")
@@ -578,13 +593,17 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                     continue
                 target = decision.get("target_session")
                 root = next((item for item in details.get("roots", [])
-                             if isinstance(item, dict) and str(_first(
-                                 item, "session_id", "pid", "processlist_id", "sid")) == str(target)), {})
+                             if isinstance(item, dict) and str(
+                                 item.get("session_key") if report.instance.db_type.value == "oracle"
+                                 else _first(item, "session_id", "pid", "processlist_id", "sid"))
+                             == str(target)), {})
                 blocked = _first(root, "blocked_count", "blocked_session_count")
                 status = _first(root, "status", "command_name", "state", "state_name")
                 transaction = (root.get("unfinished_transaction_confirmed") is True
                                or _first(root, "trx_id", "transaction_id") not in (None, ""))
                 lines.append(f"根阻塞会话：{target if target is not None else 'UNKNOWN'}")
+                if report.instance.db_type.value == "oracle":
+                    lines.append(f"INST_ID / SID / SERIAL#：{root.get('inst_id') or '未知'} / {root.get('sid') or '未知'} / {root.get('serial_number') or '未知'}")
                 lines.append(f"影响会话：{blocked if blocked is not None else 0}")
                 if root.get("direct_blocked_count") is not None:
                     lines.append(f"直接影响：{root['direct_blocked_count']}；间接影响：{root.get('indirect_blocked_count', 0)}；总影响：{blocked or 0}")
@@ -594,7 +613,11 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                                     "未确认")
                 transaction_prefix = "采样时未结束事务" if report.instance.db_type.value == "postgresql" else "未结束事务"
                 lines.append(f"{transaction_prefix}：{transaction_text}")
-                if report.instance.db_type.value == "postgresql":
+                if report.instance.db_type.value == "oracle":
+                    if root.get("transaction_start_time") is not None:
+                        lines.append(f"事务开始时间：{root['transaction_start_time']}")
+                    lines.append(f"事务身份质量：{root.get('transaction_identity_quality') or 'UNKNOWN'}")
+                elif report.instance.db_type.value == "postgresql":
                     lines.append(f"backend_start：{root.get('backend_start') or '未采集'}；xact_start：{root.get('xact_start') or '未采集'}")
                 if _first(root, "transaction_id", "trx_id") is not None:
                     if report.instance.db_type.value == "mysql":
@@ -617,6 +640,16 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                                   "需要核查：当前会话 ID、登录身份及事务归属。"))
                     if report.instance.db_type.value == "postgresql":
                         lines.append("PostgreSQL 复核：查询 pg_stat_activity，核对 PID、backend_start、xact_start、用户和客户端来源。")
+                    elif report.instance.db_type.value == "oracle":
+                        lines.append("Oracle 复核：核对当前 INST_ID/SID/SERIAL#/LOGON_TIME、USERNAME、MACHINE、PROGRAM、事务 XID 和开始时间，并确认 RAC 实例范围。")
+                        manual_action = root.get("manual_action", {})
+                        identity = manual_action.get("identity_evidence", {}) \
+                            if isinstance(manual_action, dict) else {}
+                        target_template = ("<经实时复核的 SID,SERIAL#,@INST_ID>"
+                                           if isinstance(identity, dict)
+                                           and identity.get("rac_enabled") else
+                                           "<经实时复核的 SID,SERIAL#>")
+                        lines.append(f"参考模板：ALTER SYSTEM KILL SESSION '{target_template}' IMMEDIATE;")
                     else:
                         lines.append("参考模板：KILL <经实时复核的会话ID>")
                 lines.extend(("命令基于历史采样；Toolkit 未实时锁定会话身份；会话标识可能复用。",

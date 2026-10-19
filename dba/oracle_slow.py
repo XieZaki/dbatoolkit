@@ -1,5 +1,6 @@
 """Evidence-only Oracle slow diagnosis with instance-qualified blocking identities."""
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -38,6 +39,37 @@ def _positive(value: Any) -> int | None:
 def _key(instance: Any, sid: Any) -> str | None:
     first, second = _positive(instance), _positive(sid)
     return f"{first}:{second}" if first is not None and second is not None else None
+
+
+def _is_present(value: Any) -> bool:
+    return value not in (None, "", b"")
+
+
+def _matches_session_transaction(session: dict[str, Any], tx: dict[str, Any]) -> bool:
+    """Confirm the V$SESSION/V$TRANSACTION row join still identifies this session."""
+    return (session.get("serial_number") == tx.get("serial_number")
+            and _is_present(session.get("logon_time"))
+            and session.get("logon_time") == tx.get("logon_time")
+            and _is_present(session.get("saddr"))
+            and session.get("saddr") == tx.get("saddr")
+            and _is_present(session.get("taddr"))
+            and session.get("taddr") == tx.get("taddr")
+            and tx.get("taddr") == tx.get("transaction_addr")
+            and _is_present(tx.get("transaction_start_time")))
+
+
+def _oracle_xid(tx: dict[str, Any]) -> str | None:
+    values = (tx.get("xidusn"), tx.get("xidslot"), tx.get("xidsqn"))
+    if all(type(value) is int and value >= 0 for value in values):
+        return ":".join(str(value) for value in values)
+    return None
+
+
+def _exact_oracle_sleep(sql: Any, event: Any, truncated: Any) -> bool:
+    if not isinstance(sql, str) or bool(truncated) or event != "PL/SQL lock timer":
+        return False
+    normalized = " ".join(sql.strip().rstrip(";").split())
+    return re.fullmatch(r"(?i)BEGIN\s+DBMS_SESSION\.SLEEP\s*\(\s*:1\s*\)\s*;?\s*END", normalized) is not None
 
 
 def blocking_graph(rows: list[dict[str, Any]], sessions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -111,13 +143,43 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     sessions = rows("active_sessions")
     requests = rows("active_requests")
     transactions = rows("transactions")
+    transactions = [{**row, "transaction_id": _oracle_xid(row),
+                     "transaction_identity_quality": "VERIFIED" if _oracle_xid(row)
+                     else "IDENTITY_INCOMPLETE"} for row in transactions]
     edges = rows("blocking")
     previous = rows("previous_sql")
-    session_map = {_key(row.get("inst_id"), row.get("sid")): row for row in sessions}
-    transaction_map = {_key(row.get("inst_id"), row.get("sid")): row for row in transactions}
+    session_counts: dict[str, int] = {}
+    transaction_counts: dict[str, int] = {}
+    for row in sessions:
+        key = _key(row.get("inst_id"), row.get("sid"))
+        if key is not None:
+            session_counts[key] = session_counts.get(key, 0) + 1
+    for row in transactions:
+        key = _key(row.get("inst_id"), row.get("sid"))
+        if key is not None:
+            transaction_counts[key] = transaction_counts.get(key, 0) + 1
+    session_map = {_key(row.get("inst_id"), row.get("sid")): row for row in sessions
+                   if session_counts.get(_key(row.get("inst_id"), row.get("sid")) or "") == 1}
+    transaction_map = {_key(row.get("inst_id"), row.get("sid")): row for row in transactions
+                        if transaction_counts.get(_key(row.get("inst_id"), row.get("sid")) or "") == 1}
     previous_map = {_key(row.get("inst_id"), row.get("sid")): row for row in previous}
     request_map = {_key(row.get("inst_id"), row.get("sid")): row for row in requests}
     graph = blocking_graph(edges, sessions)
+    edge_identity_conflicts: list[str] = []
+    for edge in edges:
+        blocked_key = _key(edge.get("inst_id"), edge.get("blocked_sid"))
+        blocker_key = _key(edge.get("blocker_inst_id"), edge.get("blocker_sid"))
+        blocked_session = session_map.get(blocked_key or "")
+        blocker_session = session_map.get(blocker_key or "")
+        if (blocked_session is not None and edge.get("blocked_serial_number") is not None
+                and blocked_session.get("serial_number") != edge.get("blocked_serial_number")):
+            edge_identity_conflicts.append(f"blocked session identity changed: {blocked_key}")
+        if (blocker_session is not None and edge.get("blocker_serial_number") is not None
+                and blocker_session.get("serial_number") != edge.get("blocker_serial_number")):
+            edge_identity_conflicts.append(f"blocker session identity changed: {blocker_key}")
+    if edge_identity_conflicts:
+        graph["anomalies"].extend(edge_identity_conflicts)
+        graph["identity_conflicts"] = edge_identity_conflicts
     quality = [f"{r.collector_name}: {'failed' if not r.success else 'truncated' if r.truncated else 'ok'}"
                for r in results]
     incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
@@ -142,7 +204,7 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
         if candidate.get("status") != "INACTIVE" or key not in transaction_map:
             continue
         tx = transaction_map[key]
-        if tx.get("transaction_start_time") is None:
+        if not _matches_session_transaction(candidate, tx):
             continue
         affected = _descendants(key, graph["children"]) if key else []
         prior = previous_map.get(key, {})
@@ -167,7 +229,8 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     roots: list[dict[str, Any]] = []
     for root_key in graph["roots"]:
         session: dict[str, Any] | None = session_map.get(root_key)
-        tx = transaction_map.get(root_key, {})
+        tx_candidate = transaction_map.get(root_key, {})
+        tx = tx_candidate if session is not None and _matches_session_transaction(session, tx_candidate) else {}
         current = request_map.get(root_key, {})
         prior = previous_map.get(root_key, {})
         affected = _descendants(root_key, graph["children"])
@@ -182,6 +245,9 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                 "module": session.get("module") if session else None,
                 "client_identifier": session.get("client_identifier") if session else None,
                 "service_name": session.get("service_name") if session else None,
+                "logon_time": session.get("logon_time") if session else None,
+                "session_address": session.get("saddr") if session else None,
+                "session_transaction_address": session.get("taddr") if session else None,
                 "sql_id": session.get("sql_id") if session else None,
                 "prev_sql_id": session.get("prev_sql_id") if session else None,
                 "current_sql": current.get("sql_text"),
@@ -191,8 +257,15 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                 "event": session.get("event") if session else None,
                 "wait_class": session.get("wait_class") if session else None,
                 "transaction_age_seconds": tx.get("transaction_age_seconds"),
+                "transaction_start_time": tx.get("transaction_start_time"),
+                "transaction_id": _oracle_xid(tx),
+                "transaction_identity_quality": "VERIFIED" if tx and _oracle_xid(tx) else
+                "IDENTITY_INCOMPLETE" if tx else "UNCONFIRMED",
+                "unfinished_transaction_confirmed": bool(tx),
                 "used_ublk": tx.get("used_ublk"), "used_urec": tx.get("used_urec"),
                 "blocked_count": len(affected), "blocked_sessions": affected,
+                "direct_blocked_count": len(graph["children"].get(root_key, [])),
+                "indirect_blocked_count": max(0, len(affected) - len(graph["children"].get(root_key, []))),
                 "client_ip": None, "client_ip_reason": "not available from V$SESSION",
                 "session_available": session is not None}
         roots.append(root)
@@ -200,24 +273,54 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
         sid = _positive(root["sid"])
         serial = _positive(root["serial_number"])
         inst_id = _positive(root["inst_id"])
-        safe = (session is not None and sid is not None and serial is not None
-                and inst_id is not None and not incomplete and not graph["anomalies"]
-                and root_key not in graph["unresolved"] and rac_global_snapshot
-                and command_evidence_complete and bool(root.get("username"))
-                and bool(root.get("machine")) and bool(root.get("program")))
-        # A local single-instance snapshot is sufficient when no remote blocker appears.
-        local_instances = {_positive(s.get("inst_id")) for s in sessions}
-        remote_edges = any(_positive(e.get("blocker_inst_id")) not in local_instances for e in edges)
-        if not rac_enabled and not rac_global_snapshot and not remote_edges and len(local_instances) == 1:
-            safe = (session is not None and sid is not None and serial is not None
-                    and not incomplete and not graph["anomalies"]
-                    and command_evidence_complete and bool(root.get("username"))
-                    and bool(root.get("machine")) and bool(root.get("program")))
+        identity_conflict = False
+        for sampled_identity in (request_map.get(root_key), previous_map.get(root_key),
+                                 tx_candidate if tx_candidate else None):
+            if sampled_identity and session is not None:
+                identity_conflict = identity_conflict or any(
+                    sampled_identity.get(field) is not None and session.get(field) is not None
+                    and sampled_identity.get(field) != session.get(field)
+                    for field in ("serial_number", "logon_time", "username", "machine", "program"))
+        tx_verified = bool(tx and root.get("unfinished_transaction_confirmed")
+                           and root.get("transaction_identity_quality") == "VERIFIED")
+        identity_fields_complete = (session is not None and sid is not None and serial is not None
+                                    and inst_id is not None and _is_present(root.get("logon_time"))
+                                    and bool(root.get("username")) and bool(root.get("machine"))
+                                    and bool(root.get("program")))
+        instance_semantics_known = (not rac_enabled or rac_global_snapshot)
+        safe = (identity_fields_complete and tx_verified and not identity_conflict
+                and session_counts.get(root_key) == 1 and transaction_counts.get(root_key) == 1
+                and not graph["anomalies"] and root_key not in graph["unresolved"]
+                and instance_semantics_known and command_evidence_complete)
+        if not safe:
+            reason = ("会话或事务证据存在冲突。" if identity_conflict or session_counts.get(root_key) != 1
+                      or transaction_counts.get(root_key) != 1 else
+                      "缺少 SERIAL#/LOGON_TIME/用户来源或事务地址/XID 等身份字段。"
+                      if not identity_fields_complete or not tx_verified else
+                      "RAC 实例范围未能可靠确认。" if not instance_semantics_known else
+                      "阻塞图或必需采样证据不完整。")
+        else:
+            reason = None
         if safe:
             suffix = f",@{inst_id}" if rac_global_snapshot else ""
             references = (ReferenceCommand(
                 f"ALTER SYSTEM KILL SESSION '{sid},{serial}{suffix}' IMMEDIATE;",
-                "仅供 DBA 人工核对 SID/SERIAL#/实例、USERNAME、MACHINE、PROGRAM、事务及 SQL 上下文和回滚影响；会话可能已变化，Toolkit did NOT execute this command."),)
+                "仅供 DBA 人工核对 INST_ID/SID/SERIAL#/LOGON_TIME、USERNAME、MACHINE、PROGRAM、事务 XID/开始时间及 SQL 上下文；会话可能已变化，执行可能引发回滚且不保证立即结束。Toolkit did NOT execute this command."),)
+        root["manual_action"] = {
+            "status": "AVAILABLE" if safe else "SUPPRESSED",
+            "reason": reason,
+            "target_type": "ORACLE_RAC_SESSION" if rac_enabled else "ORACLE_SESSION",
+            "identity_evidence": {
+                "inst_id": inst_id, "sid": sid, "serial_number": serial,
+                "logon_time": root.get("logon_time"), "username": root.get("username"),
+                "machine": root.get("machine"), "program": root.get("program"),
+                "transaction_confirmed": tx_verified,
+                "transaction_id": root.get("transaction_id"),
+                "transaction_start_time": root.get("transaction_start_time"),
+                "blocking_graph_reliable": not graph["anomalies"],
+                "rac_enabled": rac_enabled, "rac_global_snapshot": rac_global_snapshot,
+            },
+        }
         findings.append(Finding("ROOT_BLOCKER", Severity.WARNING, root,
                                 "重新核对会话身份与事务，必要时由 DBA 在原生客户端处理。",
                                 references, session=root_key))
@@ -232,7 +335,38 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
         value = row.get("duration_seconds")
         return value if type(value) is int else -1
 
-    ranked = sorted(requests, key=duration, reverse=True)
+    blocked_victims: list[dict[str, Any]] = []
+    for victim_key, direct_key in sorted(graph["parents"].items()):
+        victim_session = session_map.get(victim_key, {})
+        root_key = victim_key
+        seen: set[str] = set()
+        while root_key in graph["parents"] and root_key not in seen:
+            seen.add(root_key)
+            root_key = graph["parents"][root_key]
+        blocked_victims.append({
+            "session_key": victim_key,
+            "inst_id": victim_session.get("inst_id"), "sid": victim_session.get("sid"),
+            "serial_number": victim_session.get("serial_number"),
+            "direct_blocker_id": direct_key, "root_blocker_id": root_key,
+            "status": victim_session.get("status"), "event": victim_session.get("event"),
+            "duration_seconds": request_map.get(victim_key, {}).get("duration_seconds"),
+        })
+    blocked_keys = set(graph["parents"])
+    active_waits = [
+        {"inst_id": row.get("inst_id"), "sid": row.get("sid"),
+         "serial_number": row.get("serial_number"), "status": row.get("state"),
+         "state": row.get("state"), "wait_event": row.get("event"),
+         "duration_seconds": row.get("duration_seconds"),
+         "sql": row.get("sql_text"), "sql_text_truncated": row.get("sql_text_truncated", False),
+         "request_interpretation": "明确主动等待，不作为异常慢 SQL 优先候选"}
+        for row in requests
+        if _key(row.get("inst_id"), row.get("sid")) not in blocked_keys
+        and _exact_oracle_sleep(row.get("sql_text"), row.get("event"), row.get("sql_text_truncated"))
+    ]
+    ranked = sorted((row for row in requests if _key(row.get("inst_id"), row.get("sid"))
+                     not in blocked_keys and not _exact_oracle_sleep(
+                         row.get("sql_text"), row.get("event"), row.get("sql_text_truncated"))),
+                    key=duration, reverse=True)
     top = [{**row, "sql_summary": row["sql_text"][:500]
             if isinstance(row.get("sql_text"), str) else None}
            for row in ranked[:settings.slow_top_n]]
@@ -255,12 +389,18 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     if incomplete:
         findings.append(Finding("INCOMPLETE_SNAPSHOT", Severity.WARNING,
                                 {"quality": quality}, "采集失败或截断，结论不完整。"))
-    details = {"version": version, "concurrency": concurrency, "top_queries": top,
+    details = {"version": version,
+               "version_identity": {"profile_route_version": version,
+                                    "profile_route_source": "V$INSTANCE.VERSION",
+                                    "product_release_name": None,
+                                    "product_release_source": "not independently verified in slow snapshot"},
+               "concurrency": concurrency, "top_queries": top,
                "long_running": long[:settings.slow_top_n], "blocking_graph": graph,
                "blocking_evidence": edges,
                "lock_evidence_reason": None if lock_evidence
                else "unavailable: optional V$LOCK/V$LOCKED_OBJECT grants missing",
                "roots": roots, "transactions": transactions, "idle_transactions": idle,
+               "blocked_victims": blocked_victims, "active_waits": active_waits,
                "sessions": sessions, "active_requests": requests,
                "quality": quality, "incomplete": incomplete, "data_visibility": visibility,
                "rac_global_snapshot": rac_global_snapshot,

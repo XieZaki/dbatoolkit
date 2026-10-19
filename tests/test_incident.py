@@ -211,6 +211,11 @@ def test_database_specific_reference_commands_flow_through_shared_domain(
         root["manual_action"] = {"status": "AVAILABLE", "target_type": "POSTGRESQL_PID",
                                   "action_type": "CANCEL_QUERY", "commands": (command,),
                                   "transaction_confirmed": True}
+    elif db_type == DatabaseType.ORACLE:
+        root["manual_action"] = {"status": "AVAILABLE", "target_type": "ORACLE_SESSION",
+                                  "identity_evidence": {"inst_id": 1, "sid": 11,
+                                                        "serial_number": 99,
+                                                        "transaction_confirmed": True}}
     finding = Finding("ROOT_BLOCKER", Severity.WARNING, root, "review",
                       (ReferenceCommand(command, "manual only"),), session=finding_session)
     value = SlowReport(instance, NOW, "slow", (finding,), evidence)
