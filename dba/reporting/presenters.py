@@ -31,6 +31,7 @@ _VALUE_LABELS = {
     "ACTIVE": "活动", "COMPLETE": "完整", "CRITICAL": "严重",
     "INFO": "提示", "WARNING": "警告", "HIGH": "高", "UNKNOWN": "未知",
     "RECHECK_REQUIRED": "需要重新核验", "VERIFIED": "事务关联已核验",
+    "VERIFIED_AT_SAMPLE": "采样时核验通过",
     "AMBIGUOUS": "身份存在冲突", "IDENTITY_INCOMPLETE": "身份信息不完整",
 }
 _FINDING_LABELS = {
@@ -524,16 +525,19 @@ def _transaction_section(details: dict[str, Any], database_type: str,
         session = row.get("trx_mysql_thread_id") if database_type == "mysql" else _session_id(row)
         output.append({"session": session,
                        "transaction_id": _first(row, "transaction_id", "trx_id", "xid"),
-                       "begin": _local_time(_first(row, "transaction_begin_time", "begin_time",
+                       "begin": _local_time(_first(row, "transaction_start_time",
+                                                     "transaction_begin_time", "begin_time",
                                                      "trx_started", "xact_start"))
-                                if _first(row, "transaction_begin_time", "begin_time",
-                                          "trx_started", "xact_start") is not None else "—",
+                                if _first(row, "transaction_start_time", "transaction_begin_time",
+                                          "begin_time", "trx_started", "xact_start") is not None else "—",
+                       "begin_source": row.get("transaction_start_time_source"),
                        "age": _duration_seconds(age), "type": kind,
                        "state": _human(_first(row, "trx_state")) if database_type == "mysql"
                        else state})
     shown = output[:policy.max_transactions]
     table = _table(shown, (("Session", ("session",)), ("Transaction ID", ("transaction_id",)),
-                           ("Begin Time", ("begin",)), ("Age", ("age",)),
+                           ("Begin Time", ("begin",)), ("Begin Time Source", ("begin_source",)),
+                           ("Age", ("age",)),
                            ("Type", ("type",)), ("State", ("state",))))
     return ReportSection("transaction-analysis", "Transaction Analysis",
                          summary=_omitted(len(output), len(shown), "transactions"),
@@ -685,12 +689,15 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                       "sql_id_type": item.get("sql_id_type"),
                       "login_time": item.get("login_time"),
                       "transaction_age": item.get("transaction_age_seconds"),
+                      "transaction_start_time_source": item.get("transaction_start_time_source"),
+                      "transaction_identity_quality": _human(item.get("transaction_identity_quality")),
+                      "manual_action_status": item.get("manual_action_status"),
                       "oracle_inst_id": item.get("oracle_inst_id"),
                       "oracle_serial_number": item.get("oracle_serial_number"),
                       "transaction_start_time": item.get("transaction_start_time"),
                       "blocked_count": item.get("blocked_session_count"),
                       "evidence_timestamp": item.get("evidence_timestamp"),
-                      "identity_quality": item.get("identity_quality"),
+                      "identity_quality": _human(item.get("identity_quality")),
                       "identity_reuse_note": item.get("identity_reuse_note"),
                       "identity_recheck": "人工处置前必须重新核对会话身份"}
                      for item in priority[:5]]
@@ -707,6 +714,9 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                                            ("Transaction identity", ("transaction_id",)),
                                            ("Login time", ("login_time",)),
                                            ("Transaction age seconds", ("transaction_age",)),
+                                           ("Transaction start time source", ("transaction_start_time_source",)),
+                                           ("Transaction identity quality", ("transaction_identity_quality",)),
+                                           ("Manual action status", ("manual_action_status",)),
                                            ("Oracle INST_ID", ("oracle_inst_id",)),
                                            ("Oracle SERIAL#", ("oracle_serial_number",)),
                                            ("Transaction start time", ("transaction_start_time",)),

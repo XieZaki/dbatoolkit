@@ -7,12 +7,13 @@ from typing import Any
 import pytest
 import yaml
 
+import dba.cli as cli_module
 from dba.cli import main
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import Credential, CredentialProvider, MockCredentialProvider, Mode
 from dba.errors import ToolkitError
-from dba.incident import build_incident_summary, manual_action_decisions
+from dba.incident import build_incident_summary, build_priority_candidates, manual_action_decisions
 from dba.oracle import OracleAdapter
 from dba.oracle_collectors import (
     ActiveRequestsCollector,
@@ -627,18 +628,153 @@ def test_oracle_previous_sql_context_is_explicit_and_duration_matches_html() -> 
                                            "previous_sql_text": "UPDATE T SET C=1"}])
     report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
     report.details["manual_action_decisions"] = manual_action_decisions(report)
+    candidates = build_priority_candidates(report)
+    report.details["priority_candidates"] = candidates
     summary = build_incident_summary(report)
-    cli = render_emergency_triage(report, capture_started_at="sample")
-    html = HtmlReportRenderer().render(build_report_model(report, summary))
+    cli = render_emergency_triage(report, candidates, capture_started_at="sample")
+    model = build_report_model(report, summary)
+    html = HtmlReportRenderer().render(model)
+    context = next(section for section in model.sections
+                   if section.section_id == "oracle-root-sql-context")
+    payload = render_json({"report": asdict(report), "incident_summary": asdict(summary),
+                           "priority_candidates": candidates})
     assert "PREV_SQL_ID：prev-176" in cli
     assert "上一条 SQL：UPDATE T SET C=1" in cli
     assert "上一条 SQL 不等于一定是持锁 SQL" in cli
+    previous_sql_index = context.tables[0].headers.index("Previous SQL / Availability")
+    assert context.tables[0].rows[0][previous_sql_index] == "UPDATE T SET C=1"
+    assert "UPDATE T SET C=1" in html
+    assert '"previous_sql": "UPDATE T SET C=1"' in payload
     assert "运行时间：9 秒" in cli
     assert "9" in html
-    context = next(section for section in build_report_model(report, summary).sections
-                   if section.section_id == "oracle-root-sql-context")
+    assert "2026-01-01 00:00:02" in html
+    candidate = candidates[0]
+    assert candidate["identity_quality"] == "VERIFIED_AT_SAMPLE"
+    assert candidate["transaction_identity_quality"] == "VERIFIED"
+    assert candidate["manual_action_status"] == "AVAILABLE"
+    assert "采样时核验通过" in cli
+    assert "执行前必须实时复核" in cli
+    transaction_section = next(section for section in model.sections
+                               if section.section_id == "transaction-analysis")
+    transaction_row = transaction_section.tables[0].rows[0]
+    assert transaction_row[2].startswith("2026-01-01 00:00:02")
+    assert transaction_row[3] == "V$TRANSACTION.START_DATE"
+    assert transaction_row[4] == "00:00:21"
+    assert '"transaction_start_time_source": "V$TRANSACTION.START_DATE"' in payload
+    assert "时间来源：V$TRANSACTION.START_DATE" in cli
     current_sql_index = context.tables[0].headers.index("Current SQL / Availability")
     assert "inactive" in context.tables[0].rows[0][current_sql_index]
+
+
+def test_oracle_suppressed_root_keeps_sample_identity_separate_from_action_status() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    tx = dict(results[2].rows[0])
+    tx["taddr"] = b"conflicting-tx"
+    results[2] = _result("transactions", [tx])
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    candidate = build_priority_candidates(report)[0]
+    assert candidate["identity_quality"] == "VERIFIED_AT_SAMPLE"
+    assert candidate["transaction_identity_quality"] == "UNVERIFIED"
+    assert candidate["manual_action_status"] == "SUPPRESSED"
+    report.details["manual_action_decisions"] = manual_action_decisions(report)
+    cli = render_emergency_triage(report, (candidate,), capture_started_at="sample")
+    assert "采样时核验通过" in cli
+    assert "事务归属：未核验" in cli
+    assert "人工处置参考：未生成" in cli
+    assert "具体命令：暂不生成" in cli
+
+
+def test_oracle_cli_collects_previous_sql_before_first_emergency_summary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, _, _, driver = fixture()
+
+    class RuntimeProvider:
+        def get_credential(self, _alias: str) -> Credential:
+            return Credential("MONITOR", "TEST_ONLY_SECRET")
+
+    results = list(_oracle_chain_results())
+    root_session = dict(results[0].rows[0])
+    root_session.update(sql_id=None, prev_sql_id="previous-227")
+    results[0] = _result("active_sessions", [root_session, *results[0].rows[1:]])
+    previous = _result("previous_sql", [{"inst_id": 1, "sid": 227, "serial_number": 37872,
+                                          "logon_time": root_session["logon_time"],
+                                          "prev_sql_id": "previous-227",
+                                          "previous_sql_text":
+                                          "UPDATE INCIDENT_LAB SET VALUE=2 WHERE ID=1"}])
+    core_results = tuple(result for result in results if result.collector_name != "previous_sql")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_collect(_adapter: Any, names: tuple[str, ...],
+                     existing: tuple[CollectorResult, ...] = ()) -> tuple[CollectorResult, ...]:
+        calls.append(names)
+        if not existing:
+            return core_results
+        if names == ("previous_sql",):
+            return (*existing, previous)
+        return existing
+
+    def fake_build(adapter: Any, collected: tuple[CollectorResult, ...], *, emergency: bool) -> Any:
+        report = build_slow_report(adapter.instance, collected, adapter.settings,
+                                   "19.0.0.0.0", rac_enabled=False)
+        report.details.update({"emergency_evidence_complete": True,
+                               "emergency_evidence_status": "COMPLETE",
+                               "incomplete": False,
+                               "supplemental_not_collected": () if not emergency else
+                               ("previous_sql",) if not any(
+                                   row.collector_name == "previous_sql" for row in collected) else ()})
+        return report
+
+    monkeypatch.setattr(cli_module, "collect_oracle_slow_phase", fake_collect)
+    monkeypatch.setattr(cli_module, "build_oracle_slow_phase_report", fake_build)
+    inventory = tmp_path / "inventory.yaml"
+    inventory.write_text(yaml.safe_dump({"databases": [{
+        **asdict(instance), "db_type": "oracle", "version_family": "19c"}]}), encoding="utf-8")
+    report_path = tmp_path / "oracle-slow.html"
+    prefix = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql")]
+    result = main([*prefix, "diagnose", instance.id, "slow", "--report", str(report_path)],
+                  provider=RuntimeProvider(), driver=driver)
+    captured = capsys.readouterr()
+    output = captured.out
+    assert result == 0, f"stdout={output} stderr={captured.err}"
+    assert "上一条 SQL：UPDATE INCIDENT_LAB SET VALUE=2 WHERE ID=1" in output, repr(output)
+    assert "TEST_ONLY_SECRET" not in output
+    assert calls[0] == ("active_sessions", "active_requests", "transactions", "blocking")
+    assert calls[1] == ("previous_sql",)
+
+
+def test_oracle_transaction_start_time_is_not_inferred_when_missing() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    tx = dict(results[2].rows[0])
+    tx["transaction_start_time"] = None
+    tx["transaction_start_time_text"] = "12:28:53"
+    results[2] = _result("transactions", [tx])
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER").evidence
+    assert root["transaction_start_time"] is None
+    assert root["transaction_age_seconds"] == 21
+    candidate = build_priority_candidates(report)[0]
+    assert candidate["transaction_start_time"] is None
+    summary = build_incident_summary(report)
+    model = build_report_model(report, summary)
+    transaction_section = next(section for section in model.sections
+                                if section.section_id == "transaction-analysis")
+    assert transaction_section.tables[0].rows[0][2] == "—"
+    assert transaction_section.tables[0].rows[0][3] == "V$TRANSACTION.START_DATE"
+    cli = render_emergency_triage(report, build_priority_candidates(report), capture_started_at="sample")
+    assert "事务开始时间：未知（V$TRANSACTION.START_DATE 未提供有效值）" in cli
+    assert "不作为完整开始时间" in cli
+    assert "2025-12-31 23:59:41" not in HtmlReportRenderer().render(model)
+
+
+def test_oracle_priority_candidate_reason_join_has_clean_chinese_punctuation() -> None:
+    instance, _, _, _ = fixture()
+    report = build_slow_report(instance, _oracle_chain_results(), OracleSettings(), "23.0.0.0.0")
+    candidate = build_priority_candidates(report)[0]
+    assert "。；" not in candidate["reason"]
+    assert candidate["reason"].endswith("会话与未结束事务证据关联")
 
 
 def test_oracle_current_and_previous_sql_ids_remain_distinct_when_text_missing() -> None:
@@ -662,6 +798,16 @@ def test_oracle_current_and_previous_sql_ids_remain_distinct_when_text_missing()
     assert root["prev_sql_id"] == "previous-176"
     assert root["previous_sql"] is None
     assert "SQL text not obtained" in root["previous_sql_reason"]
+
+
+def test_oracle_previous_sql_failure_does_not_change_reference_gate() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    results[4] = replace(results[4], success=False, error_type="QueryFailed")
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert root.reference_commands
+    assert root.evidence["manual_action"]["status"] == "AVAILABLE"
 
 
 def test_oracle_raw_address_normalization_preserves_identity_bytes() -> None:

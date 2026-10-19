@@ -1518,6 +1518,14 @@ def main(
                             phase_build = build_sqlserver_slow_phase_report
                         collected = phase_collect(cast(Any, adapter), emergency_names)
                         report = phase_build(adapter, collected, emergency=True)
+                        # Oracle's previous-SQL lookup is optional evidence, but it
+                        # is part of the root SQL context shown in the first CLI
+                        # summary. Collect it before that summary when core evidence
+                        # is complete; it remains optional for the safety gate.
+                        if (isinstance(adapter, OracleAdapter)
+                                and cast(Any, report).details.get("emergency_evidence_complete") is True):
+                            collected = phase_collect(cast(Any, adapter), ("previous_sql",), collected)
+                            report = phase_build(adapter, collected, emergency=True)
                         supplemental_expected = bool(cast(Any, report).details.get(
                             "supplemental_not_collected"))
                         cast(Any, report).details.update({"capture_started_at": capture_started_at,

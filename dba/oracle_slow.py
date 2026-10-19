@@ -158,6 +158,7 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     requests = rows("active_requests")
     transactions = rows("transactions")
     transactions = [{**row, "transaction_id": _oracle_xid(row),
+                     "transaction_start_time_source": "V$TRANSACTION.START_DATE",
                      "transaction_identity_quality": "VERIFIED" if _oracle_xid(row)
                      else "IDENTITY_INCOMPLETE"} for row in transactions]
     edges = rows("blocking")

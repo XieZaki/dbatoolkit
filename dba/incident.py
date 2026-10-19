@@ -477,7 +477,7 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
                 reasons.append(reason)
             previous["categories"] = categories
             previous["reasons"] = reasons
-            previous["reason"] = "；".join(reasons)
+            previous["reason"] = "；".join(item.rstrip("。；; ") for item in reasons)
             return
         session_key = f"{inst_id}:{sid}" if inst_id is not None else str(sid)
         session = session_map.get(session_key, {})
@@ -500,10 +500,22 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
         transaction_quality = row.get("transaction_identity_quality")
         if transaction_quality in {"AMBIGUOUS", "RECHECK_REQUIRED"}:
             reason = f"{reason} 事务身份：{transaction_quality}，需重新核验。"
-        login_identity = (_first(row, "login_time", "backend_start", "connect_time") or
-                          _first(session, "login_time", "backend_start", "connect_time"))
+        login_identity = (_first(row, "login_time", "logon_time", "backend_start", "connect_time") or
+                          _first(session, "login_time", "logon_time", "backend_start", "connect_time"))
+        manual_action = row.get("manual_action")
+        identity_evidence = (manual_action.get("identity_evidence")
+                             if isinstance(manual_action, dict) else None)
+        session_checks = (identity_evidence.get("session_checks")
+                          if isinstance(identity_evidence, dict) else None)
+        sample_session_identity_verified = (
+            report.instance.db_type.value == "oracle"
+            and isinstance(session_checks, dict) and bool(session_checks)
+            and all(value is True for value in session_checks.values())
+        )
         if report.instance.db_type.value == "mysql" and transaction_quality == "VERIFIED":
             identity_quality = "VERIFIED"
+        elif sample_session_identity_verified:
+            identity_quality = "VERIFIED_AT_SAMPLE"
         elif transaction_quality in {"AMBIGUOUS", "IDENTITY_INCOMPLETE", "RECHECK_REQUIRED"}:
             identity_quality = str(transaction_quality)
         else:
@@ -544,13 +556,19 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
                      _first(session, "status", "state", "state_name", "command_name"),
             "running_seconds": running,
             "transaction_age_seconds": row.get("transaction_age_seconds"),
+            "transaction_start_time_source": row.get("transaction_start_time_source"),
+            "transaction_identity_quality": row.get("transaction_identity_quality"),
+            "manual_action_status": (manual_action.get("status")
+                                     if isinstance(manual_action, dict) else None),
             "oracle_inst_id": row.get("inst_id") if report.instance.db_type.value == "oracle" else None,
             "oracle_serial_number": row.get("serial_number")
             if report.instance.db_type.value == "oracle" else None,
             "transaction_start_time": row.get("transaction_start_time")
             if report.instance.db_type.value == "oracle" else None,
-            "login_time": _first(row, "login_time", "backend_start", "connect_time") or
-                          _first(session, "login_time", "backend_start", "connect_time"),
+            "transaction_start_time_text": row.get("transaction_start_time_text")
+            if report.instance.db_type.value == "oracle" else None,
+            "login_time": _first(row, "login_time", "logon_time", "backend_start", "connect_time") or
+                          _first(session, "login_time", "logon_time", "backend_start", "connect_time"),
             "selection_priority": priority, "evidence_timestamp": captured,
             "evidence_quality": details.get("emergency_evidence_status", "UNKNOWN"),
             "identity_recheck": "REQUIRED_BEFORE_MANUAL_ACTION",

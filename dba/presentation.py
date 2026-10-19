@@ -531,7 +531,15 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
             lines.append(f"   原因：{item['reason']}")
             if report.instance.db_type.value == "oracle":
                 lines.append(f"   INST_ID / SID / SERIAL#：{item.get('oracle_inst_id') or '未知'} / {str(item['session_id']).split(':')[-1]} / {item.get('oracle_serial_number') or '未知'}")
-                lines.append(f"   事务开始时间：{item.get('transaction_start_time') or '未知'}")
+                if item.get("transaction_start_time") is not None:
+                    lines.append(f"   事务开始时间：{item['transaction_start_time']}")
+                else:
+                    lines.append("   事务开始时间：未知（V$TRANSACTION.START_DATE 未提供有效值）")
+                if item.get("transaction_start_time_text"):
+                    lines.append("   V$TRANSACTION.START_TIME 原始值（不作为完整开始时间）："
+                                 f"{item['transaction_start_time_text']}")
+                if item.get("transaction_start_time_source"):
+                    lines.append(f"   时间来源：{item['transaction_start_time_source']}")
             lines.append(f"   用户：{item.get('username') or 'N/A'}；主机：{item.get('host') or 'N/A'}；IP：{item.get('client_ip') or 'N/A'}；应用：{item.get('application') or 'N/A'}；状态：{item.get('state') or 'N/A'}")
             if item.get("mysql_connection_id") is not None:
                 lines.append(f"   MySQL 连接 ID：{item['mysql_connection_id']}；Performance Schema THREAD_ID：{item.get('performance_schema_thread_id') or 'N/A'}；InnoDB 事务 ID：{item.get('transaction_id') or 'N/A'}")
@@ -545,7 +553,22 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                                       == str(item["mysql_connection_id"])), {})
                 if root_evidence:
                     lines.append(f"   直接影响：{root_evidence.get('direct_blocked_count', 0)}；间接影响：{root_evidence.get('indirect_blocked_count', 0)}；总影响：{root_evidence.get('blocked_count', 0)}")
-            lines.append(f"   身份质量：{item.get('identity_quality', 'UNKNOWN')}；{item.get('identity_reuse_note')}")
+            if report.instance.db_type.value == "oracle":
+                sample_identity = item.get("identity_quality", "UNKNOWN")
+                if sample_identity == "VERIFIED_AT_SAMPLE":
+                    sample_identity = "采样时核验通过"
+                transaction_identity = {
+                    "VERIFIED": "核验通过", "UNVERIFIED": "未核验",
+                    "UNCONFIRMED": "未确认",
+                }.get(str(item.get("transaction_identity_quality")), "未知")
+                action_status = {"AVAILABLE": "允许生成", "SUPPRESSED": "未生成"}.get(
+                    str(item.get("manual_action_status")), "未核定")
+                lines.append(f"   采样会话身份：{sample_identity}；"
+                             f"事务归属：{transaction_identity}；"
+                             f"人工处置参考：{action_status}")
+                lines.append(f"   {item.get('identity_reuse_note')} 执行前必须实时复核。")
+            else:
+                lines.append(f"   身份质量：{item.get('identity_quality', 'UNKNOWN')}；{item.get('identity_reuse_note')}")
         victims = details.get("blocked_victims", [])
         if isinstance(victims, list) and victims:
             lines.extend(("", "【被阻塞会话】"))
@@ -668,11 +691,11 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                     if root.get("transaction_start_time") is not None:
                         lines.append("事务开始时间（V$TRANSACTION.START_DATE）："
                                      f"{root['transaction_start_time']}")
-                    elif root.get("transaction_start_time_text"):
-                        lines.append("事务开始时间（V$TRANSACTION.START_TIME 原始值）："
-                                     f"{root['transaction_start_time_text']}")
                     else:
-                        lines.append("事务开始时间：未知（来源字段未提供有效时间）")
+                        lines.append("事务开始时间：未知（V$TRANSACTION.START_DATE 未提供有效值）")
+                    if root.get("transaction_start_time_text"):
+                        lines.append("V$TRANSACTION.START_TIME 原始值（不作为完整开始时间）："
+                                     f"{root['transaction_start_time_text']}")
                     if root.get("transaction_age_seconds") is not None:
                         lines.append(f"事务持续：{root['transaction_age_seconds']} 秒")
                     lines.append(f"事务身份质量：{root.get('transaction_identity_quality') or 'UNKNOWN'}")
