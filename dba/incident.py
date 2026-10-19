@@ -70,6 +70,13 @@ def _is_open_transaction(root: dict[str, Any]) -> bool | None:
         return True
     if root.get("unfinished_transaction_confirmed") is False:
         return False
+    if "transaction_observed" in root:
+        if (root.get("transaction_observed") is True
+                and root.get("transaction_identity_verified") is True):
+            return True
+        # An observed but unassociated transaction is evidence of uncertainty,
+        # not evidence that the root session has no open transaction.
+        return None
     if root.get("transaction_age_seconds") is not None:
         return True
     if any(root.get(key) not in (None, 0, "") for key in ("trx_id", "used_ublk", "transaction_id")):
@@ -248,12 +255,18 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
         root_candidate = {
             "session": root_session,
             "reason": "Root blocker with confirmed downstream blocked sessions" +
-                      (" and open transaction" if transaction else ""),
+                      (" and verified open transaction" if transaction else
+                       " and observed transaction with unverified identity"
+                       if root.get("transaction_observed") is True else ""),
             "status": _first(root, "status", "state", "state_name", "command_name"),
             "blocked_sessions": root_count,
             "open_transaction": "YES" if transaction else "NO" if transaction is False else "UNKNOWN",
+            "transaction_observed": root.get("transaction_observed", "UNKNOWN"),
+            "transaction_identity_verified": root.get("transaction_identity_verified", "UNKNOWN"),
             "transaction_age_seconds": _int(root.get("transaction_age_seconds")),
             "transaction_id": _first(root, "transaction_id", "trx_id"),
+            "transaction_start_time": root.get("transaction_start_time"),
+            "transaction_start_time_source": root.get("transaction_start_time_source"),
             "transaction_identity_quality": root.get("transaction_identity_quality", "UNKNOWN"),
         }
         source = {key: value for key, value in {

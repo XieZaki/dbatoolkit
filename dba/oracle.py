@@ -329,6 +329,11 @@ class OracleAdapter(Adapter):
             return value.isoformat()
         if isinstance(value, Decimal):
             return int(value) if value == value.to_integral_value() else str(value)
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            # Oracle RAW values (including V$SESSION SADDR/TADDR and
+            # V$TRANSACTION.ADDR) are identity evidence.  The generic redactor
+            # treats opaque objects alike, which destroys address comparison.
+            return bytes(value).hex().upper()
         if isinstance(value, dict):
             return {str(key): "[REDACTED]" if SENSITIVE.search(str(key))
                     else self._safe_value(item) for key, item in value.items()}

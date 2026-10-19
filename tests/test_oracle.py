@@ -1,5 +1,5 @@
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from html import unescape
 from pathlib import Path
 from typing import Any
@@ -493,7 +493,8 @@ def test_oracle_root_gate_requires_correlated_transaction_identity() -> None:
     root = next(item for item in unsafe.findings if item.title == "ROOT_BLOCKER")
     assert not root.reference_commands
     assert root.evidence["manual_action"]["status"] == "SUPPRESSED"
-    assert "事务地址/XID" in root.evidence["manual_action"]["reason"]
+    assert "事务证据未通过" in root.evidence["manual_action"]["reason"]
+    assert "SADDR matches" in root.evidence["manual_action"]["reason"]
     assert manual_action_decisions(unsafe)[0]["status"] == "SUPPRESSED"
 
 
@@ -513,6 +514,162 @@ def test_oracle_chain_victims_sleep_and_long_sql_are_separate() -> None:
     assert "KILL SESSION" not in " ".join(row["sql_text"] for row in report.details["long_running"])
 
 
+def test_oracle_transaction_observation_is_separate_from_identity_verification() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    transactions = [dict(row) for row in results[2].rows]
+    transactions[0]["taddr"] = b"different-transaction"
+    results[2] = _result("transactions", transactions)
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    evidence = root.evidence
+    assert evidence["transaction_observed"] is True
+    assert evidence["transaction_identity_verified"] is False
+    assert evidence["unfinished_transaction_confirmed"] is None
+    assert evidence["transaction_id"] == "4:2:781"
+    assert evidence["transaction_age_seconds"] == 21
+    assert evidence["manual_action"]["status"] == "SUPPRESSED"
+    assert "TADDR matches transaction ADDR" in evidence["manual_action"]["reason"]
+    assert build_incident_summary(report).root_cause_candidate["open_transaction"] == "UNKNOWN"
+
+
+def test_oracle_suppression_reports_only_missing_session_identity_fields() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    sessions = [dict(row) for row in results[0].rows]
+    sessions[0]["logon_time"] = None
+    results[0] = _result("active_sessions", sessions)
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    reason = root.evidence["manual_action"]["reason"]
+    assert "LOGON_TIME" in reason
+    assert "SERIAL#" not in reason
+    assert "logon time matches" in reason
+
+
+def test_oracle_missing_transaction_row_is_unconfirmed_not_no() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    results[2] = _result("transactions", [])
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert root.evidence["transaction_observed"] is False
+    assert root.evidence["transaction_identity_verified"] is None
+    assert root.evidence["unfinished_transaction_confirmed"] is None
+    assert build_incident_summary(report).root_cause_candidate["open_transaction"] == "UNKNOWN"
+    results[2] = replace(_result("transactions", []), success=False, error_type="QueryFailed")
+    incomplete = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    incomplete_root = next(item for item in incomplete.findings if item.title == "ROOT_BLOCKER")
+    assert incomplete_root.evidence["transaction_observed"] is None
+    assert incomplete_root.evidence["transaction_identity_verified"] is None
+    assert incomplete_root.evidence["unfinished_transaction_confirmed"] is None
+
+
+def test_oracle_truncated_transaction_sample_is_observed_but_not_verified() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    results[2] = replace(_result("transactions", [dict(results[2].rows[0])]), truncated=True)
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert root.evidence["transaction_observed"] is True
+    assert root.evidence["transaction_identity_verified"] is False
+    assert root.evidence["unfinished_transaction_confirmed"] is None
+    assert "transaction sample complete" in root.evidence["manual_action"]["reason"]
+    assert not root.reference_commands
+
+
+def test_oracle_transaction_identity_is_instance_qualified() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    transactions = [dict(row) for row in results[2].rows]
+    transactions.append({**transactions[0], "inst_id": 2, "sid": 227,
+                         "serial_number": 991, "saddr": b"other-session",
+                         "taddr": b"other-tx", "transaction_addr": b"other-tx",
+                         "xidusn": 9, "xidslot": 9, "xidsqn": 9})
+    results[2] = _result("transactions", transactions)
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert root.evidence["session_key"] == "1:227"
+    assert root.evidence["transaction_id"] == "4:2:781"
+    assert root.evidence["transaction_identity_verified"] is True
+    assert root.reference_commands
+
+
+def test_oracle_raw_address_bytes_and_hex_values_compare_semantically() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    transactions = [dict(row) for row in results[2].rows]
+    transactions[0]["saddr"] = b"root-session".hex().upper()
+    transactions[0]["taddr"] = b"root-tx".hex().upper()
+    transactions[0]["transaction_addr"] = b"root-tx".hex().upper()
+    results[2] = _result("transactions", transactions)
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER")
+    assert root.evidence["transaction_identity_verified"] is True
+    assert root.reference_commands
+    assert report.details["roots"][0]["session_address"] == "[REDACTED OBJECT]"
+
+
+def test_oracle_previous_sql_context_is_explicit_and_duration_matches_html() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    sessions = [dict(row) for row in results[0].rows]
+    sessions[0].update(sql_id=None, prev_sql_id="prev-176")
+    results[0] = _result("active_sessions", sessions)
+    requests = [dict(row) for row in results[1].rows]
+    requests[2]["duration_seconds"] = 9
+    requests[2]["duration_ms"] = 10000
+    results[1] = _result("active_requests", requests)
+    results[4] = _result("previous_sql", [{"inst_id": 1, "sid": 227,
+                                           "serial_number": 37872,
+                                           "logon_time": "2026-01-01 00:00:00",
+                                           "prev_sql_id": "prev-176",
+                                           "previous_sql_text": "UPDATE T SET C=1"}])
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    report.details["manual_action_decisions"] = manual_action_decisions(report)
+    summary = build_incident_summary(report)
+    cli = render_emergency_triage(report, capture_started_at="sample")
+    html = HtmlReportRenderer().render(build_report_model(report, summary))
+    assert "PREV_SQL_ID：prev-176" in cli
+    assert "上一条 SQL：UPDATE T SET C=1" in cli
+    assert "上一条 SQL 不等于一定是持锁 SQL" in cli
+    assert "运行时间：9 秒" in cli
+    assert "9" in html
+    context = next(section for section in build_report_model(report, summary).sections
+                   if section.section_id == "oracle-root-sql-context")
+    current_sql_index = context.tables[0].headers.index("Current SQL / Availability")
+    assert "inactive" in context.tables[0].rows[0][current_sql_index]
+
+
+def test_oracle_current_and_previous_sql_ids_remain_distinct_when_text_missing() -> None:
+    instance, _, _, _ = fixture()
+    results = list(_oracle_chain_results())
+    sessions = [dict(row) for row in results[0].rows]
+    sessions[0].update(sql_id="current-176", prev_sql_id="previous-176")
+    results[0] = _result("active_sessions", sessions)
+    requests = [dict(row) for row in results[1].rows]
+    requests.append({"inst_id": 1, "sid": 227, "serial_number": 37872,
+                     "sql_id": "current-176", "sql_text": "UPDATE CURRENT_TABLE SET C=1"})
+    results[1] = _result("active_requests", requests)
+    results[4] = _result("previous_sql", [{"inst_id": 1, "sid": 227,
+                                           "serial_number": 37872,
+                                           "prev_sql_id": "previous-176",
+                                           "previous_sql_text": None}])
+    report = build_slow_report(instance, tuple(results), OracleSettings(), "23.0.0.0.0")
+    root = next(item for item in report.findings if item.title == "ROOT_BLOCKER").evidence
+    assert root["current_sql_id"] == "current-176"
+    assert root["current_sql"] == "UPDATE CURRENT_TABLE SET C=1"
+    assert root["prev_sql_id"] == "previous-176"
+    assert root["previous_sql"] is None
+    assert "SQL text not obtained" in root["previous_sql_reason"]
+
+
+def test_oracle_raw_address_normalization_preserves_identity_bytes() -> None:
+    adapter, _ = adapter_for_test()
+    assert adapter._safe_value(b"\x00\xAF") == "00AF"
+    assert adapter._safe_value(bytearray(b"\x00\xAF")) == "00AF"
+
+
 def test_oracle_suppression_is_shared_by_cli_html_and_json() -> None:
     instance, _, _, _ = fixture()
     report = build_slow_report(instance, _oracle_chain_results(identity_complete=False),
@@ -525,7 +682,7 @@ def test_oracle_suppression_is_shared_by_cli_html_and_json() -> None:
     payload = render_json({"report": report, "incident_summary": summary,
                            "manual_action_decisions": report.details["manual_action_decisions"]})
     assert "具体命令：暂不生成" in cli
-    assert "事务地址/XID" in cli
+    assert "TADDR matches transaction ADDR" in cli
     assert "ALTER SYSTEM KILL SESSION '227,37872' IMMEDIATE;" not in cli
     assert "ALTER SYSTEM KILL SESSION '227,37872' IMMEDIATE;" not in html
     assert "ALTER SYSTEM KILL SESSION '227,37872' IMMEDIATE;" not in payload

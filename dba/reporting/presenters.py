@@ -773,6 +773,47 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                        for key, value in incident.root_cause_candidate.items())
         sections.append(ReportSection("root-cause", "Root Cause Candidate",
                                       severity=incident.severity, fields=fields))
+    roots = _dict_rows(details.get("roots"))
+    if report.instance.db_type.value == "oracle" and roots:
+        context_rows = []
+        for root in roots[:5]:
+            context_rows.append({
+                "session": root.get("session_key"),
+                "current_sql_id": root.get("current_sql_id"),
+                "current_sql": root.get("current_sql") or root.get("current_sql_reason"),
+                "previous_sql_id": root.get("prev_sql_id"),
+                "previous_sql": root.get("previous_sql") or root.get("previous_sql_reason"),
+                "transaction": ("verified" if root.get("transaction_identity_verified") is True else
+                                "observed but identity unverified" if
+                                root.get("transaction_observed") is True else "unconfirmed"),
+                "transaction_id": root.get("transaction_id"),
+                "transaction_started": root.get("transaction_start_time") or "unknown",
+                "transaction_start_source": root.get("transaction_start_time_source"),
+                "transaction_start_time_text": root.get("transaction_start_time_text"),
+                "transaction_age_seconds": root.get("transaction_age_seconds"),
+                "action_status": (root.get("manual_action", {}).get("status")
+                                  if isinstance(root.get("manual_action"), dict) else None),
+                "action_reason": (root.get("manual_action", {}).get("reason")
+                                  if isinstance(root.get("manual_action"), dict) else None),
+                "sql_note": root.get("previous_sql_cause_note"),
+            })
+        table = _table(context_rows, (
+            ("Root Session", ("session",)), ("Current SQL_ID", ("current_sql_id",)),
+            ("Current SQL / Availability", ("current_sql",)),
+            ("PREV_SQL_ID", ("previous_sql_id",)),
+            ("Previous SQL / Availability", ("previous_sql",)),
+            ("Transaction", ("transaction",)), ("XID", ("transaction_id",)),
+            ("Start Time", ("transaction_started",)),
+            ("Start Time Source", ("transaction_start_source",)),
+            ("START_TIME Raw", ("transaction_start_time_text",)),
+            ("Duration Seconds", ("transaction_age_seconds",)),
+            ("Manual Action", ("action_status",)), ("Suppression Reason", ("action_reason",)),
+            ("Context Note", ("sql_note",)),
+        ))
+        sections.append(ReportSection(
+            "oracle-root-sql-context", "Oracle Root Blocker SQL Context",
+            summary="上一条 SQL 仅为会话上下文，不能证明其取得了当前锁。",
+            tables=(table,) if table else ()))
     session_sections, _ = _session_and_request_sections(report, details, policy)
     sections.extend(session_sections)
     plan_commands = [(f"Session {_session_id(row)}",

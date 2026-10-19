@@ -45,17 +45,31 @@ def _is_present(value: Any) -> bool:
     return value not in (None, "", b"")
 
 
+def _address(value: Any) -> str | None:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex().upper() or None
+    if isinstance(value, str) and value.strip() and value != "[REDACTED OBJECT]":
+        return value.strip().upper()
+    return None
+
+
+def _hide_addresses(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    address_fields = {"saddr", "taddr", "transaction_addr", "session_address",
+                      "session_transaction_address"}
+    return [{key: "[REDACTED OBJECT]" if key in address_fields and value is not None else value
+             for key, value in row.items()} for row in rows]
+
+
 def _matches_session_transaction(session: dict[str, Any], tx: dict[str, Any]) -> bool:
     """Confirm the V$SESSION/V$TRANSACTION row join still identifies this session."""
     return (session.get("serial_number") == tx.get("serial_number")
             and _is_present(session.get("logon_time"))
             and session.get("logon_time") == tx.get("logon_time")
-            and _is_present(session.get("saddr"))
-            and session.get("saddr") == tx.get("saddr")
-            and _is_present(session.get("taddr"))
-            and session.get("taddr") == tx.get("taddr")
-            and tx.get("taddr") == tx.get("transaction_addr")
-            and _is_present(tx.get("transaction_start_time")))
+            and _address(session.get("saddr")) is not None
+            and _address(session.get("saddr")) == _address(tx.get("saddr"))
+            and _address(session.get("taddr")) is not None
+            and _address(session.get("taddr")) == _address(tx.get("taddr"))
+            and _address(tx.get("taddr")) == _address(tx.get("transaction_addr")))
 
 
 def _oracle_xid(tx: dict[str, Any]) -> str | None:
@@ -160,8 +174,13 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
             transaction_counts[key] = transaction_counts.get(key, 0) + 1
     session_map = {_key(row.get("inst_id"), row.get("sid")): row for row in sessions
                    if session_counts.get(_key(row.get("inst_id"), row.get("sid")) or "") == 1}
-    transaction_map = {_key(row.get("inst_id"), row.get("sid")): row for row in transactions
-                        if transaction_counts.get(_key(row.get("inst_id"), row.get("sid")) or "") == 1}
+    transaction_candidates: dict[str, list[dict[str, Any]]] = {}
+    for row in transactions:
+        tx_key = _key(row.get("inst_id"), row.get("sid"))
+        if tx_key is not None:
+            transaction_candidates.setdefault(tx_key, []).append(row)
+    transaction_map = {key: candidates[0] for key, candidates in transaction_candidates.items()
+                       if len(candidates) == 1}
     previous_map = {_key(row.get("inst_id"), row.get("sid")): row for row in previous}
     request_map = {_key(row.get("inst_id"), row.get("sid")): row for row in requests}
     graph = blocking_graph(edges, sessions)
@@ -186,6 +205,10 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     command_evidence_complete = all(
         name in by_name and by_name[name].success and not by_name[name].truncated
         for name in ("active_sessions", "active_requests", "transactions", "blocking")
+    )
+    transaction_sample_complete = bool(
+        by_name.get("transactions") and by_name["transactions"].success
+        and not by_name["transactions"].truncated
     )
     if not lock_evidence:
         visibility = "PARTIAL"
@@ -229,8 +252,12 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
     roots: list[dict[str, Any]] = []
     for root_key in graph["roots"]:
         session: dict[str, Any] | None = session_map.get(root_key)
-        tx_candidate = transaction_map.get(root_key, {})
-        tx = tx_candidate if session is not None and _matches_session_transaction(session, tx_candidate) else {}
+        candidates = transaction_candidates.get(root_key, [])
+        tx_candidate = transaction_map.get(root_key, candidates[0] if len(candidates) == 1 else {})
+        tx_associated = (transaction_sample_complete and session is not None and len(candidates) == 1
+                         and _matches_session_transaction(session, tx_candidate)
+                         and _oracle_xid(tx_candidate) is not None)
+        tx = tx_candidate if tx_associated else {}
         current = request_map.get(root_key, {})
         prior = previous_map.get(root_key, {})
         affected = _descendants(root_key, graph["children"])
@@ -249,20 +276,35 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                 "session_address": session.get("saddr") if session else None,
                 "session_transaction_address": session.get("taddr") if session else None,
                 "sql_id": session.get("sql_id") if session else None,
-                "prev_sql_id": session.get("prev_sql_id") if session else None,
+                "current_sql_id": current.get("sql_id") or (session.get("sql_id") if session else None),
                 "current_sql": current.get("sql_text"),
+                "current_sql_reason": None if current.get("sql_text") else
+                "SQL text not obtained; session may be inactive, cursor unavailable or permission-limited",
+                "prev_sql_id": prior.get("prev_sql_id") or (session.get("prev_sql_id") if session else None),
                 "previous_sql": prior.get("previous_sql_text"),
                 "previous_sql_reason": None if prior.get("previous_sql_text")
-                else "unavailable: cursor aged out, capability missing or query failed",
+                else ("previous_sql collector failed: " + str(by_name["previous_sql"].error_type)
+                      if by_name.get("previous_sql") and not by_name["previous_sql"].success else
+                      "SQL text not obtained; cursor unavailable or permission-limited, cause unconfirmed"),
+                "previous_sql_cause_note": "说明：上一条 SQL 不等于一定是持锁 SQL。",
                 "event": session.get("event") if session else None,
                 "wait_class": session.get("wait_class") if session else None,
-                "transaction_age_seconds": tx.get("transaction_age_seconds"),
-                "transaction_start_time": tx.get("transaction_start_time"),
-                "transaction_id": _oracle_xid(tx),
-                "transaction_identity_quality": "VERIFIED" if tx and _oracle_xid(tx) else
-                "IDENTITY_INCOMPLETE" if tx else "UNCONFIRMED",
-                "unfinished_transaction_confirmed": bool(tx),
-                "used_ublk": tx.get("used_ublk"), "used_urec": tx.get("used_urec"),
+                "transaction_observed": (bool(candidates) if by_name.get("transactions")
+                                          and by_name["transactions"].success
+                                          and (candidates or not by_name["transactions"].truncated)
+                                          else None),
+                "transaction_identity_verified": bool(tx_associated) if candidates else None,
+                "transaction_age_seconds": tx_candidate.get("transaction_age_seconds") if candidates else None,
+                "transaction_start_time": tx_candidate.get("transaction_start_time") if candidates else None,
+                "transaction_start_time_source": "V$TRANSACTION.START_DATE" if candidates else None,
+                "transaction_id": _oracle_xid(tx_candidate) if candidates else None,
+                "transaction_identity_quality": "VERIFIED" if tx_associated else
+                "UNVERIFIED" if candidates else "UNCONFIRMED",
+                "unfinished_transaction_confirmed": True if tx_associated else None,
+                "transaction_start_time_text": tx_candidate.get("transaction_start_time_text")
+                if candidates else None,
+                "used_ublk": tx_candidate.get("used_ublk") if candidates else None,
+                "used_urec": tx_candidate.get("used_urec") if candidates else None,
                 "blocked_count": len(affected), "blocked_sessions": affected,
                 "direct_blocked_count": len(graph["children"].get(root_key, [])),
                 "indirect_blocked_count": max(0, len(affected) - len(graph["children"].get(root_key, []))),
@@ -281,24 +323,53 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                     sampled_identity.get(field) is not None and session.get(field) is not None
                     and sampled_identity.get(field) != session.get(field)
                     for field in ("serial_number", "logon_time", "username", "machine", "program"))
-        tx_verified = bool(tx and root.get("unfinished_transaction_confirmed")
-                           and root.get("transaction_identity_quality") == "VERIFIED")
-        identity_fields_complete = (session is not None and sid is not None and serial is not None
-                                    and inst_id is not None and _is_present(root.get("logon_time"))
-                                    and bool(root.get("username")) and bool(root.get("machine"))
-                                    and bool(root.get("program")))
+        tx_verified = tx_associated
+        identity_checks = {
+            "INST_ID": inst_id is not None, "SID": sid is not None,
+            "SERIAL#": serial is not None, "LOGON_TIME": _is_present(root.get("logon_time")),
+            "USERNAME": bool(root.get("username")), "MACHINE": bool(root.get("machine")),
+            "PROGRAM": bool(root.get("program")),
+        }
+        tx_checks = {
+            "transaction row observed": bool(candidates),
+            "unique transaction row": len(candidates) == 1,
+            "transaction sample complete": transaction_sample_complete,
+            "serial number matches": bool(candidates) and
+            tx_candidate.get("serial_number") == root.get("serial_number"),
+            "logon time matches": bool(candidates) and _is_present(root.get("logon_time"))
+            and tx_candidate.get("logon_time") == root.get("logon_time"),
+            "SADDR matches": bool(candidates) and _address(root.get("session_address")) is not None
+            and _address(root.get("session_address")) == _address(tx_candidate.get("saddr")),
+            "TADDR matches transaction ADDR": bool(candidates)
+            and _address(root.get("session_transaction_address")) is not None
+            and _address(root.get("session_transaction_address")) == _address(tx_candidate.get("taddr"))
+            and _address(tx_candidate.get("taddr")) == _address(tx_candidate.get("transaction_addr")),
+            "XID complete": bool(candidates) and _oracle_xid(tx_candidate) is not None,
+        }
         instance_semantics_known = (not rac_enabled or rac_global_snapshot)
-        safe = (identity_fields_complete and tx_verified and not identity_conflict
+        safe = (all(identity_checks.values()) and tx_verified and not identity_conflict
                 and session_counts.get(root_key) == 1 and transaction_counts.get(root_key) == 1
                 and not graph["anomalies"] and root_key not in graph["unresolved"]
                 and instance_semantics_known and command_evidence_complete)
         if not safe:
-            reason = ("会话或事务证据存在冲突。" if identity_conflict or session_counts.get(root_key) != 1
-                      or transaction_counts.get(root_key) != 1 else
-                      "缺少 SERIAL#/LOGON_TIME/用户来源或事务地址/XID 等身份字段。"
-                      if not identity_fields_complete or not tx_verified else
-                      "RAC 实例范围未能可靠确认。" if not instance_semantics_known else
-                      "阻塞图或必需采样证据不完整。")
+            failed_identity = [name for name, passed in identity_checks.items() if not passed]
+            failed_transaction = [name for name, passed in tx_checks.items() if not passed]
+            failures = ([f"会话身份字段缺失：{', '.join(failed_identity)}"] if failed_identity else [])
+            if failed_transaction:
+                failures.append(f"事务证据未通过：{', '.join(failed_transaction)}")
+            if identity_conflict:
+                failures.append("采样间会话身份冲突")
+            if not instance_semantics_known:
+                failures.append("RAC 全局实例范围未确认")
+            if graph["anomalies"]:
+                failures.append("阻塞图存在异常")
+            if root_key in graph["unresolved"]:
+                failures.append("阻塞图根会话未解析")
+            if not command_evidence_complete:
+                failures.append("必需采集失败或被截断")
+            if not failures:
+                failures.append("会话或事务存在重复采样行")
+            reason = "；".join(failures)
         else:
             reason = None
         if safe:
@@ -317,7 +388,10 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                 "transaction_confirmed": tx_verified,
                 "transaction_id": root.get("transaction_id"),
                 "transaction_start_time": root.get("transaction_start_time"),
+                "session_checks": identity_checks,
+                "transaction_checks": tx_checks,
                 "blocking_graph_reliable": not graph["anomalies"],
+                "required_samples_complete": command_evidence_complete,
                 "rac_enabled": rac_enabled, "rac_global_snapshot": rac_global_snapshot,
             },
         }
@@ -399,9 +473,10 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                "blocking_evidence": edges,
                "lock_evidence_reason": None if lock_evidence
                else "unavailable: optional V$LOCK/V$LOCKED_OBJECT grants missing",
-               "roots": roots, "transactions": transactions, "idle_transactions": idle,
+               "roots": _hide_addresses(roots), "transactions": _hide_addresses(transactions),
+               "idle_transactions": _hide_addresses(idle),
                "blocked_victims": blocked_victims, "active_waits": active_waits,
-               "sessions": sessions, "active_requests": requests,
+               "sessions": _hide_addresses(sessions), "active_requests": requests,
                "quality": quality, "incomplete": incomplete, "data_visibility": visibility,
                "rac_global_snapshot": rac_global_snapshot,
                "rac_enabled": rac_enabled,

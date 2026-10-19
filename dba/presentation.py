@@ -567,9 +567,22 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
             lines.extend(("", "【主动等待语句】"))
             for wait in active_waits:
                 if isinstance(wait, dict):
-                    duration = wait.get("duration_ms")
-                    duration_text = f"{float(duration) / 1000:g}" \
-                        if isinstance(duration, (int, float)) and not isinstance(duration, bool) else "未知"
+                    if report.instance.db_type.value == "oracle" and wait.get("duration_seconds") is not None:
+                        seconds = wait.get("duration_seconds")
+                        duration_text = (f"{float(seconds):g}"
+                                         if isinstance(seconds, (int, float))
+                                         and not isinstance(seconds, bool) else "未知")
+                    else:
+                        duration = wait.get("duration_ms")
+                        if duration is not None:
+                            duration_text = (f"{float(duration) / 1000:g}"
+                                             if isinstance(duration, (int, float))
+                                             and not isinstance(duration, bool) else "未知")
+                        else:
+                            seconds = wait.get("duration_seconds")
+                            duration_text = (f"{float(seconds):g}"
+                                             if isinstance(seconds, (int, float))
+                                             and not isinstance(seconds, bool) else "未知")
                     pid = (f"{wait.get('inst_id')}:{wait.get('sid')}"
                            if report.instance.db_type.value == "oracle" else
                            _first(wait, "pid", "processlist_id"))
@@ -599,6 +612,7 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                              == str(target)), {})
                 blocked = _first(root, "blocked_count", "blocked_session_count")
                 status = _first(root, "status", "command_name", "state", "state_name")
+                manual_action = root.get("manual_action", {})
                 transaction = (root.get("unfinished_transaction_confirmed") is True
                                or _first(root, "trx_id", "transaction_id") not in (None, ""))
                 lines.append(f"根阻塞会话：{target if target is not None else 'UNKNOWN'}")
@@ -608,14 +622,59 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                 if root.get("direct_blocked_count") is not None:
                     lines.append(f"直接影响：{root['direct_blocked_count']}；间接影响：{root.get('indirect_blocked_count', 0)}；总影响：{blocked or 0}")
                 lines.append(f"状态：{status or 'UNKNOWN'}")
-                transaction_text = ("是" if transaction else
-                                    "否" if root.get("unfinished_transaction_confirmed") is False else
-                                    "未确认")
+                if report.instance.db_type.value == "oracle":
+                    transaction_text = (
+                        "已确认" if root.get("transaction_identity_verified") is True else
+                        "已观测，身份未核验" if root.get("transaction_observed") is True else
+                        "否" if root.get("unfinished_transaction_confirmed") is False else
+                        "未确认")
+                else:
+                    transaction_text = ("是" if transaction else
+                                        "否" if root.get("unfinished_transaction_confirmed") is False else
+                                        "未确认")
                 transaction_prefix = "采样时未结束事务" if report.instance.db_type.value == "postgresql" else "未结束事务"
                 lines.append(f"{transaction_prefix}：{transaction_text}")
                 if report.instance.db_type.value == "oracle":
+                    manual_action = root.get("manual_action", {})
+                    sql_text = root.get("current_sql") or root.get("current_sql_reason") \
+                        or "未获取到对应 SQL 文本，原因未确认"
+                    previous_text = root.get("previous_sql") or root.get("previous_sql_reason") \
+                        or "未获取到对应 SQL 文本，原因未确认"
+                    sql_text = " ".join(str(sql_text).split())
+                    previous_text = " ".join(str(previous_text).split())
+                    sql_text = sql_text[:500] + ("…（摘要截断）" if len(sql_text) > 500 else "")
+                    previous_text = previous_text[:500] + ("…（摘要截断）"
+                                                           if len(previous_text) > 500 else "")
+                    lines.extend(("【根阻塞 SQL 上下文】",
+                                  f"当前 SQL_ID：{root.get('current_sql_id') or '未获取'}",
+                                  f"当前 SQL：{sql_text}",
+                                  f"PREV_SQL_ID：{root.get('prev_sql_id') or '未获取'}",
+                                  f"上一条 SQL：{previous_text}",
+                                  root.get("previous_sql_cause_note") or
+                                  "上一条 SQL 不等于一定是持锁 SQL。"))
+                    checks = manual_action.get("identity_evidence", {}).get("session_checks", {}) \
+                        if isinstance(manual_action, dict) and isinstance(
+                            manual_action.get("identity_evidence"), dict) else {}
+                    transaction_checks = manual_action.get("identity_evidence", {}).get(
+                        "transaction_checks", {}) if isinstance(manual_action, dict) and isinstance(
+                            manual_action.get("identity_evidence"), dict) else {}
+                    if checks:
+                        lines.append("会话身份检查：" + "；".join(
+                            f"{name}={'通过' if passed else '缺失'}" for name, passed in checks.items()))
+                    if transaction_checks:
+                        lines.append("事务检查：" + "；".join(
+                            f"{name}={'通过' if passed else '未通过'}"
+                            for name, passed in transaction_checks.items()))
                     if root.get("transaction_start_time") is not None:
-                        lines.append(f"事务开始时间：{root['transaction_start_time']}")
+                        lines.append("事务开始时间（V$TRANSACTION.START_DATE）："
+                                     f"{root['transaction_start_time']}")
+                    elif root.get("transaction_start_time_text"):
+                        lines.append("事务开始时间（V$TRANSACTION.START_TIME 原始值）："
+                                     f"{root['transaction_start_time_text']}")
+                    else:
+                        lines.append("事务开始时间：未知（来源字段未提供有效时间）")
+                    if root.get("transaction_age_seconds") is not None:
+                        lines.append(f"事务持续：{root['transaction_age_seconds']} 秒")
                     lines.append(f"事务身份质量：{root.get('transaction_identity_quality') or 'UNKNOWN'}")
                 elif report.instance.db_type.value == "postgresql":
                     lines.append(f"backend_start：{root.get('backend_start') or '未采集'}；xact_start：{root.get('xact_start') or '未采集'}")
@@ -642,7 +701,6 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                         lines.append("PostgreSQL 复核：查询 pg_stat_activity，核对 PID、backend_start、xact_start、用户和客户端来源。")
                     elif report.instance.db_type.value == "oracle":
                         lines.append("Oracle 复核：核对当前 INST_ID/SID/SERIAL#/LOGON_TIME、USERNAME、MACHINE、PROGRAM、事务 XID 和开始时间，并确认 RAC 实例范围。")
-                        manual_action = root.get("manual_action", {})
                         identity = manual_action.get("identity_evidence", {}) \
                             if isinstance(manual_action, dict) else {}
                         target_template = ("<经实时复核的 SID,SERIAL#,@INST_ID>"
