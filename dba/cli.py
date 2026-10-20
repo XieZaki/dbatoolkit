@@ -38,7 +38,12 @@ from dba.environment import driver_info
 from dba.errors import ToolkitError
 from dba.execution_plan import diagnose_plan
 from dba.execution_plan_profiles import validate_plan_profiles
-from dba.incident import build_incident_summary, build_priority_candidates, manual_action_decisions
+from dba.incident import (
+    build_incident_summary,
+    build_performance_triage,
+    build_priority_candidates,
+    manual_action_decisions,
+)
 from dba.inventory import Inventory, ValidationError
 from dba.logging import configure_logging, redact
 from dba.mysql import MySQLAdapter
@@ -1530,10 +1535,23 @@ def main(
                             "supplemental_not_collected"))
                         cast(Any, report).details.update({"capture_started_at": capture_started_at,
                                                           "snapshot_consistency": "BEST_EFFORT",
-                                                          "supplemental_pending": supplemental_expected})
-                        emergency_candidates = build_priority_candidates(report)
+                                                          "supplemental_pending": supplemental_expected,
+                                                          "diagnostic_profile": {
+                                                              "sql_profile_id": profile.sql_profile_id,
+                                                              "permission_profile_id": profile.permission_profile_id,
+                                                              "parser_contract_id": profile.parser_contract_id,
+                                                              "runtime_variant": profile.runtime_variant,
+                                                          },
+                                                          "permission_readiness": {
+                                                              "status": assessment["status"].value,
+                                                              "missing_required": assessment["missing_required"],
+                                                              "missing_optional": assessment["missing_optional"],
+                                                          }})
+                        emergency_candidates = build_priority_candidates(
+                            report, include_blocking_victims=True)
                         cast(Any, report).details.update({
                             "priority_candidates": emergency_candidates,
+                            "performance_triage": build_performance_triage(report),
                             "manual_action_decisions": manual_action_decisions(report),
                         })
                         triage_completed_at = datetime.now(timezone.utc).isoformat()
@@ -1571,13 +1589,26 @@ def main(
                                     "reason": "Required emergency evidence was incomplete; recent SQL was not queried.",
                                     "statements": [],
                                 }]
-                        cast(Any, report).details.update({"priority_candidates": build_priority_candidates(report),
+                        cast(Any, report).details.update({"priority_candidates": build_priority_candidates(
+                                               report, include_blocking_victims=True),
+                                               "diagnostic_profile": {
+                                                   "sql_profile_id": profile.sql_profile_id,
+                                                   "permission_profile_id": profile.permission_profile_id,
+                                                   "parser_contract_id": profile.parser_contract_id,
+                                                   "runtime_variant": profile.runtime_variant,
+                                               },
+                                               "permission_readiness": {
+                                                   "status": assessment["status"].value,
+                                                   "missing_required": assessment["missing_required"],
+                                                   "missing_optional": assessment["missing_optional"],
+                                               },
                                                "manual_action_decisions": manual_action_decisions(report),
                                                "capture_started_at": capture_started_at,
                                                "triage_completed_at": triage_completed_at,
                                                "capture_finished_at": datetime.now(timezone.utc).isoformat(),
                                                "snapshot_consistency": "BEST_EFFORT",
                                                "supplemental_pending": False})
+                        cast(Any, report).details["performance_triage"] = build_performance_triage(report)
                         if args.format == "console" and not args.json and not args.quiet:
                             completion = ("补充证据：已完成" if cast(Any, report).details.get(
                                 "full_profile_evidence_status") == "COMPLETE" else

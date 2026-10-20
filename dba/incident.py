@@ -7,6 +7,22 @@ from typing import Any
 
 from dba.core import DiagnosticReport
 
+_TRIAGE_RULE_IDS = {
+    "ROOT_BLOCKER": "TRIAGE-ROOT-01",
+    "BLOCKING_VICTIM": "TRIAGE-VICTIM-01",
+    "INTERMEDIATE_BLOCKER": "TRIAGE-INTERMEDIATE-01",
+    "INDEPENDENT_SLOW_SQL": "TRIAGE-INDEPENDENT-SLOW-01",
+    "LONG_RUNNING_TRANSACTION": "TRIAGE-LONG-TX-01",
+}
+_TRIAGE_KIND_RULES = {
+    "ROOT_BLOCKER": "ROOT_BLOCKER",
+    "BLOCKED_VICTIM": "BLOCKING_VICTIM",
+    "INTERMEDIATE_BLOCKER": "INTERMEDIATE_BLOCKER",
+    "LONG_RUNNING_SQL": "INDEPENDENT_SLOW_SQL",
+    "LONG_RUNNING_TRANSACTION": "LONG_RUNNING_TRANSACTION",
+    "IDLE_OPEN_TRANSACTION": "LONG_RUNNING_TRANSACTION",
+}
+
 
 @dataclass(frozen=True)
 class RecoveryAction:
@@ -54,6 +70,31 @@ def _int(value: Any) -> int | None:
 
 def _first(row: dict[str, Any], *names: str) -> Any:
     return next((row[name] for name in names if row.get(name) is not None), None)
+
+
+def _slow_sample_index(details: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {str(item.get("collector")): item for item in details.get("samples", [])
+            if isinstance(item, dict) and item.get("collector")}
+
+
+def _slow_sample_reference(details: dict[str, Any], collector: str, source_path: str,
+                           facts: dict[str, Any]) -> dict[str, Any]:
+    sample = _slow_sample_index(details).get(collector)
+    integrity = ("UNKNOWN" if sample is None else "FAILED" if sample.get("success") is False else
+                 "TRUNCATED" if sample.get("truncated") else "COMPLETE")
+    return {
+        "collector": collector,
+        "analyzer": "dba.incident.build_priority_candidates",
+        "evidence_type": ("BLOCKING_RELATIONSHIP" if "blocking" in source_path else
+                          "TRANSACTION_DURATION" if "transaction" in source_path else
+                          "REQUEST_DURATION"),
+        "source_path": source_path,
+        "observed_at": sample.get("finished_at") if sample else None,
+        "sample_started_at": sample.get("started_at") if sample else None,
+        "sample_finished_at": sample.get("finished_at") if sample else None,
+        "integrity": integrity,
+        "facts": facts,
+    }
 
 
 def _duration(value: Any) -> tuple[int, str] | None:
@@ -439,13 +480,42 @@ def manual_action_decisions(report: DiagnosticReport) -> tuple[dict[str, Any], .
     return tuple(decisions)
 
 
-def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any], ...]:
+def build_priority_candidates(report: DiagnosticReport, *, include_blocking_victims: bool = False
+                              ) -> tuple[dict[str, Any], ...]:
     """Create a deterministic five-row review queue from captured slow evidence."""
     if report.scenario != "slow":
         return ()
     details = getattr(report, "details", {})
-    samples = [item for item in details.get("samples", []) if isinstance(item, dict)]
-    timestamps = [str(item.get("finished_at")) for item in samples if item.get("finished_at")]
+    db_type = report.instance.db_type.value
+    samples = _slow_sample_index(details)
+    graph = details.get("blocking_graph", {})
+    graph = graph if isinstance(graph, dict) else {}
+    graph_source = ("active_requests" if db_type == "sqlserver" else
+                    "active_sessions" if db_type == "oracle" else "blocking")
+    graph_sample = samples.get(graph_source)
+    graph_complete = (graph_sample is not None and graph_sample.get("success") is True
+                      and not graph_sample.get("truncated") and not graph.get("anomalies")
+                      and not graph.get("unresolved") and not graph.get("identity_conflicts"))
+    graph_children = graph.get("children", {})
+    graph_children = graph_children if isinstance(graph_children, dict) else {}
+    graph_roots = {str(value) for value in graph.get("roots", [])}
+    parent_map: dict[str, set[str]] = {}
+    child_map: dict[str, set[str]] = {}
+    for parent, children in graph_children.items():
+        if not isinstance(children, list):
+            continue
+        parent_text = str(parent)
+        child_map.setdefault(parent_text, set())
+        for child in children:
+            child_text = str(child)
+            child_map[parent_text].add(child_text)
+            parent_map.setdefault(child_text, set()).add(parent_text)
+    if isinstance(graph.get("parents"), dict):
+        for child, parents in graph["parents"].items():
+            if isinstance(parents, list):
+                parent_map[str(child)] = {str(parent) for parent in parents}
+    sample_rows = [item for item in details.get("samples", []) if isinstance(item, dict)]
+    timestamps = [str(item.get("finished_at")) for item in sample_rows if item.get("finished_at")]
     captured = max(timestamps, default=report.diagnosed_at.isoformat())
     sessions = details.get("all_sessions", details.get("sessions", []))
     session_map: dict[str, dict[str, Any]] = {}
@@ -461,7 +531,32 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
                 session_map[key] = row
     selected: dict[str, dict[str, Any]] = {}
 
-    def add(row: dict[str, Any], kind: str, priority: int, reason: str) -> None:
+    def record_classification(target: dict[str, Any], kind: str, label: str | None,
+                              references: tuple[dict[str, Any], ...],
+                              uncertainty: tuple[str, ...]) -> None:
+        rule_label = label or (_TRIAGE_KIND_RULES.get(kind) if uncertainty else None)
+        if not rule_label or rule_label not in _TRIAGE_RULE_IDS:
+            return
+        evidence = target.setdefault("classification_evidence", {})
+        entry = evidence.setdefault(rule_label, {
+            "rule_id": _TRIAGE_RULE_IDS[rule_label],
+            "status": "UNKNOWN" if label is None else "CONFIRMED",
+            "evidence_references": [],
+            "uncertainty_reasons": [],
+        })
+        entry["evidence_references"].extend(
+            reference for reference in references if reference not in entry["evidence_references"])
+        entry["uncertainty_reasons"].extend(
+            reason for reason in uncertainty if reason not in entry["uncertainty_reasons"])
+        if entry["uncertainty_reasons"]:
+            entry["status"] = ("PARTIAL" if label is not None or entry["status"] == "CONFIRMED"
+                               else "UNKNOWN")
+        elif label is not None:
+            entry["status"] = "CONFIRMED"
+
+    def add(row: dict[str, Any], kind: str, reason: str, *, label: str | None = None,
+            evidence_references: tuple[dict[str, Any], ...] = (),
+            uncertainty_reasons: tuple[str, ...] = (), add_signal: bool = True) -> None:
         sid = _first(row, "session_id", "pid", "processlist_id", "sid")
         if sid is None:
             return
@@ -470,14 +565,27 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
         previous = selected.get(identity_key)
         if previous is not None:
             categories = list(previous.get("categories", (previous.get("category"),)))
-            if kind not in categories:
+            if add_signal and kind not in categories:
                 categories.append(kind)
             reasons = list(previous.get("reasons", (previous.get("reason", ""),)))
-            if reason not in reasons:
+            if add_signal and reason not in reasons:
                 reasons.append(reason)
             previous["categories"] = categories
             previous["reasons"] = reasons
             previous["reason"] = "；".join(item.rstrip("。；; ") for item in reasons)
+            labels = list(previous.get("classification_labels", []))
+            if label and label not in labels:
+                labels.append(label)
+            previous["classification_labels"] = labels
+            refs = list(previous.get("evidence_references", []))
+            refs.extend(ref for ref in evidence_references if ref not in refs)
+            previous["evidence_references"] = refs
+            uncertainties = list(previous.get("uncertainty_reasons", []))
+            uncertainties.extend(item for item in uncertainty_reasons if item not in uncertainties)
+            previous["uncertainty_reasons"] = uncertainties
+            previous["classification_status"] = (
+                "UNKNOWN" if not labels else "PARTIAL" if uncertainties else "CONFIRMED")
+            record_classification(previous, kind, label, evidence_references, uncertainty_reasons)
             return
         session_key = f"{inst_id}:{sid}" if inst_id is not None else str(sid)
         session = session_map.get(session_key, {})
@@ -530,11 +638,19 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
             "session_id": (f"{inst_id}:{sid}" if report.instance.db_type.value == "oracle"
                            and inst_id is not None else sid),
             "category": kind, "categories": [kind],
+            "classification_labels": [label] if label else [],
+            "classification_evidence": {},
+            "classification_status": "PARTIAL" if label and uncertainty_reasons else
+                                     "CONFIRMED" if label else "UNKNOWN",
+            "evidence_references": list(evidence_references),
+            "uncertainty_reasons": list(uncertainty_reasons),
+            "root_cause_status": "NOT_ESTABLISHED",
             "reason": reason, "reasons": [reason],
             "session_key": identity_key,
             "blocked_session_count": blocked if type(blocked) is int else 0,
             "sql_id": sql_id,
             "sql_id_type": sql_id_type,
+            "request_id": _first(row, "request_id") or _first(request, "request_id"),
             "mysql_connection_id": _first(row, "processlist_id") or
                                    _first(request, "processlist_id")
                                    if report.instance.db_type.value == "mysql" else None,
@@ -560,28 +676,202 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
             "transaction_identity_quality": row.get("transaction_identity_quality"),
             "manual_action_status": (manual_action.get("status")
                                      if isinstance(manual_action, dict) else None),
-            "oracle_inst_id": row.get("inst_id") if report.instance.db_type.value == "oracle" else None,
-            "oracle_serial_number": row.get("serial_number")
-            if report.instance.db_type.value == "oracle" else None,
+            "oracle_inst_id": (_first(row, "inst_id") or _first(session, "inst_id")
+                               if report.instance.db_type.value == "oracle" else None),
+            "oracle_serial_number": (_first(row, "serial_number") or _first(session, "serial_number")
+                                     if report.instance.db_type.value == "oracle" else None),
             "transaction_start_time": row.get("transaction_start_time")
             if report.instance.db_type.value == "oracle" else None,
             "transaction_start_time_text": row.get("transaction_start_time_text")
             if report.instance.db_type.value == "oracle" else None,
             "login_time": _first(row, "login_time", "logon_time", "backend_start", "connect_time") or
                           _first(session, "login_time", "logon_time", "backend_start", "connect_time"),
-            "selection_priority": priority, "evidence_timestamp": captured,
+            "evidence_timestamp": captured,
             "evidence_quality": details.get("emergency_evidence_status", "UNKNOWN"),
             "identity_recheck": "REQUIRED_BEFORE_MANUAL_ACTION",
             "identity_quality": identity_quality,
             "identity_reuse_note": "会话 ID 可能已复用；必须在人工操作前重新核对当前会话身份。",
         }
+        record_classification(selected[identity_key], kind, label,
+                              evidence_references, uncertainty_reasons)
 
-    for row in details.get("roots", []):
-        if isinstance(row, dict):
-            add(row, "ROOT_BLOCKER", 0, "已采样阻塞关系表明该会话为根阻塞候选。")
+    roots = [row for row in details.get("roots", []) if isinstance(row, dict)]
+    sessions_list = details.get("all_sessions", details.get("sessions", []))
+    sessions_list = [row for row in sessions_list if isinstance(row, dict)] \
+        if isinstance(sessions_list, list) else []
+    request_rows = details.get("all_requests", details.get("active_requests", []))
+    request_rows = [row for row in request_rows if isinstance(row, dict)] \
+        if isinstance(request_rows, list) else []
+
+    oracle_serials: dict[str, set[str]] = {}
+    if db_type == "oracle":
+        for source_rows in (sessions_list, request_rows, roots,
+                            details.get("idle_transactions", [])):
+            if not isinstance(source_rows, list):
+                continue
+            for source_row in source_rows:
+                if not isinstance(source_row, dict):
+                    continue
+                if (source_row.get("inst_id") is None or source_row.get("sid") is None
+                        or source_row.get("serial_number") is None):
+                    continue
+                source_key = f"{source_row['inst_id']}:{source_row['sid']}"
+                oracle_serials.setdefault(source_key, set()).add(str(source_row["serial_number"]))
+    oracle_identity_conflicts = {key for key, serials in oracle_serials.items() if len(serials) > 1}
+
+    def oracle_identity_complete(key: str, row: dict[str, Any]) -> bool:
+        if db_type != "oracle":
+            return True
+        session = session_map.get(key, {})
+        return (row.get("inst_id") is not None and row.get("sid") is not None
+                and (row.get("serial_number") is not None
+                     or session.get("serial_number") is not None))
+
+    def native_key(row: dict[str, Any]) -> str | None:
+        if db_type == "oracle":
+            if row.get("session_key") is not None:
+                return str(row["session_key"])
+            if row.get("inst_id") is not None and row.get("sid") is not None:
+                return f"{row['inst_id']}:{row['sid']}"
+        sid = _first(row, "session_id", "pid", "processlist_id", "sid")
+        return str(sid) if sid is not None else None
+
+    tx_titles = {"IDLE_TRANSACTION", "IDLE_IN_TRANSACTION", "IDLE_TRANSACTION_BLOCKER",
+                 "LONG_TRANSACTION", "LONG_RUNNING_TRANSACTION"}
+    tx_findings = [item for item in report.findings if item.title in tx_titles]
+
+    def has_transaction_finding(row: dict[str, Any]) -> bool:
+        key = native_key(row)
+        if key is None:
+            return False
+        for finding in tx_findings:
+            evidence = finding.evidence
+            candidate_key = native_key(evidence)
+            if candidate_key == key:
+                return True
+            if str(finding.session or "") in {key, str(_first(row, "session_id", "pid",
+                                                                 "processlist_id", "sid"))}:
+                return True
+        return False
+
+    for row in roots:
+        root_key = native_key(row)
+        if root_key is None:
+            continue
+        downstream = len(child_map.get(root_key, set()))
+        identity_conflict = db_type == "oracle" and root_key in oracle_identity_conflicts
+        root_complete = oracle_identity_complete(root_key, row)
+        root_confirmed = bool(graph_complete and root_complete and not identity_conflict
+                              and root_key in graph_roots and
+                              (downstream > 0 or row.get("blocked_count", row.get(
+                                  "blocked_session_count", 0)) > 0))
+        root_ref = _slow_sample_reference(details, graph_source, "details.blocking_graph.roots",
+                                          {"session_key": root_key, "downstream_count": row.get(
+                                              "blocked_count", row.get("blocked_session_count"))})
+        root_uncertainty = (() if root_confirmed else
+                            (("Oracle INST_ID/SID maps to conflicting SERIAL# values in this snapshot.",)
+                             if identity_conflict else
+                             ("Oracle session identity is incomplete (INST_ID/SID/SERIAL#).",)
+                             if not root_complete else
+                             ("Root attribution is incomplete, anomalous, or not backed by a complete blocking sample.",)))
+        root_refs = [root_ref]
+        age = row.get("transaction_age_seconds")
+        tx_label = (root_complete and not identity_conflict and has_transaction_finding(row)
+                    and type(age) is int and age > 0
+                    and row.get("unfinished_transaction_confirmed") is not False)
+        if tx_label:
+            tx_source = "transactions"
+            root_refs.append(_slow_sample_reference(
+                details, tx_source, "details.roots[session].transaction_age_seconds",
+                {"transaction_age_seconds": age,
+                 "transaction_id": _first(row, "transaction_id", "trx_id", "xid")}))
+        add(row, "ROOT_BLOCKER", "已采样阻塞关系表明该会话为根阻塞候选。",
+            label="ROOT_BLOCKER" if root_confirmed else None,
+            evidence_references=tuple(root_refs), uncertainty_reasons=root_uncertainty)
+        if tx_label:
+            add(row, "LONG_RUNNING_TRANSACTION", "现有事务分析已按事务持续时间/阻塞语义标记，且有事务时长证据。",
+                label="LONG_RUNNING_TRANSACTION",
+                evidence_references=tuple(root_refs[1:]), add_signal=False)
+        elif (row.get("unfinished_transaction_confirmed") is not False
+              and (identity_conflict or not root_complete or age is None
+                   or not has_transaction_finding(row))):
+            tx_ref = _slow_sample_reference(
+                details, "transactions", "details.roots[session].transaction_age_seconds",
+                {"transaction_age_seconds": age,
+                 "transaction_id": _first(row, "transaction_id", "trx_id", "xid")})
+            add(row, "LONG_RUNNING_TRANSACTION", "根会话的事务持续时间/身份证据不足，不能判断事务是否长期。",
+                evidence_references=(tx_ref,),
+                uncertainty_reasons=("Transaction age or verified session-to-transaction evidence is unavailable.",),
+                add_signal=False)
     for row in details.get("idle_transactions", []):
-        if isinstance(row, dict):
-            add(row, "IDLE_OPEN_TRANSACTION", 1, "会话与未结束事务证据关联。")
+        if not isinstance(row, dict):
+            continue
+        age = row.get("transaction_age_seconds")
+        tx_label = has_transaction_finding(row) and type(age) is int and age > 0
+        add(row, "IDLE_OPEN_TRANSACTION", "会话与未结束事务证据关联。",
+            label="LONG_RUNNING_TRANSACTION" if tx_label else None,
+            evidence_references=(_slow_sample_reference(
+                details, "transactions", "details.idle_transactions[session].transaction_age_seconds",
+                {"transaction_age_seconds": age,
+                 "transaction_id_present": _first(row, "transaction_id", "trx_id", "xid") is not None}),),
+            uncertainty_reasons=() if tx_label else
+            ("Transaction duration/identity evidence did not meet the existing engine-specific finding contract.",))
+
+    # Every observed child edge can identify a victim; a node with both an
+    # upstream parent and downstream children is also an intermediate blocker.
+    for victim_key, direct_parents in (sorted(parent_map.items()) if include_blocking_victims else ()):
+        source_row = next((row for row in [*request_rows, *sessions_list]
+                           if native_key(row) == victim_key), None)
+        if source_row is None and db_type == "oracle":
+            source_row = next((row for row in [*request_rows, *sessions_list]
+                               if (candidate_key := native_key(row)) is not None
+                               and candidate_key.endswith(f":{victim_key}")), None)
+        if source_row is None:
+            source_row = {"session_id": victim_key}
+            if db_type == "oracle" and ":" in victim_key:
+                inst_id, sid = victim_key.split(":", 1)
+                source_row = {"inst_id": inst_id, "sid": sid, "session_key": victim_key}
+            elif db_type == "mysql":
+                source_row = {"processlist_id": int(victim_key)} if victim_key.isdigit() else source_row
+            elif db_type == "postgresql":
+                source_row = {"pid": int(victim_key)} if victim_key.isdigit() else source_row
+            elif db_type == "sqlserver":
+                source_row = {"session_id": int(victim_key)} if victim_key.isdigit() else source_row
+        parents_observed = sorted(direct_parents)
+        is_intermediate = bool(child_map.get(victim_key))
+        identity_conflict = db_type == "oracle" and victim_key in oracle_identity_conflicts
+        victim_identity_complete = (source_row is not None
+                                    and oracle_identity_complete(victim_key, source_row))
+        edge_integrity = "COMPLETE" if graph_complete else "PARTIAL"
+        uncertainty = (("Oracle INST_ID/SID maps to conflicting SERIAL# values in this snapshot.",)
+                       if identity_conflict else () if graph_complete else
+                       ("Blocking evidence is incomplete; root attribution and independence are withheld.",))
+        if db_type == "oracle" and not victim_identity_complete:
+            uncertainty = (*uncertainty, "Oracle session identity is incomplete (INST_ID/SID/SERIAL#).")
+        edge_refs = (_slow_sample_reference(details, graph_source,
+                                            f"details.blocking_graph.parents[{victim_key}]",
+                                            {"direct_blocker_ids": parents_observed,
+                                             "downstream_count": len(child_map.get(victim_key, set())),
+                                             "graph_integrity": edge_integrity}),)
+        add(source_row, "BLOCKED_VICTIM", "阻塞图中存在指向该会话的上游边。",
+            label="BLOCKING_VICTIM" if victim_identity_complete and not identity_conflict else None,
+            evidence_references=edge_refs,
+            uncertainty_reasons=uncertainty)
+        if is_intermediate:
+            add(source_row, "INTERMEDIATE_BLOCKER", "该会话同时有上游阻塞边和下游受阻会话。",
+                label="INTERMEDIATE_BLOCKER" if victim_identity_complete and not identity_conflict else None,
+                evidence_references=edge_refs,
+                uncertainty_reasons=uncertainty)
+        slow_row = next((item for item in details.get("long_running", [])
+                         if isinstance(item, dict) and native_key(item) == victim_key), None) \
+            if isinstance(details.get("long_running", []), list) else None
+        if slow_row is not None:
+            slow_ref = _slow_sample_reference(
+                details, "long_running", "details.long_running[session].duration",
+                {"duration_ms": _first(slow_row, "elapsed_ms", "duration_ms"),
+                 "wait_event": _first(slow_row, "wait_event", "wait_type", "current_wait")})
+            add(source_row, "LONG_RUNNING_SQL", "该会话同时有现有慢 SQL/长请求证据，但属于已知阻塞链。",
+                evidence_references=(slow_ref,))
     requests = details.get("all_requests", details.get("active_requests", details.get("top_queries", [])))
     long_finding = next((item for item in report.findings if item.title == "LONG_RUNNING_SQL"), None)
     threshold = long_finding.evidence.get("threshold_seconds") if long_finding else None
@@ -616,12 +906,147 @@ def build_priority_candidates(report: DiagnosticReport) -> tuple[dict[str, Any],
             continue
         if row.get("request_kind") == "ACTIVE_WAIT":
             continue
-        add(row, "LONG_RUNNING_SQL", 3,
-            "已达到配置的长运行阈值；仅作为人工核查线索。")
+        sid_key = native_key(row)
+        in_blocking_chain = (sid_key in parent_map or sid_key in child_map or sid_key in graph_roots)
+        independent = bool(graph_complete and not in_blocking_chain and
+                           (db_type != "oracle" or oracle_identity_complete(sid_key or "", row)) and
+                           not (db_type == "oracle" and sid_key in oracle_identity_conflicts) and
+                           _first(row, "blocking_session_id", "blocking_pid", "blocker_pid")
+                           in (None, 0, "0", ""))
+        long_ref = _slow_sample_reference(
+            details, "active_requests" if db_type == "sqlserver" else "long_running",
+            "details.long_running[session].duration", {
+                "duration_ms": _first(row, "elapsed_ms", "duration_ms"),
+                "duration_seconds": row.get("duration_seconds"),
+                "wait_type": _first(row, "wait_type", "wait_event", "current_wait")})
+        uncertainty = (() if independent else
+                       ("Blocking evidence does not prove this slow request is independent.",))
+        add(row, "LONG_RUNNING_SQL", "达到现有请求时长阈值；耗时不证明资源根因。",
+            label="INDEPENDENT_SLOW_SQL" if independent else None,
+            evidence_references=(long_ref,), uncertainty_reasons=uncertainty)
     ordered = sorted(selected.values(), key=lambda row: (
-        int(row["selection_priority"]), -int(row["blocked_session_count"]),
-        -int(row["transaction_age_seconds"] or 0) if type(row["transaction_age_seconds"]) is int else 0,
-        str(row["session_key"])))[:5]
+        -int(row["blocked_session_count"] or 0),
+        -int(row["transaction_age_seconds"] or 0)
+        if type(row.get("transaction_age_seconds")) is int else 0,
+        -float(row["running_seconds"] or 0)
+        if type(row.get("running_seconds")) in (int, float) else 0,
+        -len(row.get("classification_labels", [])), str(row["session_key"])))[:5]
     for rank, row in enumerate(ordered, 1):
         row["rank"] = rank
     return tuple(ordered)
+
+
+def build_performance_triage(report: DiagnosticReport) -> dict[str, Any]:
+    """Expose bounded multi-label slow triage with source and uncertainty references.
+
+    This is a presentation contract over existing Slow evidence. It does not
+    execute SQL, infer a root cause, or turn a missing sample into a clean bill
+    of health.
+    """
+    if report.scenario != "slow":
+        return {"contract_version": 1, "status": "UNKNOWN", "assessments": [],
+                "unknown_reasons": ["Performance triage is only defined for the Slow snapshot."],
+                "root_cause_status": "NOT_ESTABLISHED"}
+
+    details = getattr(report, "details", {})
+    candidates = build_priority_candidates(report, include_blocking_victims=True)
+    assessments: list[dict[str, Any]] = []
+    for candidate in candidates:
+        identity: dict[str, Any] = {}
+        if report.instance.db_type.value == "oracle":
+            oracle_session = str(candidate.get("session_key") or candidate.get("session_id") or "")
+            oracle_sid = oracle_session.split(":", 1)[-1]
+            identity = {key: candidate.get(source) for key, source in (
+                ("inst_id", "oracle_inst_id"), ("sid", "session_id"),
+                ("serial_number", "oracle_serial_number"), ("sql_id", "sql_id"),
+                ("transaction_id", "transaction_id")) if candidate.get(source) is not None}
+            identity["sid"] = oracle_sid or None
+            if candidate.get("session_key"):
+                identity["session_key"] = candidate["session_key"]
+        elif report.instance.db_type.value == "mysql":
+            identity = {key: candidate.get(source) for key, source in (
+                ("processlist_id", "mysql_connection_id"),
+                ("thread_id", "performance_schema_thread_id"),
+                ("trx_id", "transaction_id")) if candidate.get(source) is not None}
+        elif report.instance.db_type.value == "postgresql":
+            identity = {"pid": candidate.get("session_id")}
+            if candidate.get("login_time") is not None:
+                identity["backend_start"] = candidate["login_time"]
+        elif report.instance.db_type.value == "sqlserver":
+            identity = {"session_id": candidate.get("session_id")}
+            if candidate.get("request_id") is not None:
+                identity["request_id"] = candidate["request_id"]
+
+        labels = list(candidate.get("classification_labels", []))
+        assessments.append({
+            "database_type": report.instance.db_type.value,
+            "native_identity": identity,
+            "classification_status": candidate.get("classification_status", "UNKNOWN"),
+            "classifications": labels,
+            "rule_ids": [_TRIAGE_RULE_IDS[label] for label in labels if label in _TRIAGE_RULE_IDS],
+            "classification_evidence": dict(candidate.get("classification_evidence", {})),
+            "observed_signals": list(candidate.get("categories", [])),
+            "review_rank": candidate.get("rank"),
+            "priority_basis": {
+                "blocked_session_count": candidate.get("blocked_session_count", 0),
+                "transaction_age_seconds": candidate.get("transaction_age_seconds"),
+                "runtime_seconds": candidate.get("running_seconds"),
+                "evidence_references_count": len(candidate.get("evidence_references", [])),
+            },
+            "evidence_references": list(candidate.get("evidence_references", [])),
+            "uncertainty_reasons": list(candidate.get("uncertainty_reasons", [])),
+            "root_cause_status": "NOT_ESTABLISHED",
+            "next_safe_check": "复核同一采样窗口内的数据库原生会话、阻塞和事务证据；不执行处置命令。",
+        })
+
+    samples = _slow_sample_index(details)
+    db_type = report.instance.db_type.value
+    graph_source = ("active_requests" if db_type == "sqlserver" else
+                    "active_sessions" if db_type == "oracle" else "blocking")
+    graph_sample = samples.get(graph_source)
+    graph = details.get("blocking_graph", {})
+    graph_complete = (graph_sample is not None and graph_sample.get("success") is True
+                      and not graph_sample.get("truncated") and isinstance(graph, dict)
+                      and not graph.get("anomalies") and not graph.get("unresolved")
+                      and not graph.get("identity_conflicts"))
+    unknown_reasons: list[str] = []
+    if not graph_complete:
+        if graph_sample is None:
+            unknown_reasons.append(f"Blocking evidence source {graph_source} is missing.")
+        elif graph_sample.get("success") is False:
+            unknown_reasons.append(f"Blocking evidence source {graph_source} failed.")
+        elif graph_sample.get("truncated"):
+            unknown_reasons.append(f"Blocking evidence source {graph_source} was truncated.")
+        if isinstance(graph, dict) and graph.get("anomalies"):
+            unknown_reasons.append("Blocking graph has cycles, conflicting edges, or identity anomalies.")
+        if isinstance(graph, dict) and (graph.get("unresolved") or graph.get("identity_conflicts")):
+            unknown_reasons.append("Blocking graph has unresolved sessions or identity conflicts.")
+    permission = details.get("permission_readiness", {})
+    permission_status = permission.get("status") if isinstance(permission, dict) else None
+    if permission_status in {"PARTIAL", "MISSING", "UNKNOWN", "UNSUPPORTED"}:
+        unknown_reasons.append(f"Permission readiness is {permission_status}; affected evidence may be incomplete.")
+    if not assessments:
+        unknown_reasons.append("No triage candidate was observed in this snapshot; this is not a health assertion.")
+    assessment_states = {item["classification_status"] for item in assessments}
+    status = ("UNKNOWN" if not assessments or assessment_states == {"UNKNOWN"} else
+              "PARTIAL" if unknown_reasons or assessment_states != {"CONFIRMED"} else "COMPLETE")
+    if details.get("data_visibility") == "PARTIAL" and status == "COMPLETE":
+        status = "PARTIAL"
+        unknown_reasons.append("Optional diagnostic evidence is unavailable or partial.")
+    profile = details.get("diagnostic_profile", {})
+    return {
+        "contract_version": 1,
+        "database_id": report.instance.id,
+        "database_type": db_type,
+        "server_version": details.get("version"),
+        "profile": {key: profile.get(key) for key in (
+            "sql_profile_id", "permission_profile_id", "parser_contract_id", "runtime_variant")
+                    if isinstance(profile, dict) and profile.get(key) is not None},
+        "permission_status": permission_status or "UNKNOWN",
+        "snapshot_time": max((str(item.get("finished_at")) for item in samples.values()
+                               if item.get("finished_at")), default=report.diagnosed_at.isoformat()),
+        "status": status,
+        "assessments": assessments,
+        "unknown_reasons": list(dict.fromkeys(unknown_reasons)),
+        "root_cause_status": "NOT_ESTABLISHED",
+    }

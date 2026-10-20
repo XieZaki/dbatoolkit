@@ -728,6 +728,59 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
     sections.append(ReportSection("priority-candidates", "Priority Review Candidates",
                                   summary="候选仅用于人工核查，不代表 Toolkit 已验证当前会话身份或建议自动终止。",
                                   tables=(priority_table,) if priority_table else ()))
+    triage = details.get("performance_triage")
+    if isinstance(triage, dict):
+        triage_rows = []
+        for assessment in triage.get("assessments", [])[:5]:
+            if not isinstance(assessment, dict):
+                continue
+            references = [item for item in assessment.get("evidence_references", [])
+                          if isinstance(item, dict)]
+            # Render only stable source metadata and bounded scalar facts. The
+            # triage evidence contract intentionally does not carry SQL text.
+            classification_evidence = assessment.get("classification_evidence", {})
+            evidence_items = []
+            if isinstance(classification_evidence, dict):
+                for label, conclusion in list(classification_evidence.items())[:5]:
+                    if not isinstance(conclusion, dict):
+                        continue
+                    class_refs = [item for item in conclusion.get("evidence_references", [])
+                                  if isinstance(item, dict)]
+                    sources = ", ".join(
+                        f"{item.get('collector', 'unknown')}:{item.get('source_path', 'unknown')} "
+                        f"[{item.get('integrity', 'UNKNOWN')} @ {item.get('observed_at') or 'unknown'}]"
+                        for item in class_refs[:2]) or "source unavailable"
+                    evidence_items.append(
+                        f"{label} ({conclusion.get('rule_id', 'UNKNOWN')}, "
+                        f"{conclusion.get('status', 'UNKNOWN')}): {sources}")
+            reference_text = "; ".join(evidence_items) or "; ".join(
+                f"{item.get('collector', 'unknown')}:{item.get('source_path', 'unknown')} "
+                f"[{item.get('integrity', 'UNKNOWN')} @ {item.get('observed_at') or 'unknown'}]"
+                for item in references[:4])
+            triage_rows.append({
+                "identity": _human(assessment.get("native_identity")),
+                "classifications": ", ".join(assessment.get("classifications", [])) or "UNKNOWN",
+                "status": assessment.get("classification_status", "UNKNOWN"),
+                "rules": ", ".join(assessment.get("rule_ids", [])) or "—",
+                "evidence": reference_text or "No evidence reference",
+                "uncertainty": "; ".join(assessment.get("uncertainty_reasons", [])) or "—",
+            })
+        triage_table = _table(triage_rows, (
+            ("Native session identity", ("identity",)),
+            ("Classification labels", ("classifications",)),
+            ("Evidence status", ("status",)), ("Rule IDs", ("rules",)),
+            ("Evidence source / time / integrity", ("evidence",)),
+            ("Uncertainty", ("uncertainty",)),
+        ))
+        triage_summary = (f"Snapshot {triage.get('snapshot_time') or 'unknown'}; "
+                          f"overall status {triage.get('status', 'UNKNOWN')}; "
+                          f"root cause {triage.get('root_cause_status', 'NOT_ESTABLISHED')}. "
+                          "A review rank is not a confirmed root cause.")
+        sections.append(ReportSection(
+            "performance-triage", "Performance Triage", summary=triage_summary,
+            fields=tuple(("Evidence limitation", _human(reason))
+                         for reason in triage.get("unknown_reasons", [])[:8]),
+            tables=(triage_table,) if triage_table else ()))
     victims = _dict_rows(details.get("blocked_victims"))
     if victims:
         is_oracle = report.instance.db_type.value == "oracle"

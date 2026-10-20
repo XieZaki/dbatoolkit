@@ -467,7 +467,7 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
     candidate_labels = {
         "ROOT_BLOCKER": "根阻塞", "IDLE_OPEN_TRANSACTION": "未结束事务",
         "BLOCKED_VICTIM": "被阻塞会话", "LONG_RUNNING_SQL": "长运行 SQL",
-        "ACTIVE_WAIT": "主动等待语句",
+        "ACTIVE_WAIT": "主动等待语句", "INTERMEDIATE_BLOCKER": "中间阻塞者",
     }
     finding_labels = {
         "SQLSERVER_DATAFILE_NEAR_LIMIT": "SQL Server 数据文件接近容量上限",
@@ -528,7 +528,42 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
             category = " / ".join(candidate_labels.get(str(value), "待核查会话")
                                   for value in category_values)
             lines.append(f"{item['rank']}. 会话 {item['session_id']}｜{category}")
+            labels = item.get("classification_labels", [])
+            if labels:
+                rule_ids = {
+                    "ROOT_BLOCKER": "TRIAGE-ROOT-01",
+                    "BLOCKING_VICTIM": "TRIAGE-VICTIM-01",
+                    "INTERMEDIATE_BLOCKER": "TRIAGE-INTERMEDIATE-01",
+                    "INDEPENDENT_SLOW_SQL": "TRIAGE-INDEPENDENT-SLOW-01",
+                    "LONG_RUNNING_TRANSACTION": "TRIAGE-LONG-TX-01",
+                }
+                rules = [rule_ids[label] for label in labels if label in rule_ids]
+                lines.append(f"   分诊标签：{' / '.join(str(label) for label in labels)}；"
+                             f"结论状态：{item.get('classification_status', 'UNKNOWN')}；"
+                             f"规则：{' / '.join(rules) if rules else 'UNKNOWN'}")
+                classification_evidence = item.get("classification_evidence", {})
+                if isinstance(classification_evidence, dict):
+                    for label in labels[:5]:
+                        evidence = classification_evidence.get(label, {})
+                        if not isinstance(evidence, dict):
+                            continue
+                        reference = next((value for value in evidence.get("evidence_references", [])
+                                          if isinstance(value, dict)), {})
+                        lines.append(f"   依据 {label} [{evidence.get('status', 'UNKNOWN')}]："
+                                     f"{reference.get('collector', 'UNKNOWN')} / "
+                                     f"{reference.get('source_path', 'UNKNOWN')} / "
+                                     f"{reference.get('integrity', 'UNKNOWN')} / "
+                                     f"{reference.get('observed_at') or '时间未知'}")
             lines.append(f"   原因：{item['reason']}")
+            for evidence in item.get("evidence_references", [])[:3]:
+                if isinstance(evidence, dict):
+                    lines.append("   证据："
+                                 f"{evidence.get('collector', 'UNKNOWN')} / "
+                                 f"{evidence.get('source_path', 'UNKNOWN')} / "
+                                 f"{evidence.get('integrity', 'UNKNOWN')} / "
+                                 f"{evidence.get('observed_at') or '时间未知'}")
+            for uncertainty in item.get("uncertainty_reasons", [])[:2]:
+                lines.append(f"   不确定性：{uncertainty}")
             if report.instance.db_type.value == "oracle":
                 lines.append(f"   INST_ID / SID / SERIAL#：{item.get('oracle_inst_id') or '未知'} / {str(item['session_id']).split(':')[-1]} / {item.get('oracle_serial_number') or '未知'}")
                 if item.get("transaction_start_time") is not None:
