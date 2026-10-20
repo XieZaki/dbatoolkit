@@ -46,6 +46,7 @@ logs/**
 # Local credential exports / environment files
 .env
 .env.*
+**/local_config.py
 *.credential-store
 *.credential-store.*
 *.credential-export

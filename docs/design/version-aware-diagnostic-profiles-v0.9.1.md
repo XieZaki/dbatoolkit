@@ -4,6 +4,8 @@
 
 **Baseline:** DBA Toolkit v0.9.0
 
+> **Version-scope decision (2026-10-19):** The implementation-era candidate families and matrices below are historical Profile design/implementation records, not current product targets. Current relational targets are MySQL 5.7/8.0+, Oracle 11gR2+, PostgreSQL 14+, and SQL Server 2008 R2+. PostgreSQL 13 compatibility code is retained without a formal support claim; MongoDB/Redis 4.0+ remain long-term targets with no diagnostic Profile claim. See the Roadmap and Acceptance ledger for current scope and evidence.
+
 **Scope:** SQL Server, PostgreSQL, MySQL and Oracle; slow, disk-growth, replication and SQL Server plan diagnosis.
 **This document is architecture, not a statement that every listed version is implemented or verified.**
 

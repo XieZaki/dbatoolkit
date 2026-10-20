@@ -1,11 +1,42 @@
 # Version Profiles (V0.9.1)
 
+## Product target and evidence states
+
+The formal product targets confirmed on 2026-10-19 are MySQL 5.7 and 8.0+, Oracle 11gR2+, PostgreSQL 14+, SQL Server 2008 R2+, MongoDB 4.0+, and Redis 4.0+. SQL Server, PostgreSQL, MySQL, and Oracle remain the current development mainline; MongoDB and Redis remain long-term Backlog targets with no current diagnostic Profile claim.
+
+These target ranges are not implementation or verification matrices:
+
+- `TARGET` is approved product direction.
+- `IMPLEMENTED` means a reviewed feature Profile/path exists for the named family.
+- `E2E_VERIFIED` means an actual real database end-to-end run passed for the exact feature/version/environment; evidence must identify historical versus current HEAD.
+- `UNVERIFIED` means a target or implementation lacks that acceptance.
+- `UNSUPPORTED` is an explicit feature/version no-route decision, not a synonym for missing E2E.
+
+The runtime `SupportState.SUPPORTED` values in the matrices below describe reviewed implementation routes; they do not by themselves mean official full-version support or live verification. A future release covered linguistically by “+” remains target-only until detection/Profile routing, SQL/permission/parser contracts where applicable, automated checks, and required acceptance are complete.
+
+Current source retains PostgreSQL 13 Profile code. PostgreSQL 13 is outside the formal 14+ product target and is retained for compatibility/history without being promoted to formal support. PostgreSQL 12 is also outside the current target. Historical design and test text referring to PostgreSQL 13–18 continues to describe the code/evidence at that time.
+
+MongoDB 4.0+ and Redis 4.0+ are product targets only. There is no current diagnostic version Profile or feature path for either database, so current diagnostic capability remains `UNSUPPORTED`/not implemented and unverified; installed Python drivers do not change that state.
+
 Phase A added version declaration and detection. Phase B migrated replication;
-Phase C migrated `slow`; Phase D migrated `disk-growth`; Phase E migrates the
+Phase C migrated `slow`; Phase D migrated `disk-growth`; Phase E migrated the
 existing SQL Server `plan` feature. Each migrated feature
 selects reviewed SQL, permission requirements, parser contract,
 required/optional collectors and support state together through the immutable
 `DiagnosticProfileResolver`.
+
+### Current-HEAD E2E snapshot (2026-10-20)
+
+These are feature- and environment-scoped results, not full version-family support claims. Detailed commands, permission outcomes, output checks and cleanup evidence are in the [Acceptance ledger](roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md#v091-p0-fourdb-004).
+
+| Database/version | Implemented route | Current-HEAD E2E evidence | Remaining boundary |
+|---|---|---|---|
+| SQL Server 2022 | Slow, Disk-Growth, Replication and SQL Server Plan routes | Core Slow/Blocking, Disk-Growth and Plan scenarios verified; replication query reports `REPLICATION_NOT_CONFIGURED` on this single-instance target. | Account-security classification is `UNKNOWN`; other SQL Server versions remain unverified. |
+| PostgreSQL 16 | Slow, Disk-Growth and Replication routes | Core Slow/Blocking and Disk-Growth scenarios verified; replication query reports `REPLICATION_NOT_CONFIGURED`. | No Plan route in this path; other PostgreSQL target versions remain unverified. |
+| MySQL 8.4 | Slow, Disk-Growth and Replication routes; recent-statements source path exists | Four-database representative regression is `PARTIAL`; Slow/Blocking and Disk-Growth scenarios ran, replication is unconfigured. | Imported PyMySQL module and distribution metadata disagree; recent-statements has no separate current-HEAD live acceptance, and Digest Top SQL is not implemented. See [Backlog](roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md) item `MYSQL-DRIVER-PROVENANCE-001`. |
+| Oracle Free 26ai | Slow, Disk-Growth and Replication routes | P0.2 root/XID/transaction/SQL/action-gating scenario is verified; four-database regression is `PARTIAL`. | Optional Slow lock and Disk recovery/archive views are missing; no grants were made. Older Oracle versions and RAC remain unverified. |
+
+Targets outside these exact E2E cells remain `UNVERIFIED`. Formal targets remain SQL Server 2008 R2+, PostgreSQL 14+, MySQL 5.7/8.0+, Oracle 11gR2+, and MongoDB/Redis 4.0+ (long-term, no diagnostic implementation). Production remains fully offline; Toolkit execution remains read-only; production accounts remain dedicated minimum-privilege monitors.
 
 ## Inventory declaration
 
@@ -172,14 +203,14 @@ the version detector's `V_$VERSION` grant. It does not reference
 |---|---|---|---|
 | SQL Server 2008 R2 | SUPPORTED | Legacy session DMV + shared request/transaction SQL | Static reviewed SQL and Fake Adapter regression; not live-verified |
 | SQL Server 2012–2019 | SUPPORTED | Shared SQL Server slow bundle | Static reviewed SQL and Fake Adapter regression; not live-verified for every family |
-| SQL Server 2022 | SUPPORTED | Shared bundle, 2022 permission contract | Representative local runtime target; confirm current result with system suite |
+| SQL Server 2022 | SUPPORTED | Shared bundle, 2022 permission contract | Current-HEAD local Slow/Blocking E2E verified 2026-10-20; see Acceptance ledger |
 | SQL Server 2025 | UNKNOWN | No executable profile | Fail closed pending review |
 | MySQL 5.7 | SUPPORTED | PROCESSLIST + legacy InnoDB lock views | Static SQL and Fake Adapter regression; not live-verified |
-| MySQL 8.0, 8.4 | SUPPORTED | Performance Schema and 8.x lock views | Static SQL and Fake Adapter regression; not live-verified for every minor family |
-| PostgreSQL 13–18 | SUPPORTED | Shared `pg_stat_activity` / lock bundle | Static SQL and Fake Adapter regression; not live-verified across all majors |
+| MySQL 8.0, 8.4 | SUPPORTED | Performance Schema and 8.x lock views | Historical 8.0.46 evidence plus current-HEAD MySQL 8.4 `PARTIAL`; see Acceptance ledger |
+| PostgreSQL 13–18 | SUPPORTED | Shared `pg_stat_activity` / lock bundle | Current-HEAD PG16 Slow/Blocking E2E verified; other majors not live-verified |
 | Oracle 11gR2 | SUPPORTED | Legacy-compatible `V$SESSION`/`V$SQL` bundle | Static SQL and Fake Adapter regression; NOT E2E VERIFIED |
 | Oracle 12c 12.1, 12.2+ | SUPPORTED | Explicit 12c runtime variants | Static SQL and Fake Adapter regression; not live-verified |
-| Oracle 18c, 19c, 21c, 23ai, 26ai | SUPPORTED | Shared modern-family bundle | Static SQL and Fake Adapter regression; verify current 26ai E2E separately |
+| Oracle 18c, 19c, 21c, 23ai, 26ai | SUPPORTED | Shared modern-family bundle | Oracle Free 26ai P0.2 scenario verified; broader Slow regression is `PARTIAL` due to optional-view gaps; older families unverified |
 
 Support denotes a reviewed implementation, not live verification for every
 release. SQL Server 2008 R2 and MySQL 5.7 remain first-class routes despite
@@ -192,13 +223,13 @@ the absence of live old-version servers in the current test environment.
 | SQL Server 2008 R2 | SUPPORTED | DBCC SQLPERF(LOGSPACE) and compatible file metadata | Unit/Registry tested; no live 2008 R2 E2E |
 | SQL Server 2012 | SUPPORTED | DBCC SQLPERF(LOGSPACE); AG evidence is optional | Unit/Registry tested; no live 2012 E2E |
 | SQL Server 2014–2019 | SUPPORTED | `sys.dm_db_log_space_usage`, `VIEW SERVER STATE` | Unit/Registry tested; no live old-version E2E |
-| SQL Server 2022 | SUPPORTED | `sys.dm_db_log_space_usage`, `VIEW SERVER PERFORMANCE STATE` | Local system E2E result recorded separately |
+| SQL Server 2022 | SUPPORTED | `sys.dm_db_log_space_usage`, `VIEW SERVER PERFORMANCE STATE` | Current-HEAD local Disk-Growth collection verified 2026-10-20; see Acceptance ledger |
 | SQL Server 2025 | UNKNOWN | No inherited route | Fail closed |
 | MySQL 5.7 | SUPPORTED | `expire_logs_days`; schema totals; optional Top-N, FILES, InnoDB, binlog | Unit/Registry tested; no live 5.7 E2E |
-| MySQL 8.0 / 8.4 | SUPPORTED | `binlog_expire_logs_seconds`; optional Top-N, FILES, InnoDB, binlog | Unit/Registry tested; live 8.4 evidence recorded separately |
-| PostgreSQL 13–16 | SUPPORTED | Shared database-size, slot, archive bundle | Unit/Registry tested; live PG16 evidence recorded separately |
+| MySQL 8.0 / 8.4 | SUPPORTED | `binlog_expire_logs_seconds`; optional Top-N, FILES, InnoDB, binlog | Current-HEAD 8.4 collection exercised; overall regression `PARTIAL` due to driver provenance mismatch |
+| PostgreSQL 13–16 | SUPPORTED | Shared database-size, slot, archive bundle | Current-HEAD PG16 Disk-Growth collection verified 2026-10-20 |
 | PostgreSQL 17–18 | SUPPORTED | Slot query includes `wal_status` and `safe_wal_size` | Unit/Registry tested; no live PG17/18 E2E |
-| Oracle 11gR2, 12c, 18c–26ai | SUPPORTED | Tablespace/datafile/temp core; FRA/archive/redo optional | Unit/Registry tested; Oracle 26ai requires the profile's manual core grants |
+| Oracle 11gR2, 12c, 18c–26ai | SUPPORTED | Tablespace/datafile/temp core; FRA/archive/redo optional | Current-HEAD Oracle Free 26ai route exercised but `PARTIAL`; optional recovery/archive permissions remain absent; older families unverified |
 
 `SUPPORTED`, `UNIT_TESTED`, `INTEGRATION_TESTED` and `E2E_VERIFIED` describe
 different evidence levels. No older release is described as live verified
@@ -210,7 +241,7 @@ without an actual target run.
 |---|---|---|---|
 | SQL Server 2008 R2 | SUPPORTED | Shared reviewed `plan_request` + `plan_cached`; `VIEW SERVER STATE`; `sqlserver_showplan_v1` | Unit/Profile/Registry validation; no real 2008 R2 E2E |
 | SQL Server 2012, 2014, 2016, 2017, 2019 | SUPPORTED | Same shared SQL and parser; `VIEW SERVER STATE` | Unit/Profile/Registry validation; no real old-version Plan E2E |
-| SQL Server 2022 | SUPPORTED | Same shared SQL and parser; `VIEW SERVER PERFORMANCE STATE` | SQL Server 2022 plan E2E exists in `docs/VERIFICATION_V0_4.md`; V0.9.1 route now uses verified profile |
+| SQL Server 2022 | SUPPORTED | Same shared SQL and parser; `VIEW SERVER PERFORMANCE STATE` | Current-HEAD Version-Aware active/cached Plan E2E verified 2026-10-20; identity, parsing, CLI/JSON/HTML and `.sqlplan` checks are in Acceptance ledger |
 | SQL Server 2025 | UNKNOWN | No SQL, permission or parser fallback | Fail closed until official compatibility and integration evidence exist |
 
 Plan uses only the existing active-request and connected-session cached-plan

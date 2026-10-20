@@ -1,5 +1,7 @@
 # V0.9.1 Execution Plan Capability & Safety Audit
 
+> **Version-scope decision (2026-10-19):** Version matrices and lower bounds in this audit are historical design/evidence snapshots, not current product-target declarations. Current relational targets are MySQL 5.7/8.0+, Oracle 11gR2+, PostgreSQL 14+, and SQL Server 2008 R2+. PostgreSQL 13 compatibility code is retained but is not a formal support claim. MongoDB/Redis 4.0+ remain long-term targets without diagnostic capability claims. Target, implementation, and verification are separate; see the Roadmap and Acceptance ledger.
+
 **审计日期：** 2026-10-18
 **审计范围：** 现有实现、四数据库能力、权限、安全边界、产品范围和迁移设计
 **代码修改：** 无。本轮仅新增本设计审计文档。
@@ -360,13 +362,13 @@ This section supplements the original audit decision; it does not revise the aud
 
 ## 24. Post-commit SQL Server 2022 system verification
 
-After the original migration commit was pushed, the user unlocked the local credential session. The sandboxed process could not access the current-user named pipe, so the authorized read-only checks were rerun under the same Windows user context outside the sandbox; current-user pipe ACL and peer verification were not changed.
+After the original migration commit was pushed, the user unlocked the local credential session. The sandboxed process could not access the OS credential-provider IPC channel, so the authorized read-only checks were rerun in the approved local execution context; IPC ACL and peer verification were not changed.
 
-- Target: Inventory asset `sqlserver2022`, `127.0.0.1:1433/master`; detected SQL Server `16.0.4305.5`; Python 3.12.14, pyodbc 5.3.0, ODBC Driver 17 fallback.
+- Target: approved local SQL Server 2022 lab; detected SQL Server `16.0.4305.5`; Python 3.12.14, pyodbc 5.3.0, ODBC Driver 17 fallback.
 - `dba check sqlserver2022`: connection and version verification succeeded; SQL Server Plan resolved to `SUPPORTED` / `VERIFIED`; Plan permission readiness was `READY` with `VIEW SERVER PERFORMANCE STATE`.
 - `dba permissions sqlserver2022 --feature plan`: `READY`; required permission was satisfied; no grant was generated or executed.
-- `dba collect sqlserver2022 active-sessions`: succeeded and returned one visible session, SQLServerCEIP session 53. No application test session was present.
-- `dba diagnose sqlserver2022 plan --session 53`: executed through the versioned Plan path and returned `PLAN_NOT_AVAILABLE` with `UNKNOWN` confidence because no existing plan evidence was available for that service session. No report or plan artifact was saved, and no application SQL was submitted.
+- `dba collect <approved-asset> active-sessions`: succeeded and returned one visible service session. No application test session was present.
+- `dba diagnose <approved-asset> plan --session <observed-session>`: executed through the versioned Plan path and returned `PLAN_NOT_AVAILABLE` with `UNKNOWN` confidence because no existing plan evidence was available for that service session. No report or plan artifact was saved, and no application SQL was submitted.
 - A follow-up CLI semantics fix treats this successful probe/cache miss as a completed command; `success=true` is separate from `plan_available=false` and `plan_status=PLAN_NOT_AVAILABLE`.
 - All database calls in this verification were read-only. The prior full unit suite and static gates remain the recorded results; this documentation-only follow-up does not change code.
 

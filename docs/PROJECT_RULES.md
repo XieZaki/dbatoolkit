@@ -13,6 +13,9 @@
 - MySQL KILL QUERY/KILL 只可作为已确认 Root Blocker 的纯文本 ReferenceCommand；Toolkit 不执行。Sleep + 未结束事务必须有关联 InnoDB 事务证据，不能仅凭 Sleep 判断。循环、不完整或截断采样不生成参考命令。
 - KILL 只能由已知正整数根会话生成参考文本；缺失根会话不生成命令。循环、特殊负数 blocker、采样截断和缺失数据必须显式报告。Sleeping 未提交事务结论必须关联事务 DMV，不能只用 open_transaction_count。
 - 仅显式调用的隔离 Docker 集成测试可按用户授权创建测试对象、运行测试事务并 ROLLBACK/清理；这些脚本位于 tests/integration，不能通过 Toolkit 或正式 Registry 执行。诊断账号始终只读，禁止 KILL。
+- 用户确认的本地 Docker 实验室是有界测试资源：仅限已核实身份的指定本机实例和样例库，不能据数据库名相同扩展到其他 Inventory、主机或服务。用户已授权在这些隔离实验室中由独立测试驱动进行有界的管理员级准备、DDL/DML、负载、参数/账号测试与清理；每次运行前仍须审阅脚本实际连接目标、SQL、对象、权限、时长/并发/资源上限和清理/恢复路径。优先复用已有样例数据和脚本；常规实验室操作不需重复申请，但高资源、实例重启、数据卷/备份删除或不可逆操作不在常规授权内。不得删除 Docker 数据卷或宿主机备份目录。
+- 测试驱动与产品诊断身份必须分离。可从用户指定的本地测试驱动配置在本地进程内读取已确认实验室的测试凭据；不得输出凭据、写入提示词/命令行/环境变量/日志/报告/仓库，或复制、修改、删除该配置。测试驱动管理员权限绝不转借给 Toolkit；Toolkit 仍使用独立最小权限监控账号、Reviewed SQL Registry、Preflight、超时/行数边界和只读执行路径。
+- 仅针对用户确认且身份核实的本机 Docker SQL Server 实验室，允许保留实例级 `Encrypt=no` / `TrustServerCertificate=yes` 临时例外以推进核心诊断验收。该例外不得改变产品/生产 TLS 默认值、不得复制到生产 Inventory，也不得描述为符合生产 TLS 标准；实验室 TLS 证书加固单独跟踪。凭据加密、最小权限和 Toolkit 只读边界不受此例外影响。
 - Inventory 仅存 credential_alias，不保存 password/pwd/secret/token。日志禁止凭据与带密码连接串。
 - 生产只使用专用最小权限监控账号；禁止 sa/root/SYS/SYSTEM/postgres 超级用户及其他最高权限账号。
 - Credential Provider 优先从 Windows Credential Manager 或 Linux 安全系统 Keyring/Secret Service 读取 credential_alias；已验证不存在时允许统一 CredentialResolver 做 JIT 隐藏输入并明确征求安全保存同意。拒绝保存只限本次进程使用；不得自动初始化 Encrypted Store。现有加密 Store 解锁、认证、格式或权限失败必须 fail closed，不能回退到 JIT。

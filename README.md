@@ -1,7 +1,9 @@
 # dba-toolkit 0.9.0
 
 企业内部运维机器上的跨数据库只读诊断基础框架。**工具负责查清楚，DBA 负责做决定。**
-V0.7 保留 SQL Server、PostgreSQL 和 MySQL 诊断，并新增 Oracle 12c+ 连接、基础采集和 Slow Diagnose。运行不依赖 Internet。
+
+正式产品目标版本为：MySQL 5.7、8.0+；Oracle 11gR2+；PostgreSQL 14+；SQL Server 2008 R2+；MongoDB 4.0+；Redis 4.0+。前四种关系型数据库是当前开发主线，MongoDB/Redis 是长期 Backlog。`TARGET` 只表示产品方向，`IMPLEMENTED` 要求对应数据库/版本/功能有受审查的 Profile 与代码路径，`E2E_VERIFIED` 只表示明确记录的具体版本/功能/环境通过真实端到端验证；三者不可互相推导。新发布的更高版本不会因“+”自动获得正式支持。
+V0.7 历史版本摘要：当时保留 SQL Server、PostgreSQL 和 MySQL 诊断，并新增 Oracle 12c+ 连接、基础采集和 Slow Diagnose。该历史句不代表当前 Oracle 最低版本；当前正式目标见上方版本范围。运行不依赖 Internet。
 V0.7.1 已在隔离 Oracle Free 23 容器使用 python-oracledb Thin 及专用监控账号完成真实 CLI 端到端验证；结果见 [验证记录](docs/VERIFICATION_V0_7_1.md)。
 V0.8 增加四库 `diagnose <database_id> disk-growth` 当前空间与日志保留诊断，Docker 实测结果见 [V0.8 验证记录](docs/VERIFICATION_V0_8.md)。
 V0.8.1 增加四库统一 Monitor Permission Registry、权限状态与只生成不执行的 Grant/Revoke 建议，详见 [监控权限说明](docs/MONITOR_PERMISSIONS.md)。
@@ -12,7 +14,9 @@ V0.8.3.2 将详细诊断报告统一为自包含离线 HTML；终端保持事故
 V0.8.3.3 将 Human HTML 收敛为有预算的 DBA 分析报告：恢复动作前置、事故相关会话与请求分表、显式报告省略数量；计划 XML 单独保存为受 `.gitignore` 保护的 `.sqlplan`。新增 Windows/Linux upgrade 流程和只扫描 Git-tracked 文件的敏感数据检查。本版本不会自动 push 或创建 release tag。
 V0.8.3.5 在 V0.8.3.4 的加密 Credential Store 上增加当前 OS 用户短期 Credential Session。使用 `dba credentials unlock` 后，在默认 30 分钟绝对 TTL 内可复用解密凭据；`status` 查看、`lock` 立即清除 Agent 内存。Windows 使用当前 SID ACL 的 Named Pipe，Linux 使用有 peer UID 验证的私有 Unix Socket。秘密不写磁盘、环境变量或日志。安全设计与限制见 [Credential Security](docs/CREDENTIAL_SECURITY.md)。
 
-V0.9.1 Phase A 增加 `version_family`、四库只读版本检测和不可变 Profile Resolver；Phase B 将 replication 的 SQL bundle、权限和 parser aliases 绑定到一个版本路由，并增加 Oracle 11gR2 Data Guard profile。其他诊断场景继续沿用 legacy 路径。支持矩阵与证据边界见 [Version Profiles](docs/VERSION_PROFILES.md)。
+V0.9.1 是规划目标，不是当前软件包版本。Version-Aware Profile 的 Phase A–D 已覆盖版本检测、Replication、Slow 和 Disk-Growth；Phase E 将已有 SQL Server Plan 路径接入版本路由。Profile 路由只说明对应能力路径已实现，不代表所有目标版本或所有能力均已实机验证。矩阵见 [Version Profiles](docs/VERSION_PROFILES.md)，真实验收按版本和场景记录在 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。
+
+截至 2026-10-20 的当前 HEAD 代表性验证：SQL Server 2022 核心诊断与指定 Plan 场景为 `E2E_VERIFIED`；PostgreSQL 16 核心诊断为 `E2E_VERIFIED`；MySQL 8.4 和 Oracle Free 26ai 的四库代表性回归为 `PARTIAL`。Oracle Free 26ai 的 P0.2 指定阻塞诊断场景为 `E2E_VERIFIED`，但 Oracle 可选权限和 Disk-Growth 证据仍有缺口。MySQL 驱动来源不一致已列为 [独立 Backlog 项](docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md)。旧版本兼容矩阵仍需逐版本实机验证；这些结果不扩大为全部目标版本的支持承诺。
 
 Python `>=3.11,<3.14`，当前主要验证版本为 3.12。从项目根目录执行：
 
@@ -64,7 +68,7 @@ SQL Server 真实连接安装 `python -m pip install -e ".[sqlserver]"`，并通
 
 V0.2.1 实机验证前先运行 `dba driver-info`，显示 Python 架构、pyodbc 版本和 ODBC Driver 名称，不读取 Inventory、不获取凭据、不连接数据库。缺少依赖时返回 1，且仅提示企业离线安装需求。`collect <id> long-running` 是 `long-running-requests` 的兼容别名。只对人工指定的一个 database_id 验证，不扫描 Inventory。
 
-每条命令按 Inventory 的 `credential_alias` 从安全存储读取凭据，必要时对当前运行隐藏交互输入，然后连接、完成预检、采集并关闭连接。当前支持 SQL Server、PostgreSQL、MySQL 和 Oracle；其他数据库返回 `Not implemented`。默认输出 DBA 可读摘要；在命令后添加 `--json` 获取脱敏结构化结果。SQL 执行审计写入 `logs/dba.jsonl`，不混入正常终端输出，也不包含 SQL 文本或原始驱动异常。
+每条命令按 Inventory 的 `credential_alias` 从安全存储读取凭据，必要时对当前运行隐藏交互输入，然后连接、完成预检、采集并关闭连接。当前诊断适配器覆盖 SQL Server、PostgreSQL、MySQL 和 Oracle；MongoDB/Redis 仍是长期目标，尚无诊断实现。各数据库各场景的实现和实测边界见 [Version Profiles](docs/VERSION_PROFILES.md) 与 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。默认输出 DBA 可读摘要；在命令后添加 `--json` 获取脱敏结构化结果。SQL 执行审计写入 `logs/dba.jsonl`，不混入正常终端输出，也不包含 SQL 文本或原始驱动异常。
 `permissions` 汇总四库已实现 Feature 的权限状态。生成 Grant/Revoke 时只读取 Inventory 与 Credential Provider，不连接数据库；SQL 仅打印为 DBA 人工审核文本，Toolkit 不执行。权限矩阵、Feature 状态语义及版本限制见 [docs/MONITOR_PERMISSIONS.md](docs/MONITOR_PERMISSIONS.md)。
 SQL 执行审计包含脚本名称、SHA-256 摘要、有效超时、行数上限、返回行数、截断标志、结果和错误类别。Ctrl+C 中断也关闭已取得的连接；CLI 返回 130。
 `--settings` 可省略，此时使用内置安全默认值；指定后严格读取该文件，拼写错误或密码等未知字段会被拒绝。
@@ -99,7 +103,7 @@ Adapter 实例只供串行使用。无任意 SQL CLI、无 KILL/变更执行。S
 .venv/Scripts/dba --settings config/runtime.yaml diagnose my-sqlserver disk-growth
 ```
 
-默认输出 DBA 可读 Console，并生成带数据库 ID、场景和本地时间戳的 HTML；`--report` 指定新的 HTML 文件，已存在文件不会覆盖。自动化读取使用 `--json`，旧版 `--format json` 仍兼容。其他数据库明确返回 Not implemented。
+默认输出 DBA 可读 Console，并生成带数据库 ID、场景和本地时间戳的 HTML；`--report` 指定新的 HTML 文件，已存在文件不会覆盖。自动化读取使用 `--json`，旧版 `--format json` 仍兼容。按数据库和功能查看实际可用 Profile，不把单一场景的 E2E 推导为全库支持。
 
 报告包含并发分类、按 elapsed_ms 排序的当前请求 Top N、长请求、当前等待、多层 Blocking Tree、Root Blocker 来源和事务信息、Current/Last SQL、Findings、建议及仅供人工审核的 ReferenceCommand。默认 slow_top_n=10、long_running_seconds=60、high_concurrency_threshold=50，可通过运行配置覆盖。HIGH_CONCURRENCY 按 active requests 判断，connected sessions 另列；running 表示状态 running，等待和阻塞统计允许重叠。
 
@@ -126,7 +130,7 @@ PostgreSQL 诊断连接使用 psycopg 3、专用监控账号、autocommit、只�
 
 Slow Diagnose 对 `pg_stat_activity` 客户端连接做有界采样并排除自身 PID；活动 SQL 时长由服务器 `clock_timestamp()` 计算。报告区分总连接、活动查询、等待、被阻塞和 idle in transaction，会列出当前活动 SQL Top N、达到阈值的长 SQL、多层阻塞图、Root Blocker 来源与事务证据。非 active 会话的 `query` 是最后执行的查询，不能当作当前查询；`client_hostname` 为空时明确标记不可得。采样不是原子快照，截断或失败会标记不完整。配置项包括 `long_running_seconds`、`slow_top_n`、`high_concurrency_threshold` 和 `idle_transaction_seconds`。
 
-Root Blocker 存在且会话与阻塞采样完整时，报告可生成 `SELECT pg_cancel_backend(pid);`、`SELECT pg_terminate_backend(pid);` **纯文本参考**；cancel 只尝试取消当前查询，idle in transaction 可能没有当前查询。Toolkit 不执行这些函数、不自动处理事务，也不运行 EXPLAIN ANALYZE。PostgreSQL 12+ 是设计目标，旧版本、不同部署的 SSL/监控权限仍需按目标环境验收。隔离 Docker 集成命令：`pwsh -File tests/integration/run_postgresql_verification.ps1`。
+Root Blocker 存在且会话与阻塞采样完整时，报告可生成 `SELECT pg_cancel_backend(pid);`、`SELECT pg_terminate_backend(pid);` **纯文本参考**；cancel 只尝试取消当前查询，idle in transaction 可能没有当前查询。Toolkit 不执行这些函数、不自动处理事务，也不运行 EXPLAIN ANALYZE。PostgreSQL 14+ 是当前产品目标；PG12/13 不在当前目标范围，现有 PG13 兼容代码暂时保留且不代表正式支持或实机验证。PostgreSQL 16 当前 HEAD 的核心 Slow/Blocking 与 Disk-Growth 代表性回归已验证；其他版本、SSL 与监控权限仍需按 Profile 和目标环境验收，详见 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。隔离 Docker 集成命令：`pwsh -File tests/integration/run_postgresql_verification.ps1`。
 
 ## MySQL Slow Diagnose
 
@@ -140,11 +144,11 @@ Root Blocker 存在且会话与阻塞采样完整时，报告可生成 `SELECT p
 .venv/Scripts/dba --settings config/runtime.yaml diagnose my-mysql slow
 ```
 
-MySQL 8.0 使用 PyMySQL、专用监控账号和只读 Registry SQL。默认校验证书及主机名；内网 CA 可通过 `mysql.ssl_ca` 指定，隔离测试容器可显式设置 `mysql.ssl_enabled: false`。连接和读取超时有界、autocommit=true、禁用 local infile；使用流式游标和 `max_rows`，达到上限会标记截断并关闭连接。PyMySQL `read_timeout` 限制等待网络响应的时间，不能保证整批流式结果的绝对墙钟时长。
+MySQL 5.7、8.0+ 是产品目标；当前代码通过版本 Profile 区分 5.7、8.0 和 8.4 的已审查路径，不由目标声明推断所有未来版本或所有诊断能力已经实现。连接使用 PyMySQL、专用监控账号和只读 Registry SQL。默认校验证书及主机名；内网 CA 可通过 `mysql.ssl_ca` 指定，隔离测试容器可显式设置 `mysql.ssl_enabled: false`。连接和读取超时有界、autocommit=true、禁用 local infile；使用流式游标和 `max_rows`，达到上限会标记截断并关闭连接。PyMySQL `read_timeout` 限制等待网络响应的时间，不能保证整批流式结果的绝对墙钟时长。
 
-监控账号预检要求 MySQL 8.0、启用 Performance Schema、无活动角色和非监控全局/Schema/表/列权限，并实际探测统计表、事务和锁视图。通常需 DBA 人工审核全局 `PROCESS`、`SHOW DATABASES`，以及必要对象的 `SELECT`；Toolkit 不执行 GRANT。预检无法穷尽所有动态权限、存储程序或其他隐含写能力，生产仍需 DBA 保证账号最小权限。某些视图只显示监控账号有权看到的对象，报告不会补造缺失值。
+监控账号预检按 MySQL 版本 Profile 检查所需 Performance Schema/PROCESSLIST、事务和锁能力，并拒绝活动角色和非监控全局/Schema/表/列权限。通常需 DBA 人工审核全局 `PROCESS`、`SHOW DATABASES`，以及必要对象的 `SELECT`；Toolkit 不执行 GRANT。预检无法穷尽所有动态权限、存储程序或其他隐含写能力，生产仍需 DBA 保证账号最小权限。某些视图只显示监控账号有权看到的对象，报告不会补造缺失值。
 
-活动语句优先读取 `events_statements_current` 与当前等待；等待 consumer 关闭时使用受审查的无等待查询，语句 consumer 关闭时使用线程查询降级，并把缺失字段与不完整结论明确列出。长 SQL 时长在服务器端获取，Sleep + 未结束 InnoDB 事务必须有 `innodb_trx` 证据；阻塞图来自 `data_lock_waits`/`data_locks`。Root Blocker 的 `KILL QUERY <id>;` 与 `KILL <id>;` 仅为人工审核文本；Sleep 会话通常没有当前查询可供 KILL QUERY 取消。Toolkit 不执行 KILL，也不把当前进程信息当作可靠的“上一条 SQL”。MySQL 8.0.46 已通过隔离 Docker 验证；其他版本、TLS 与监控权限须按目标环境验收。集成验证：`pwsh -File tests/integration/run_mysql_verification.ps1`；记录见 [docs/VERIFICATION_V0_6.md](docs/VERIFICATION_V0_6.md)。
+活动语句优先读取 `events_statements_current` 与当前等待；等待 consumer 关闭时使用受审查的无等待查询，语句 consumer 关闭时使用线程查询降级，并把缺失字段与不完整结论明确列出。长 SQL 时长在服务器端获取，Sleep + 未结束 InnoDB 事务必须有 `innodb_trx` 证据；阻塞图来自 `data_lock_waits`/`data_locks`。Root Blocker 的 `KILL QUERY <id>;` 与 `KILL <id>;` 仅为人工审核文本；Sleep 会话通常没有当前查询可供 KILL QUERY 取消。Toolkit 不执行 KILL，也不把当前进程信息当作可靠的“上一条 SQL”。MySQL 8.0.46 的隔离 Docker 验证是历史结果。2026-10-20 MySQL 8.4 当前 HEAD 代表性回归为 `PARTIAL`；导入模块版本与 PyMySQL 分发元数据不一致，已登记 `MYSQL-DRIVER-PROVENANCE-001`。最近语句能力有源码与自动化测试覆盖，但本轮没有完成其独立 live acceptance；它不等同于 Phase 2 Digest Top SQL。其他目标版本、TLS 与监控权限须按目标环境验收。历史记录见 [docs/VERIFICATION_V0_6.md](docs/VERIFICATION_V0_6.md)，当前验收见 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。
 
 ## SQL Server Execution Plan
 
@@ -155,11 +159,11 @@ MySQL 8.0 使用 PyMySQL、专用监控账号和只读 Registry SQL。默认校�
 
 命令只对指定会话查找当前请求的执行计划；当前请求已结束时，仅尝试通过仍在线的会话及其最近 SQL handle 查找缓存计划。会话已断开、缓存已清除或权限不足时会明确报告不可用。计划为编译/缓存计划时通常没有 ActualRows，因此不推断实际行数、基数偏差、真实 Spill 或高代价 Nested Loops。采集不是原子快照，可能随会话和缓存变化。
 
-Plan 诊断写入同一命名规则的单个 HTML 文件；可用时将脱敏的执行计划 XML 放在折叠区域中。执行计划仍可能包含业务 SQL、对象名及未标记的敏感字面量，须按内部敏感数据管理。SQL Registry 限制只读脚本；Toolkit 不执行任何索引、统计信息、计划或数据变更。Missing Index 仅作证据，不生成 DDL。
+Plan 诊断输出自包含离线 HTML；实际原始 Showplan 不嵌入 HTML，可用时另行输出配对 `.sqlplan` 文件。执行计划仍可能包含业务 SQL、对象名及未标记的敏感字面量，须按内部敏感数据管理。SQL Registry 限制只读脚本；Toolkit 不执行任何索引、统计信息、计划或数据变更。Missing Index 仅作证据，不生成 DDL。
 
-配置允许 `plan_cardinality_ratio_warning`、`plan_cardinality_ratio_critical`、`plan_top_operators`、`plan_max_xml_size` 和 `plan_large_scan_rows`。默认 XML 上限 1 MiB，超过上限显式标记不可用。Slow 报告仅给长请求显示下一步 plan 命令提示，不自动抓取所有计划。显式 Docker 验证命令是 `pwsh -File tests/integration/run_docker_verification.ps1 -Plan`；记录见 [docs/VERIFICATION_V0_4.md](docs/VERIFICATION_V0_4.md)。
+配置允许 `plan_cardinality_ratio_warning`、`plan_cardinality_ratio_critical`、`plan_top_operators`、`plan_max_xml_size` 和 `plan_large_scan_rows`。默认 XML 上限 1 MiB，超过上限显式标记不可用。Slow 报告仅给长请求显示下一步 plan 命令提示，不自动抓取所有计划。历史 V0.4 Docker 验证见 [docs/VERIFICATION_V0_4.md](docs/VERIFICATION_V0_4.md)。2026-10-20 当前 HEAD 在 SQL Server 2022 Docker 实验室通过 Version-Aware Plan 指定场景，包括 active/cached 计划、身份关联、解析、CLI/JSON/离线 HTML 和 `.sqlplan` 检查；详见 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。此结果仅适用于记录的版本、环境和路径。
 
-SQL Server 2008 R2 compatibility is designed but not yet validated on a real instance. 当前仅在 SQL Server 2022 实测；旧版本的 DMV、Showplan XML、ODBC Driver 18 TLS 互通仍需目标环境验收。
+SQL Server 2008 R2+ 是产品目标。当前 SQL Server 2022 实测不证明 SQL Server 2008 R2 或其他旧版本兼容；旧版本 DMV、Showplan XML 和 ODBC/TLS 互通仍需按版本 Profile 实机验收。
 
 Linux 使用 `.venv/bin/python` / `.venv/bin/dba`。也可 `python -m dba`。
 默认配置相对于工作目录；从其他目录运行时显式指定：
@@ -191,8 +195,8 @@ python -m pip wheel ".[all-db]" --wheel-dir deployment/wheelhouse
 - `adapters.py` / `collectors.py`：统一 Adapter/CollectorResult 接口、独立 NativeTool。
 - `sqlserver.py` / `preflight.py` / `sqlserver_collectors.py`：SQL Server 连接、权限预检、五类基础 Collector。
 - `postgresql.py` / `postgresql_collectors.py` / `postgresql_slow.py`：PostgreSQL 只读连接、监控预检、基础采集及 Slow Diagnose。
-- `mysql.py` / `mysql_collectors.py` / `mysql_slow.py`：MySQL 8.0 只读连接、监控预检、基础采集及 Slow Diagnose。
-- `oracle.py` / `oracle_collectors.py` / `oracle_slow.py`：Oracle 12c+ Thin 只读连接、监控预检、基础采集及 Slow Diagnose。
+- `mysql.py` / `mysql_collectors.py` / `mysql_slow.py`：MySQL 5.7/8.0/8.4 已有版本路径的只读连接、监控预检、基础采集及 Slow Diagnose。
+- `oracle.py` / `oracle_collectors.py` / `oracle_slow.py`：Oracle 11gR2+ 目标范围内已有版本路径的 Thin 只读连接、监控预检、基础采集及 Slow Diagnose。
 - `analyzers.py`：按数据库/场景分发及十二类 Analyzer、数据库专属日志扩展点。
 - `core.py` / `reporters.py`：Finding/Severity/Evidence/Recommendation/纯文本参考命令与控制台呈现；默认诊断详情由 `dba/reporting/` 统一生成 HTML。
 - `logging.py`：结构化日志与递归敏感字段脱敏；不输出任意消息及异常堆栈。
@@ -220,7 +224,7 @@ V0.2.1 连接基础实测见 [docs/VERIFICATION_V0_2_1.md](docs/VERIFICATION_V0_
 
 实现依据：[pyodbc 连接及查询超时](https://github.com/mkleehammer/pyodbc/wiki/Connection)、[SQL Server 会话 DMV 权限](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-exec-sessions-transact-sql)、[有效权限函数](https://learn.microsoft.com/en-us/sql/relational-databases/system-functions/sys-fn-my-permissions-transact-sql)、[ODBC TLS 参数](https://learn.microsoft.com/en-us/sql/connect/odbc/dsn-connection-string-attribute)。
 
-## Oracle 12c+ Slow Diagnose (V0.7)
+## Oracle 11gR2+ Slow Diagnose
 
 使用 python-oracledb Thin 模式；在离线准备机为目标系统/Python 制作 `".[oracle]"` wheelhouse，运维机执行 `python -m pip install --no-index --find-links wheelhouse "dba-toolkit[oracle]"`。Inventory 中仅配置 `service_name` 或 `sid` 其一，以及 `credential_alias`，不保存密码。默认 connect_timeout=5 秒、call_timeout=10 秒；每条 SQL 实际使用 metadata 与运行配置中较小的 call_timeout。该超时是驱动调用/网络往返限制，不保证整个诊断流程的绝对耗时上限。
 
@@ -236,5 +240,5 @@ Oracle 监控账号需专用非 SYS/SYSTEM 账号，直接授予 CREATE SESSION�
 
 当前执行时长依据 SQL_EXEC_START；V$SQL elapsed/cpu/read 字段明确标为跨执行累计值。Idle Transaction 要求 INACTIVE 会话与 V$TRANSACTION 真实关联。报告列出当前/上次 SQL、来源字段、锁链、多层根阻塞者、异常和采样质量；无法可靠取得客户端 IP 时明确显示 unavailable。ReferenceCommand 仅为纯文本，Toolkit **不会执行 KILL SESSION**。
 
-V0.7 只采集当前实例的 V$ 视图；RAC 模式可检测并标记跨实例快照缺失，不生成不完整 RAC 图的 KILL 参考命令。Oracle 11g 未验证。2026-10-15 在隔离 Oracle Free 23.0.0.0.0 容器中，使用临时最小权限监控账号验证了全部新增只读 SQL；本机缺少 python-oracledb 离线包，因此真实 Python 连接及 CLI 集成仍待验证。细节见 [docs/VERIFICATION_V0_7.md](docs/VERIFICATION_V0_7.md)。
+V0.7 与 2026-10-15 Oracle Free 23.0.0.0.0 记录保留其历史代码和环境范围，不覆盖当前 HEAD 结果。2026-10-20 当前 HEAD 在 Oracle Free 26ai 完成 P0.2 指定阻塞链、事务身份/XID、SQL 上下文及安全 ReferenceCommand 的真实验收；四库代表性回归为 `PARTIAL`，因为 Slow/Disk 可选视图权限不足。Oracle 11gR2+ 仍是产品目标，11gR2 实机兼容性未验证。历史记录见 [V0.7 验证](docs/VERIFICATION_V0_7.md) 和 [V0.7.1 验证](docs/VERIFICATION_V0_7_1.md)；当前证据见 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。
 
