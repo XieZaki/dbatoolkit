@@ -1,0 +1,19 @@
+name: oracle_plan_identity_modern
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: Verify one current Oracle 12c+ V$SQL child cursor using bound SQL_ID, CHILD_NUMBER, INST_ID and CON_ID.
+feature: plan
+version_families:
+  - 12c
+  - 18c
+  - 19c
+  - 21c
+  - 23ai
+  - 26ai
+runtime_variants:
+  - "12_1"
+  - "12_2_plus"
+  - default

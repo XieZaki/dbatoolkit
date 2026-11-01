@@ -77,6 +77,9 @@ def normalize_mysql_error(exc: Exception, secrets: tuple[str, ...] = ()) -> Data
     state = getattr(exc, "sqlstate", None)
     known: Mapping[int, tuple[str, str | None]] = {
         1045: ("AUTHENTICATION_FAILED", "Check the stored monitoring credential and MySQL user@host grants."),
+        1044: ("ACCESS_DENIED", "Review docs/DATABASE_PERMISSIONS.md for this MySQL version and denied operation."),
+        1142: ("ACCESS_DENIED", "Review docs/DATABASE_PERMISSIONS.md for this MySQL version and denied operation."),
+        1227: ("ACCESS_DENIED", "Review docs/DATABASE_PERMISSIONS.md for this MySQL version and denied operation."),
         1049: ("DATABASE_NOT_FOUND", "Check the configured database name; Toolkit preserves the Inventory value."),
         2003: ("CONNECTION_FAILED", "Check that the server is listening and reachable at the configured host and port."),
         2005: ("DNS_RESOLUTION_FAILED", "Check the configured host name and name resolution."),
@@ -103,9 +106,15 @@ def normalize_sqlserver_error(
         classification = "TIMEOUT"
     elif state == "28000" or code == 18456:
         classification = "AUTHENTICATION_FAILED"
+    elif code in {229, 297, 300, 916}:
+        classification = "ACCESS_DENIED"
     else:
         classification = "UNKNOWN"
-    return DatabaseErrorDetail("sqlserver", driver, code, state, message, classification)
+    guidance = (
+        "Review docs/DATABASE_PERMISSIONS.md for this SQL Server version and denied operation."
+        if classification == "ACCESS_DENIED" else None
+    )
+    return DatabaseErrorDetail("sqlserver", driver, code, state, message, classification, guidance)
 
 
 def normalize_postgresql_error(exc: Exception, secrets: tuple[str, ...] = ()) -> DatabaseErrorDetail:
@@ -121,6 +130,7 @@ def normalize_postgresql_error(exc: Exception, secrets: tuple[str, ...] = ()) ->
     context = sanitize_vendor_text(raw_context, secrets) if raw_context else None
     known: Mapping[str, tuple[str, str | None]] = {
         "28P01": ("AUTHENTICATION_FAILED", "Check the stored monitoring credential and PostgreSQL authentication rules."),
+        "42501": ("ACCESS_DENIED", "Review docs/DATABASE_PERMISSIONS.md for this PostgreSQL version and denied operation."),
         "3D000": ("DATABASE_NOT_FOUND", "Check the configured database name."),
         "08001": ("CONNECTION_FAILED", "Check the server endpoint and network path."),
         "08006": ("CONNECTION_LOST", "Check server availability and network stability."),
@@ -141,8 +151,11 @@ def normalize_oracle_error(exc: Exception, secrets: tuple[str, ...] = ()) -> Dat
     code: str | int | None = f"ORA-{code_match.group(1)}" if code_match else None
     if code_value is not None and code is None:
         code = f"ORA-{code_value:05d}" if type(code_value) is int else str(code_value)
-    classification = "AUTHENTICATION_FAILED" if code == "ORA-01017" else "UNKNOWN"
-    guidance = "Check the stored monitoring credential." if classification == "AUTHENTICATION_FAILED" else None
+    classification = ("AUTHENTICATION_FAILED" if code == "ORA-01017" else
+                      "ACCESS_DENIED" if code in {"ORA-01031", "ORA-01045"} else "UNKNOWN")
+    guidance = ("Check the stored monitoring credential." if classification == "AUTHENTICATION_FAILED" else
+                "Review docs/DATABASE_PERMISSIONS.md for this Oracle version and denied operation."
+                if classification == "ACCESS_DENIED" else None)
     if code == "ORA-00942":
         # ORA-00942 is ambiguous in general. Classify only when Oracle names a
         # fixed monitoring object used by reviewed Toolkit SQL; the object may

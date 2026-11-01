@@ -6,7 +6,8 @@ import hashlib
 import importlib
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import TracebackType
@@ -20,9 +21,59 @@ from dba.database_errors import normalize_oracle_error
 from dba.errors import ToolkitError
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
-from dba.permissions import VERSION_DETECTION_PRIVILEGES, OraclePrincipal
-from dba.registry import SqlScript, SqlScriptRegistry
+from dba.oracle_identity import OraclePrincipal
+from dba.registry import SqlScript, SqlScriptRegistry, fetch_bounded_rows
 from dba.settings import OracleSettings
+from dba.top_sql import TOP_LIMIT
+
+ORACLE_TOP_SQL_METRICS = frozenset({
+    "cpu_time", "elapsed_time", "buffer_gets", "disk_reads", "executions",
+})
+
+
+@dataclass(frozen=True)
+class OraclePlanTarget:
+    """Validated user-selected Oracle child-cursor identity."""
+
+    sql_id: str
+    child_number: int
+    inst_id: int
+    con_id: int | None = None
+    requested_plan_hash_value: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sql_id, str) or re.fullmatch(r"[0-9A-Za-z]{13}", self.sql_id) is None:
+            raise ValueError("Oracle SQL_ID must be exactly 13 alphanumeric characters.")
+        if type(self.child_number) is not int or not 0 <= self.child_number <= 2_147_483_647:
+            raise ValueError("Oracle CHILD_NUMBER must be a non-negative integer.")
+        if type(self.inst_id) is not int or not 1 <= self.inst_id <= 999_999:
+            raise ValueError("Oracle INST_ID must be a positive integer.")
+        if self.con_id is not None and (type(self.con_id) is not int or not 0 <= self.con_id <= 999_999):
+            raise ValueError("Oracle CON_ID must be a non-negative integer.")
+        if (self.requested_plan_hash_value is not None
+                and (type(self.requested_plan_hash_value) is not int
+                     or self.requested_plan_hash_value <= 0)):
+            raise ValueError("Oracle PLAN_HASH_VALUE must be a positive integer when supplied.")
+
+
+@dataclass(frozen=True)
+class OraclePlanCursor:
+    """Current V$SQL cursor address evidence used only for the immediate plan read."""
+
+    target: OraclePlanTarget
+    address_hex: str
+    hash_value: int
+    child_address_hex: str
+    plan_hash_value: int
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, str)
+               or re.fullmatch(r"(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{16})", value) is None
+               for value in (self.address_hex, self.child_address_hex)):
+            raise ValueError("Oracle ADDRESS and CHILD_ADDRESS must be bounded hexadecimal RAW values.")
+        if any(type(value) is not int or value <= 0
+               for value in (self.hash_value, self.plan_hash_value)):
+            raise ValueError("Oracle HASH_VALUE and PLAN_HASH_VALUE must be positive integers.")
 
 
 class Cursor(Protocol):
@@ -30,7 +81,7 @@ class Cursor(Protocol):
     arraysize: int
     prefetchrows: int
 
-    def execute(self, sql: str) -> Any: ...
+    def execute(self, sql: str, parameters: Mapping[str, Any] | None = None) -> Any: ...
     def fetchmany(self, size: int) -> Sequence[Sequence[Any]]: ...
     def close(self) -> None: ...
 
@@ -63,8 +114,26 @@ def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:
         number = getattr(exc.args[0], "code", number)
     if isinstance(exc, TimeoutError) or number in {1013, 12170, 12535, 3136}:
         return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.", database_error=detail)
-    if number in {1031, 942, 904}:
-        return ToolkitError("CapabilityUnavailable", "Required Oracle monitoring view or column is unavailable.", database_error=detail)
+    if detail is not None and detail.classification == "ACCESS_DENIED":
+        return ToolkitError(
+            f"{phase}Denied",
+            f"{detail.message} Review docs/DATABASE_PERMISSIONS.md for this Oracle version and denied operation.",
+            database_error=detail,
+        )
+    if phase == "Query" and number == 1031:
+        return ToolkitError(
+            "QueryDenied",
+            f"{detail.message} Review docs/DATABASE_PERMISSIONS.md for this Oracle version and denied operation.",
+            database_error=detail,
+        )
+    if number == 942:
+        return ToolkitError(
+            "CapabilityUnavailable",
+            f"{detail.message} Review docs/DATABASE_PERMISSIONS.md for this Oracle version and denied operation.",
+            database_error=detail,
+        )
+    if number == 904:
+        return ToolkitError("CapabilityUnavailable", "Required Oracle monitoring column is unavailable.", database_error=detail)
     error_type = "ConnectionFailed" if phase == "Connection" else f"{phase}Failed"
     message = (f"{phase} failed; vendor error details are available below."
                if detail is not None else
@@ -78,8 +147,7 @@ class OracleAdapter(Adapter):
     REQUIRED = ("session_identity", "preflight", "preflight_privileges", "preflight_object_grants",
                 "preflight_owned_objects", "server_info", "database_status",
                 "active_sessions", "active_requests", "long_running", "transactions",
-                "blocking", "blocking_basic", "previous_sql", "probe_lock",
-                "probe_locked_object", "probe_wait", "probe_process")
+                "blocking", "blocking_basic", "previous_sql")
     PROBES = ("server_info", "database_status", "active_sessions", "active_requests",
               "transactions", "blocking_basic")
 
@@ -107,9 +175,8 @@ class OracleAdapter(Adapter):
         self.instance_id: int | None = None
         self.rac_enabled = False
         self.preflight_checks: dict[str, bool] = {}
-        self.permission_observations: set[str] = set()
         self.capabilities: dict[str, bool] = {}
-        self.blocking_script = "blocking_basic"
+        self.blocking_script = "blocking"
 
     def _audit(self, script: str, started: float, error: ToolkitError | None,
                details: dict[str, Any] | None = None) -> None:
@@ -214,23 +281,6 @@ class OracleAdapter(Adapter):
         if any(row.get("privilege") not in {"SELECT", "READ"} or row.get("grantable") != "NO"
                for row in object_grants.rows):
             raise ToolkitError("PrivilegedAccount", "Oracle monitoring account has non-read-only object grants.")
-        granted_views = {str(row.get("table_name", "")).upper() for row in object_grants.rows
-                         if str(row.get("owner", "")).upper() == "SYS"}
-        required_views = {"V_$INSTANCE", "V_$DATABASE", "V_$SESSION", "V_$SQL",
-                          "V_$TRANSACTION"}
-        missing = sorted(required_views - granted_views)
-        if missing:
-            raise ToolkitError("PreflightDenied",
-                               "Missing Oracle monitoring SELECT capability: "
-                               + ", ".join("SYS." + view for view in missing)
-                               + "; ask DBA to review grants manually.")
-        self.permission_observations.add("CREATE SESSION")
-        self.permission_observations.update("SELECT SYS." + view for view in required_views)
-        self.permission_observations.update("SELECT SYS." + view for view in granted_views)
-        version_object = VERSION_DETECTION_PRIVILEGES[DatabaseType.ORACLE][0].removeprefix(
-            "SELECT SYS."
-        )
-        self.preflight_checks["version_detection_view"] = version_object in granted_views
         owned = self._run(self.registry.get("preflight_owned_objects", DatabaseType.ORACLE))
         if not owned.success:
             raise ToolkitError("PreflightFailed", "Oracle owned object inventory is incomplete.",
@@ -240,33 +290,11 @@ class OracleAdapter(Adapter):
         if owned.rows[0].get("owned_objects") != 0:
             raise ToolkitError("PrivilegedAccount", "Oracle monitoring account owns database objects.")
         self.preflight_checks["least_privilege"] = True
-        for name in self.PROBES:
-            sample = self._run(self.registry.get(name, DatabaseType.ORACLE))
-            if not sample.success:
-                raise ToolkitError("PreflightDenied",
-                                   f"Missing Oracle monitoring capability: {name}; ask DBA to review SELECT on required SYS.V_$ views.",
-                                   database_error=sample.database_error)
-            self.preflight_checks[name] = True
-        optional_views = {"probe_lock": "V_$LOCK", "probe_locked_object": "V_$LOCKED_OBJECT",
-                          "probe_wait": "V_$SESSION_WAIT", "probe_process": "V_$PROCESS"}
-        for probe_name, view in optional_views.items():
-            available = view in granted_views
-            if available:
-                result = self._run(self.registry.get(probe_name, DatabaseType.ORACLE))
-                if not result.success:
-                    raise ToolkitError("PreflightDenied",
-                                       f"Oracle monitoring capability {probe_name} ({view}) was granted but cannot be read.")
-            self.preflight_checks[probe_name] = available
-        if self.preflight_checks["probe_lock"] and self.preflight_checks["probe_locked_object"]:
-            advanced = self._run(self.registry.get("blocking", DatabaseType.ORACLE))
-            if not advanced.success:
-                raise ToolkitError("PreflightDenied", "Oracle lock evidence query cannot be read.")
-            self.blocking_script = "blocking"
         self.capabilities = {"single_instance": not self.rac_enabled,
                              "rac_global_snapshot": False,
-                             "lock_evidence": self.blocking_script == "blocking",
-                             "process_view": self.preflight_checks["probe_process"],
-                             "session_wait_view": self.preflight_checks["probe_wait"]}
+                             # This is a routed source, not a permission assertion.
+                             # A denied blocking read is reported by the actual query.
+                             "lock_evidence": True}
 
     @property
     def current_user(self) -> str | None:
@@ -344,13 +372,95 @@ class OracleAdapter(Adapter):
             raise ToolkitError("PreflightRequired", "A preflight-approved Oracle monitor is required.")
         return self._run(script)
 
-    def _run(self, script: SqlScript) -> CollectorResult:
+    def execute_top_sql_readonly(self, script: SqlScript, top_n: int, metric: str,
+                                 *, con_id: int | None = None) -> CollectorResult:
+        """Execute only the two reviewed Oracle Top SQL scripts with fixed binds."""
+        if not self._ready:
+            raise ToolkitError("PreflightRequired", "A preflight-approved Oracle monitor is required.")
+        if (not isinstance(metric, str) or metric not in ORACLE_TOP_SQL_METRICS
+                or type(top_n) is not int or not 1 <= top_n <= TOP_LIMIT):
+            raise ToolkitError("InvalidTopSQLParameters", "Oracle Top SQL requires an approved metric and Top N 1-100.")
+        metadata = script.metadata
+        if (metadata.name not in {"top_sql_11g", "top_sql_modern"}
+                or metadata.feature != "top-sql" or metadata.risk != "READ_ONLY"
+                or not metadata.reviewed or metadata.max_rows != TOP_LIMIT + 1):
+            raise ToolkitError("RegistryRejected", "Oracle Top SQL accepts only its reviewed bounded Registry scripts.")
+        parameters: dict[str, Any] = {"metric": metric, "top_n": top_n}
+        if metadata.name == "top_sql_11g":
+            if con_id is not None or "11gr2" not in metadata.version_families:
+                raise ToolkitError("RegistryRejected", "Oracle 11g Top SQL route does not accept a container bind.")
+        else:
+            if (type(con_id) is not int or con_id < 0
+                    or not (set(metadata.version_families) - {"11gr2"})):
+                raise ToolkitError("InvalidTopSQLParameters", "Oracle 12c+ Top SQL requires the current non-negative CON_ID.")
+            parameters["con_id"] = con_id
+        return self._run(script, parameters)
+
+    def execute_plan_identity_readonly(self, script: SqlScript,
+                                       target: OraclePlanTarget) -> CollectorResult:
+        """Bind only a validated Oracle SQL_ID/child and local instance/container to reviewed plan SQL."""
+        if not self._ready:
+            raise ToolkitError("PreflightRequired", "A preflight-approved Oracle monitor is required.")
+        legacy = script.metadata.name == "oracle_plan_identity_11g"
+        expected_name = "oracle_plan_identity_11g" if target.con_id is None else "oracle_plan_identity_modern"
+        if script.metadata.name != expected_name or legacy != (target.con_id is None):
+            raise ToolkitError("RegistryRejected", "Oracle plan identity script does not match the target version route.")
+        self._validate_plan_script(script, expected_name, 2, legacy)
+        parameters: dict[str, Any] = {
+            "sql_id": target.sql_id,
+            "child_number": target.child_number,
+            "inst_id": target.inst_id,
+        }
+        if target.con_id is not None:
+            parameters["con_id"] = target.con_id
+        return self._run(script, parameters)
+
+    def execute_plan_rows_readonly(self, script: SqlScript,
+                                   cursor_identity: OraclePlanCursor) -> CollectorResult:
+        """Read bounded plan rows only for the immediately verified V$SQL cursor identity."""
+        if not self._ready:
+            raise ToolkitError("PreflightRequired", "A preflight-approved Oracle monitor is required.")
+        target = cursor_identity.target
+        legacy = target.con_id is None
+        expected_name = "oracle_plan_rows_11g" if legacy else "oracle_plan_rows_modern"
+        if script.metadata.name != expected_name:
+            raise ToolkitError("RegistryRejected", "Oracle plan rows script does not match the target version route.")
+        self._validate_plan_script(script, expected_name, 501, legacy)
+        parameters: dict[str, Any] = {
+            "sql_id": target.sql_id,
+            "child_number": target.child_number,
+            "inst_id": target.inst_id,
+            "address_hex": cursor_identity.address_hex.upper(),
+            "hash_value": cursor_identity.hash_value,
+            "child_address_hex": cursor_identity.child_address_hex.upper(),
+            "plan_hash_value": cursor_identity.plan_hash_value,
+        }
+        if target.con_id is not None:
+            parameters["con_id"] = target.con_id
+        return self._run(script, parameters)
+
+    @staticmethod
+    def _validate_plan_script(script: SqlScript, expected_name: str,
+                              expected_max_rows: int, legacy: bool) -> None:
+        metadata = script.metadata
+        if (metadata.name != expected_name or metadata.feature != "plan"
+                or metadata.risk != "READ_ONLY" or not metadata.reviewed
+                or metadata.database_type != DatabaseType.ORACLE
+                or metadata.max_rows != expected_max_rows
+                or (legacy and metadata.version_families != ("11gr2",))
+                or (not legacy and (not metadata.version_families
+                                    or "11gr2" in metadata.version_families))):
+            raise ToolkitError("RegistryRejected", "Oracle Plan accepts only its reviewed bounded Registry scripts.")
+
+    def _run(self, script: SqlScript,
+             bind_parameters: Mapping[str, Any] | None = None) -> CollectorResult:
         started_at = datetime.now(timezone.utc)
         started = time.monotonic()
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
         database_error: dict[str, Any] | None = None
         truncated = False
+        result_bytes = 0
         error: ToolkitError | None = None
         authorized = False
         script_name = "unregistered"
@@ -365,13 +475,19 @@ class OracleAdapter(Adapter):
             cursor = self._connection.cursor()
             cursor.arraysize = min(100, script.metadata.max_rows)
             cursor.prefetchrows = min(100, script.metadata.max_rows)
-            cursor.execute(script.text)
+            if bind_parameters is None:
+                cursor.execute(script.text)
+            else:
+                cursor.execute(script.text, dict(bind_parameters))
             if cursor.description is None:
                 raise ToolkitError("InvalidResult", "Read-only script returned no rowset.")
             columns = [str(column[0]).lower() for column in cursor.description]
-            values = cursor.fetchmany(script.metadata.max_rows)
-            truncated = len(values) >= script.metadata.max_rows
-            rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in values)
+            bounded = fetch_bounded_rows(
+                cursor, script.metadata.max_rows, script.metadata.max_result_bytes
+            )
+            truncated = bounded.truncated
+            result_bytes = bounded.result_bytes
+            rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in bounded.rows)
         except ToolkitError as exc:
             error = exc
         except (ValidationError, OSError, UnicodeError) as exc:
@@ -391,6 +507,7 @@ class OracleAdapter(Adapter):
             if error is not None:
                 rows = ()
                 truncated = False
+                result_bytes = 0
                 if error.database_error is not None:
                     to_dict = getattr(error.database_error, "to_dict", None)
                     if callable(to_dict):
@@ -400,12 +517,14 @@ class OracleAdapter(Adapter):
                     elif isinstance(error.database_error, dict):
                         database_error = error.database_error
                 self._close()
-            details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated}
+            details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
+                                       "result_bytes": result_bytes}
             if authorized:
                 details.update({"sql_sha256": hashlib.sha256(script.text.encode()).hexdigest(),
                                 "timeout_seconds": min(script.metadata.timeout_seconds,
                                                        self.settings.call_timeout),
                                 "max_rows": script.metadata.max_rows})
+                details["max_result_bytes"] = script.metadata.max_result_bytes
             self._audit(script_name, started, error, details)
         return CollectorResult(self.instance.id, script_name, started_at,
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,

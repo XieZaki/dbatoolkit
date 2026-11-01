@@ -1,4 +1,6 @@
+import os
 import re
+import warnings
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -70,11 +72,29 @@ class Inventory:
 
     @staticmethod
     def _directory_files(path: Path) -> list[Path]:
-        return sorted(
-            (item for item in path.rglob("*") if item.is_file()
-             and item.suffix.lower() in {".yaml", ".yml"}),
-            key=lambda item: item.as_posix().casefold(),
-        )
+        if path.is_symlink():
+            return []
+
+        files: list[Path] = []
+        for current, directories, filenames in os.walk(path, topdown=True, followlinks=False):
+            current_path = Path(current)
+            directories[:] = [
+                name for name in directories if not (current_path / name).is_symlink()
+            ]
+            for name in filenames:
+                candidate = current_path / name
+                if candidate.suffix.lower() not in {".yaml", ".yml"}:
+                    continue
+                if candidate.is_symlink():
+                    warnings.warn(
+                        "Skipping symbolic-link Inventory YAML file.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    continue
+                if candidate.is_file():
+                    files.append(candidate)
+        return sorted(files, key=lambda item: item.as_posix().casefold())
 
     @staticmethod
     def _validate_values(values: dict[str, Any], source: Path, where: str) -> dict[str, Any]:

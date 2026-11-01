@@ -473,7 +473,7 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                "long_running": long[:settings.slow_top_n], "blocking_graph": graph,
                "blocking_evidence": edges,
                "lock_evidence_reason": None if lock_evidence
-               else "unavailable: optional V$LOCK/V$LOCKED_OBJECT grants missing",
+               else "unavailable: blocking evidence source is not available in this profile",
                "roots": _hide_addresses(roots), "transactions": _hide_addresses(transactions),
                "idle_transactions": _hide_addresses(idle),
                "blocked_victims": blocked_victims, "active_waits": active_waits,
@@ -484,7 +484,8 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                "samples": [{"collector": r.collector_name, "started_at": r.started_at,
                             "finished_at": r.finished_at, "row_count": r.row_count,
                             "truncated": r.truncated, "success": r.success,
-                            "error_type": r.error_type} for r in results]}
+                            "error_type": r.error_type, "error_message": r.error_message,
+                            "database_error": r.database_error} for r in results]}
     return OracleSlowReport(instance, datetime.now(timezone.utc), "slow",
                             tuple(findings), redact(details))
 
@@ -503,7 +504,8 @@ def diagnose_slow(adapter: OracleAdapter) -> OracleSlowReport:
         results.append(result)
         if not result.success and result.collector_name in fatal:
             raise ToolkitError(result.error_type or "QueryFailed",
-                               result.error_message or "Required sample unavailable.")
+                               result.error_message or "Required sample unavailable.",
+                               database_error=result.database_error)
         if not result.success:
             break
     return build_slow_report(adapter.instance, tuple(results), adapter.settings,

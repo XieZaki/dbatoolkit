@@ -418,6 +418,8 @@ def build_slow_report(
                         "truncated": r.truncated,
                         "success": r.success,
                         "error_type": r.error_type,
+                        "error_message": r.error_message,
+                        "database_error": r.database_error,
                     }
                     for r in results
                 ],
@@ -448,6 +450,7 @@ def diagnose_slow(adapter: SQLServerAdapter) -> SlowReport:
             raise ToolkitError(
                 result.error_type or "QueryFailed",
                 result.error_message or "Required sample unavailable.",
+                database_error=result.database_error,
             )
         if not result.success:
             break

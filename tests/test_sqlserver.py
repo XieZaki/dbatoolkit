@@ -46,6 +46,7 @@ class FakeCursor:
         self.connection = connection
         self.description: list[tuple[str]] | None = None
         self.rows: list[dict[str, Any]] = []
+        self.offset = 0
         self.closed = False
 
     def execute(self, text: str, *parameters: object) -> None:
@@ -57,6 +58,7 @@ class FakeCursor:
         if name in self.connection.failures:
             raise self.connection.failures[name]
         self.rows = self.connection.results[name]
+        self.offset = 0
         self.description = [(key,) for key in self.rows[0]] if self.rows else [("empty",)]
 
     def fetchmany(self, size: int) -> list[tuple[Any, ...]]:
@@ -64,7 +66,9 @@ class FakeCursor:
         if self.connection.fetch_error:
             raise self.connection.fetch_error
         keys = [str(item[0]) for item in self.description or ()]
-        return [tuple(row.get(key) for key in keys) for row in self.rows[:size]]
+        selected = self.rows[self.offset:self.offset + size]
+        self.offset += len(selected)
+        return [tuple(row.get(key) for key in keys) for row in selected]
 
     def close(self) -> None:
         self.closed = True
@@ -189,21 +193,19 @@ def test_connect_credential_options_cleanup(adapter: SQLServerAdapter, driver: F
         assert adapter.get_server_version() == "16.0.1000.6"
         assert all(adapter.preflight_checks.values())
         assert adapter.privilege_classification["classification"] == "MONITORING_ACCOUNT"
-        assert "CONNECT SQL" in adapter.privilege_classification["effective_monitoring_permissions"]
+        assert "effective_monitoring_permissions" not in adapter.privilege_classification
         assert adapter.provider.aliases == ["monitor-alias"]
         call = driver.calls[0]
         assert call["timeout"] == 5 and call["autocommit"] and call["readonly"]
         assert "Encrypt={yes}" in call["connection_string"]
         assert "TrustServerCertificate={no}" in call["connection_string"]
         assert "PWD={DBA-Test-Secret-987654}};PWD={DBA-Other-Test-Secret-987654}}; value}" in call["connection_string"]
-        assert driver.connection.executed == [
-            "monitor_capabilities",
-            "monitor_permissions",
-            "server_info",
-            "database_status",
-            "active_sessions",
-            "active_requests",
-        ]
+        assert {"monitor_capabilities", "monitor_permissions", "server_info"}.issubset(
+            set(driver.connection.executed)
+        )
+        assert not {"database_status", "active_sessions", "active_requests"}.intersection(
+            driver.connection.executed
+        )
     assert driver.connection.closed and driver.connection.rollbacks == 0
     assert all(cursor.closed for cursor in driver.connection.cursors)
     assert adapter._password == ""
@@ -303,8 +305,6 @@ def test_account_rejections(instance: DatabaseInstance, driver: FakeDriver) -> N
         ({"is_serveradmin": 1}, "serveradmin"),
         ({"is_db_owner": 1}, "db_owner"),
         ({"is_database_owner": 1}, "database owner"),
-        ({"view_server_performance_state": 0}, "VIEW SERVER PERFORMANCE STATE"),
-        ({"view_any_database": 0}, "VIEW ANY DATABASE"),
     ],
 )
 def test_preflight_denies(
@@ -314,6 +314,17 @@ def test_preflight_denies(
     with pytest.raises(ToolkitError, match=fragment):
         adapter.connect()
     assert driver.connection.closed
+
+
+def test_missing_feature_read_grants_do_not_block_connection_preflight(
+    adapter: SQLServerAdapter, driver: FakeDriver,
+) -> None:
+    driver.connection.results["monitor_capabilities"][0].update(
+        view_server_state=0, view_server_performance_state=0, view_any_database=0,
+    )
+    with adapter:
+        assert adapter.health_check()
+        assert adapter.privilege_classification["classification"] == "MONITORING_ACCOUNT"
 
 
 def test_indeterminate_membership_is_unknown_not_privileged(adapter: SQLServerAdapter) -> None:
@@ -374,7 +385,7 @@ def test_monitoring_effective_permissions_are_allowed(
     )
     with adapter:
         assert adapter.privilege_classification["classification"] == "MONITORING_ACCOUNT"
-        assert permission in adapter.privilege_classification["effective_monitoring_permissions"]
+        assert "effective_monitoring_permissions" not in adapter.privilege_classification
 
 
 def test_unknown_implied_effective_permission_is_warning_not_rejection(
@@ -387,9 +398,8 @@ def test_unknown_implied_effective_permission_is_warning_not_rejection(
     )
     with adapter:
         classification = adapter.privilege_classification
-        assert classification["classification"] == "UNKNOWN"
-        assert classification["warning"] is True
-        assert "UNRECOGNIZED EFFECTIVE RIGHT" in classification["unknown_effective_permissions"]
+        assert classification["classification"] == "MONITORING_ACCOUNT"
+        assert "unknown_effective_permissions" not in classification
 
 
 def test_explicit_high_risk_error_has_trigger_reason(adapter: SQLServerAdapter, driver: FakeDriver) -> None:
@@ -418,11 +428,8 @@ def test_public_inherited_execute_on_system_object_is_unknown_not_privileged(
     })
     with adapter:
         result = adapter.privilege_classification
-        assert result["classification"] == "UNKNOWN"
-        assert result["warning"] is True
-        assert any(item["name"] == "EXECUTE" and item["source"] == "public"
-                   and item["scope"] == "OBJECT" and item["object"] == "[sys].[sp_help]"
-                   for item in result["unclassified_permissions"])
+        assert result["classification"] == "MONITORING_ACCOUNT"
+        assert "unclassified_permissions" not in result
 
 
 def test_public_inherited_database_execute_is_unknown_not_privileged(
@@ -434,10 +441,8 @@ def test_public_inherited_database_execute_is_unknown_not_privileged(
         "execute_as_principal_id": None,
     })
     with adapter:
-        assert adapter.privilege_classification["classification"] == "UNKNOWN"
-        assert any(item["name"] == "EXECUTE" and item["source"] == "public"
-                   and item["scope"] == "DATABASE"
-                   for item in adapter.privilege_classification["unclassified_permissions"])
+        assert adapter.privilege_classification["classification"] == "MONITORING_ACCOUNT"
+        assert "unclassified_permissions" not in adapter.privilege_classification
 
 
 def test_direct_database_execute_is_rejected_with_scope(adapter: SQLServerAdapter, driver: FakeDriver) -> None:
@@ -481,7 +486,7 @@ def test_object_execute_considers_object_and_module_context(
         assert exc.value.trigger_reason["object"] == object_name
     else:
         with adapter:
-            assert adapter.privilege_classification["classification"] == "UNKNOWN"
+            assert adapter.privilege_classification["classification"] == "MONITORING_ACCOUNT"
 
 
 def test_public_inherited_system_execute_is_warning_not_privileged(
@@ -493,11 +498,8 @@ def test_public_inherited_system_execute_is_warning_not_privileged(
         "object_type": "SQL_STORED_PROCEDURE", "execute_as_principal_id": None,
     })
     with adapter:
-        assert adapter.privilege_classification["classification"] == "UNKNOWN"
-        assert any(item["name"] == "EXECUTE"
-                   and item["object"] == "[sys].[sp_addsrvrolemember]"
-                   and item["source"] == "public"
-                   for item in adapter.privilege_classification["unclassified_permissions"])
+        assert adapter.privilege_classification["classification"] == "MONITORING_ACCOUNT"
+        assert "unclassified_permissions" not in adapter.privilege_classification
 
 
 def test_older_server_permissions(adapter: SQLServerAdapter, driver: FakeDriver) -> None:
@@ -525,7 +527,7 @@ def test_readonly_key_metadata_permissions(
 
 
 @pytest.mark.parametrize(
-    "name", ["server_info", "database_status", "active_sessions", "active_requests"]
+    "name", ["monitor_capabilities", "monitor_permissions", "server_info"]
 )
 def test_preflight_probe_failure(adapter: SQLServerAdapter, driver: FakeDriver, name: str) -> None:
     driver.connection.failures[name] = RuntimeError("42000", TEST_CREDENTIAL)
@@ -579,7 +581,7 @@ def test_bounded_fetch(
         driver.connection.results["server_info"] = [{"product_version": "16.0"}] * size
         result = adapter.execute_readonly(adapter.registry.get("server_info"))
         assert result.row_count == min(size, 2) and result.truncated is truncated
-        assert driver.connection.fetch_sizes[-1] == 2
+        assert driver.connection.fetch_sizes[-1] == 1
 
 
 def test_query_timeout_configuration(instance: DatabaseInstance, driver: FakeDriver) -> None:
@@ -620,6 +622,23 @@ def test_row_password_redaction(adapter: SQLServerAdapter, driver: FakeDriver) -
         driver.connection.results["active_requests"][0]["sql_text"] = f"SELECT '{TEST_CREDENTIAL}'"
         result = ActiveRequestsCollector(adapter).collect(adapter.instance)
         assert TEST_CREDENTIAL not in repr(result) and "[REDACTED]" in result.rows[0]["sql_text"]
+
+
+def test_collector_access_denial_preserves_vendor_error_and_permissions_guide(
+    adapter: SQLServerAdapter, driver: FakeDriver,
+) -> None:
+    adapter.connect()
+    driver.connection.failures["active_sessions"] = RuntimeError(
+        "42000", "The SELECT permission was denied on the object (229)."
+    )
+    result = ActiveSessionsCollector(adapter).collect(adapter.instance)
+    assert not result.success and result.error_type == "QueryDenied"
+    assert "SELECT permission was denied" in (result.error_message or "")
+    assert "docs/DATABASE_PERMISSIONS.md" in (result.error_message or "")
+    assert result.database_error is not None
+    assert result.database_error["classification"] == "ACCESS_DENIED"
+    assert result.database_error["vendor_code"] == 229
+    adapter.disconnect()
 
 
 def test_cleanup_on_transaction_and_errors(adapter: SQLServerAdapter, driver: FakeDriver) -> None:
@@ -743,8 +762,10 @@ def test_cli_check_and_status_human_and_json(
     assert main([*common, "check", instance.id, "--json"],
                 provider=MemoryCredentialProvider(), driver=FakeDriver()) == 0
     checked = json.loads(capsys.readouterr().out)
-    assert checked["success"] and checked["database"]["id"] == instance.id
-    assert "permissions" in checked and not checked.get("password")
+    assert checked["success"] and checked["database_id"] == instance.id
+    assert checked["connection"]["status"] == "CONNECTED"
+    assert checked["account_security"]["classification"] == "NON_PRIVILEGED"
+    assert "permissions" not in checked and not checked.get("password")
     assert main([*common, "check", instance.id],
                 provider=MemoryCredentialProvider(), driver=FakeDriver()) == 0
     human = capsys.readouterr().out
@@ -760,7 +781,7 @@ def test_cli_check_and_status_human_and_json(
 
 
 @pytest.mark.regression
-def test_check_version_mismatch_suppresses_permission_readiness(
+def test_check_version_mismatch_reports_only_version_evidence(
     instance: DatabaseInstance, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = tmp_path / "inventory.yaml"
@@ -774,27 +795,7 @@ def test_check_version_mismatch_suppresses_permission_readiness(
     assert result["version_profile"]["detected_version_family"] == "2022"
     assert result["version_profile"]["version_status"] == "MISMATCH"
     assert result["status"] == "VERSION_MISMATCH"
-    assert all(row["status"] in {"UNKNOWN", "UNSUPPORTED"} for row in result["permissions"])
-
-
-def test_check_permission_error_includes_review_only_grant(
-    instance: DatabaseInstance, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = tmp_path / "inventory.yaml"
-    path.write_text(yaml.safe_dump({"databases": [{**asdict(instance), "db_type": "sqlserver"}]}),
-                    encoding="utf-8")
-    driver = FakeDriver()
-    driver.connection.results["monitor_capabilities"][0].update(
-        view_server_state=0, view_server_performance_state=0,
-    )
-    result = main(["--inventory", str(path), "--sql-root", str(ROOT / "sql"),
-                   "check", instance.id], provider=MemoryCredentialProvider(), driver=driver)
-    assert result == 1
-    output = capsys.readouterr().out
-    assert "Permission Missing" in output
-    assert "VIEW SERVER PERFORMANCE STATE" in output
-    assert "Toolkit did NOT execute" in output
-    assert TEST_CREDENTIAL not in output
+    assert "permissions" not in result
 
 
 def test_status_reports_partial_collector_degradation(
@@ -986,7 +987,7 @@ def test_interrupted_query_closes(adapter: SQLServerAdapter, driver: FakeDriver)
 
 
 def test_interrupted_preflight_closes(adapter: SQLServerAdapter, driver: FakeDriver) -> None:
-    driver.connection.failures["active_requests"] = KeyboardInterrupt()
+    driver.connection.failures["monitor_permissions"] = KeyboardInterrupt()
     with pytest.raises(KeyboardInterrupt):
         adapter.connect()
     assert driver.connection.closed and adapter._connection is None

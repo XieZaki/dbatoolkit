@@ -41,3 +41,16 @@ def test_windows_interactive_console_encoding_is_preserved(monkeypatch: Any) -> 
 
     assert stdout.options is None
     assert stderr.options is None
+
+
+def test_cli_final_triage_fingerprint_detects_completed_label_update() -> None:
+    early = ({"session_id": 58, "classification_labels": ["LONG_RUNNING_TRANSACTION"],
+              "classification_status": "PARTIAL"},)
+    final = ({"session_id": 58, "classification_labels": ["ROOT_BLOCKER", "LONG_RUNNING_TRANSACTION"],
+              "classification_status": "CONFIRMED"},)
+
+    early_state = cli._triage_summary_fingerprint(early, {"status": "PARTIAL", "unknown_reasons": []})
+    final_state = cli._triage_summary_fingerprint(final, {"status": "COMPLETE", "unknown_reasons": []})
+
+    assert early_state != final_state
+    assert cli._triage_summary_fingerprint(final, {"status": "COMPLETE", "unknown_reasons": []}) == final_state

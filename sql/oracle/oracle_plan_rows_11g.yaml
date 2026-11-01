@@ -1,0 +1,12 @@
+name: oracle_plan_rows_11g
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 501
+reviewed: true
+description: Read at most 501 ordered V$SQL_PLAN operators for one address-bound Oracle 11gR2 child cursor.
+feature: plan
+version_families:
+  - 11gr2
+runtime_variants:
+  - default

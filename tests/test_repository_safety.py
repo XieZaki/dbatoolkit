@@ -32,6 +32,10 @@ def test_ignore_rules_cover_local_artifacts_and_keep_examples(tmp_path: Path) ->
         ".tmp/pytest/credentials.enc": True,
         "mysql_login_test.py": True,
         "credentials.enc": True,
+        "credentials.db": True,
+        "credentials.db-journal": True,
+        "credentials.db-wal": True,
+        "credentials.db-shm": True,
         "var/credentials.credentials.enc": True,
         "master.key": True,
         "unlock.key": True,
@@ -166,11 +170,13 @@ def test_secret_scanner_flags_tracked_runtime_artifact(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
-def test_secret_scanner_flags_encrypted_store_without_echoing_contents(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filename", ["credentials.enc", "credentials.db", "credentials.db-journal",
+                                     "credentials.db-wal", "credentials.db-shm"])
+def test_secret_scanner_flags_encrypted_store_without_echoing_contents(tmp_path: Path, filename: str) -> None:
     _git(["init", "-q"], tmp_path)
-    artifact = tmp_path / "credentials.enc"
+    artifact = tmp_path / filename
     artifact.write_text("ciphertext-value-must-not-be-printed", encoding="utf-8")
-    _git(["add", "-f", "credentials.enc"], tmp_path)
+    _git(["add", "-f", filename], tmp_path)
     findings = scan_repository(tmp_path)
     assert findings and "ciphertext-value-must-not-be-printed" not in repr(findings)
 
@@ -202,3 +208,12 @@ def test_example_inventories_use_disabled_rfc_addresses() -> None:
     assert "credential_alias: example-only-" in contents
     assert "10.10." not in contents and "192.168." not in contents
     assert "password:" not in contents and "secret:" not in contents
+
+
+def test_secret_scanner_scoped_redaction_fixture_exception() -> None:
+    path = "tests/test_performance_triage.py"
+    fixture = "def test_evidence_references_never_copy_captured_sql_or_credentials():\n    value = {'password': 'must-not-appear'}\n"
+    assert not _python_findings(path, fixture)
+    assert _python_findings("tests/other.py", fixture)
+    assert _python_findings(path, fixture.replace("must-not-appear", "different-sensitive-value"))
+    assert _python_findings(path, fixture.replace("test_evidence_references_never_copy_captured_sql_or_credentials", "test_other"))

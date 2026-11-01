@@ -71,12 +71,15 @@ def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() 
     summary = build_incident_summary(report, "reports/sqlserver2022_slow.html")
     page = HtmlReportRenderer().render(build_report_model(report, summary))
     assert '<html lang="zh-CN">' in page
-    assert page.index("故障概况") < page.index("人工处置参考")
-    assert page.index("人工处置参考") < page.index("现场诊断结论")
+    assert page.index('id="summary"') < page.index('id="root-assessment"')
+    assert page.index('id="root-assessment"') < page.index('id="blocking-chain"')
+    assert page.index('id="blocking-chain"') < page.index('id="manual-action"')
     assert "锁与阻塞链" in page and "会话身份与来源" in page
     assert "长期未提交事务" in page and "请求运行信息" in page
     assert "59" in page and "67" in page
     assert "长运行请求 3 条" in page and "阻塞相关 2 条" in page and "非阻塞 1 条" in page
+    assert 'class="report-section manual-action"' in page
+    assert "Toolkit 不执行 KILL" in page
     assert "KILL 57;" in page and "Toolkit 是否执行" in page and "回滚风险" in page
     assert "长时间主动等待（WAITFOR）" in page and "LCK_M_X" in page
     assert "直接阻塞会话" in page and "间接受影响会话" in page
@@ -86,10 +89,143 @@ def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() 
     assert "00:01:17" in page
     assert "<img src=x" not in page
     assert "<script>alert(1)</script>" not in page
-    assert "alert(1)" not in page
+    assert 'data-copy="UPDATE t SET value = &#x27;&lt;script&gt;alert(1)' in page
     assert '<details' in page and "Session 59 SQL" in page
     assert '{"session_id"' not in page and "{'session_id'" not in page
-    assert "https://" not in page and "http://" not in page and "<script" not in page
+    assert "https://" not in page and "http://" not in page
+    assert '<script src=' not in page and "<script>alert(1)</script>" not in page
+    assert "<script>" in page  # Inline interaction code is required by the approved offline template.
+
+
+def test_slow_template_is_model_driven_and_contains_no_approved_template_demo_values() -> None:
+    report = _report()
+    page = HtmlReportRenderer().render(build_report_model(
+        report, build_incident_summary(report, "reports/report.html")))
+
+    assert 'id="summary"' in page and 'id="root-assessment"' in page
+    assert 'id="blocking-chain"' in page and 'id="manual-action"' in page
+    assert 'id="collection-quality"' in page and 'id="session-appendix"' in page
+    assert "SQL &lt;Server&gt;" in page and "16.0.4305.5" in page
+    assert "mysql-test-01" not in page and "APP-SRV-01" not in page
+    assert "TRX-88421" not in page and "2026-11-01 20:31:02" not in page
+    assert "10.0.1.25" not in page and "OrderService" not in page
+    assert '<link rel="stylesheet" href="http' not in page
+    assert '<script src="http' not in page
+
+
+def test_slow_report_colors_sessions_from_blocking_evidence_not_runtime_guessing() -> None:
+    report = _report()
+    page = HtmlReportRenderer().render(build_report_model(
+        report, build_incident_summary(report, "reports/report.html")))
+
+    assert 'data-diagnostic-state="blocked"' in page
+    assert 'data-diagnostic-state="clear"' in page
+    assert "已确认参与阻塞" in page
+    assert "完整采样确认未参与阻塞" in page
+    assert 'data-session-search="true"' in page
+    assert "MySQL PROCESSLIST_ID" not in page
+
+    partial = _report()
+    partial.details["blocking_graph"] = {"roots": [], "children": {}, "anomalies": []}
+    partial.details["samples"] = [
+        {**sample, "success": False} if sample["collector"] == "active_requests" else sample
+        for sample in partial.details["samples"]]
+    partial_page = HtmlReportRenderer().render(build_report_model(
+        partial, build_incident_summary(partial, "reports/report.html")))
+    assert 'data-diagnostic-state="partial"' in partial_page
+    assert "阻塞状态未能确认" in partial_page
+
+
+def test_slow_template_is_self_contained_responsive_and_keyboard_operable() -> None:
+    template_path = Path(__file__).parents[1] / "dba" / "reporting" / "templates" / "slow_report.html"
+    template = template_path.read_text(encoding="utf-8")
+    root_tokens = re.search(r":root\s*\{[^}]*\}", template, re.DOTALL)
+    assert root_tokens is not None
+    remaining_css = template.replace(root_tokens.group(0), "", 1)
+
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b", remaining_css)
+    assert "overflow-x:clip" in template
+    assert "100vw" not in template
+    assert "max-width:1120px" in template
+    assert "max-width:850px" in template
+    assert "max-width:560px" in template
+    assert ":focus-visible" in template and ":active" in template and ":disabled" in template
+    assert "aria-busy" in template and ".toast.success" in template and ".toast.error" in template
+    assert "prefers-reduced-motion:reduce" in template
+    assert not re.search(r"<(?:script|link|img)\b[^>]+(?:src|href)=\"https?://", template, re.IGNORECASE)
+
+
+def test_slow_hero_status_is_green_only_for_complete_healthy_evidence() -> None:
+    report = _report()
+    base = build_report_model(report, build_incident_summary(report, "reports/report.html"))
+    renderer = HtmlReportRenderer()
+
+    healthy = replace(base, incident_summary=replace(
+        base.incident_summary, status="HEALTHY", severity="INFO", data_completeness="COMPLETE"))
+    assert 'status-pill clear' in renderer.render(healthy)
+
+    unknown = replace(base, incident_summary=replace(
+        base.incident_summary, status="UNKNOWN", severity="INFO", data_completeness="COMPLETE"))
+    assert 'status-pill unknown' in renderer.render(unknown)
+
+    incomplete = replace(base, incident_summary=replace(
+        base.incident_summary, status="HEALTHY", severity="INFO", data_completeness="PARTIAL"))
+    assert 'status-pill caution' in renderer.render(incomplete)
+
+
+def test_slow_report_renders_multiple_roots_and_unbounded_depth_as_direct_edges() -> None:
+    report = _report()
+    report.details["blocking_graph"] = {
+        "roots": [57, 70],
+        "children": {57: [59], 59: [67], 67: [71], 71: [72], 70: [73]},
+        "anomalies": [],
+    }
+    page = HtmlReportRenderer().render(build_report_model(
+        report, build_incident_summary(report, "reports/report.html")))
+
+    assert "70" in page and "72" in page and "73" in page
+    assert "Direct Blocker" not in page
+    assert "直接阻塞者" in page
+    assert "71" in page and "72" in page
+
+
+@pytest.mark.parametrize("database_type,session,extra_headers,extra_values", [
+    (DatabaseType.MYSQL, {"processlist_id": 36, "thread_id": 8036},
+     ("MySQL PROCESSLIST_ID", "Performance Schema THREAD_ID"), ("36", "8036")),
+    (DatabaseType.POSTGRESQL, {"pid": 236}, ("PostgreSQL PID",), ("236",)),
+    (DatabaseType.SQLSERVER, {"session_id": 57}, ("会话",), ("57",)),
+    (DatabaseType.ORACLE, {"inst_id": 2, "sid": 57, "serial_number": 901},
+     ("Oracle INST_ID", "Oracle SID", "Oracle SERIAL#"), ("2", "57", "901")),
+])
+def test_slow_html_preserves_native_session_identity_by_database(
+        database_type: DatabaseType, session: dict[str, int],
+        extra_headers: tuple[str, ...], extra_values: tuple[str, ...]) -> None:
+    report = _report()
+    report = replace(report, instance=DatabaseInstance(
+        "synthetic", "Synthetic", database_type, "localhost", 1, "monitor", environment="test"))
+    identity = {**session, "login_name": "monitor-user", "host_name": "workload-host",
+                "database_name": "TestDb", "status": "sleeping"}
+    request = {**session, "status": "suspended", "sql_text": "SELECT synthetic_current_sql",
+               "blocking_session_id": None}
+    sid = f"{session['inst_id']}:{session['sid']}" if database_type == DatabaseType.ORACLE else str(
+        next(iter(session.values())))
+    child = f"{session['inst_id']}:58" if database_type == DatabaseType.ORACLE else str(int(sid) + 1)
+    report.details.update({
+        "all_sessions": [identity, {**session, **({"sid": 58} if database_type == DatabaseType.ORACLE else
+                                                  {"pid": int(sid) + 1} if database_type == DatabaseType.POSTGRESQL else
+                                                  {"processlist_id": int(sid) + 1, "thread_id": 8037}
+                                                  if database_type == DatabaseType.MYSQL else
+                                                  {"session_id": int(sid) + 1})}],
+        "all_requests": [request],
+        "blocking_graph": {"roots": [sid], "children": {sid: [child]}, "anomalies": []},
+        "samples": [{"collector": name, "success": True, "truncated": False, "row_count": 1}
+                    for name in ("active_sessions", "active_requests", "blocking", "transactions", "connections")],
+    })
+    page = HtmlReportRenderer().render(build_report_model(
+        report, build_incident_summary(report, "reports/report.html")))
+    for value in (*extra_headers, *extra_values):
+        assert value in page
+    assert "synthetic_current_sql" in page
 
 
 def test_mysql_recent_statement_evidence_is_escaped_and_collapsed() -> None:

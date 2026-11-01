@@ -2,7 +2,8 @@
 
 This module owns the canonical family vocabulary, normalization, verification
 state and the single atomic profile resolver. Bindings atomically route
-feature SQL, permissions and parser contracts.
+feature SQL and parser contracts. Database grants are documented separately
+in ``docs/DATABASE_PERMISSIONS.md``.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from dba.collectors import CollectorResult
 from dba.core import DatabaseType
 from dba.errors import ToolkitError
-from dba.permissions import VERSION_DETECTION_PRIVILEGES, requirements_for_profile
 
 if TYPE_CHECKING:
     from dba.registry import SqlScript, SqlScriptRegistry
@@ -76,11 +76,9 @@ class ProfileBinding:
     feature: str
     support_state: SupportState
     sql_profile_id: str
-    permission_profile_id: str
     parser_contract_id: str
     profile_family: str
     runtime_variant: str = "default"
-    required_privileges: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,7 +92,6 @@ class ResolvedDiagnosticProfile:
     support_state: SupportState
     profile_family: str | None
     sql_profile_id: str | None
-    permission_profile_id: str | None
     parser_contract_id: str | None
     runtime_variant: str | None
     runtime_config_state: RuntimeConfigState = RuntimeConfigState.UNKNOWN
@@ -123,7 +120,7 @@ def validate_version_family(database_type: DatabaseType, value: object) -> str:
     if value not in canonical_version_families(database_type):
         supported = ", ".join(canonical_version_families(database_type)) or "none"
         raise ValueError(
-            f"Unsupported non-canonical {database_type.value} version_family {value!r}; "
+            f"Unsupported non-canonical {database_type.value} version_family; "
             f"supported: {supported}"
         )
     return value
@@ -272,189 +269,195 @@ def build_version_profile(
             "message": error_message or "Version detection could not be completed.",
             "database_error": database_error,
         }
-        requirements = VERSION_DETECTION_PRIVILEGES.get(database_type, ())
-        if requirements:
-            result["required_detection_privilege"] = requirements[0].replace(
-                "SELECT ", "SELECT ON ", 1
-            )
     return result
 
 
-# Legacy component IDs exist solely to make the Phase A binding shape explicit.
-# They refer to current registries and are not claimed to be version-routed.
-def _legacy_binding(db_type: DatabaseType, family: str, feature: str,
-                    variant: str = "default") -> ProfileBinding:
-    prefix = f"legacy:{db_type.value}:{family}:{feature}:{variant}"
-    return ProfileBinding(db_type, family, feature, SupportState.UNKNOWN,
-                          f"{prefix}:sql", f"{prefix}:permission", f"{prefix}:parser",
-                          "legacy-compatible", variant)
+def _binding(
+    db_type: DatabaseType, family: str, feature: str, sql_profile: str,
+    parser_contract: str, profile_family: str | None = None,
+    variant: str = "default", support: SupportState = SupportState.SUPPORTED,
+) -> ProfileBinding:
+    return ProfileBinding(
+        db_type, family, feature, support, sql_profile, parser_contract,
+        profile_family or sql_profile, variant,
+    )
 
 
 def _disk_growth_binding(
-    db_type: DatabaseType, family: str, profile_id: str, permission_id: str,
+    db_type: DatabaseType, family: str, profile_id: str,
     variant: str = "default", support: SupportState = SupportState.SUPPORTED,
 ) -> ProfileBinding:
     if support != SupportState.SUPPORTED:
-        return ProfileBinding(db_type, family, "disk-growth", support, "", "", "", "unverified", variant)
-    required = requirements_for_profile(permission_id).required
-    return ProfileBinding(db_type, family, "disk-growth", support, profile_id, permission_id,
-                          "disk_growth_normalized_v1", profile_id, variant, required)
+        return ProfileBinding(db_type, family, "disk-growth", support, "", "",
+                              "unverified", variant)
+    return _binding(db_type, family, "disk-growth", profile_id,
+                    "disk_growth_normalized_v1", profile_id, variant, support)
+
+
+def _oracle_plan_binding(family: str, variant: str = "default") -> ProfileBinding:
+    from dba.oracle_plan_profiles import ORACLE_PLAN_PARSER_CONTRACT_ID, ORACLE_PLAN_PROFILE_ID
+
+    return _binding(DatabaseType.ORACLE, family, "plan", ORACLE_PLAN_PROFILE_ID,
+                    ORACLE_PLAN_PARSER_CONTRACT_ID, ORACLE_PLAN_PROFILE_ID, variant)
+
+
+def _sqlserver_top_sql_binding(family: str) -> ProfileBinding:
+    from dba.top_sql_profiles import PARSER_CONTRACT_ID, SQL_PROFILE_ID
+
+    if family == "2025":
+        return _binding(DatabaseType.SQLSERVER, family, "top-sql", "", "", "",
+                        support=SupportState.UNKNOWN)
+    return _binding(DatabaseType.SQLSERVER, family, "top-sql", SQL_PROFILE_ID,
+                    PARSER_CONTRACT_ID, SQL_PROFILE_ID)
+
+
+def _postgresql_top_sql_binding(family: str) -> ProfileBinding:
+    from dba.top_sql_profiles import POSTGRESQL_PARSER_CONTRACT_ID, POSTGRESQL_SQL_PROFILE_ID
+
+    return _binding(DatabaseType.POSTGRESQL, family, "top-sql", POSTGRESQL_SQL_PROFILE_ID,
+                    POSTGRESQL_PARSER_CONTRACT_ID)
+
+
+def _mysql_top_sql_binding(family: str, variant: str = "default") -> ProfileBinding:
+    from dba.top_sql_profiles import MYSQL_PARSER_CONTRACT_ID, MYSQL_SQL_PROFILE_ID
+
+    return _binding(DatabaseType.MYSQL, family, "top-sql", MYSQL_SQL_PROFILE_ID,
+                    MYSQL_PARSER_CONTRACT_ID, variant=variant)
+
+
+def _oracle_top_sql_binding(family: str, variant: str = "default") -> ProfileBinding:
+    from dba.top_sql_profiles import ORACLE_PARSER_CONTRACT_ID, ORACLE_SQL_PROFILE_ID
+
+    return _binding(DatabaseType.ORACLE, family, "top-sql", ORACLE_SQL_PROFILE_ID,
+                    ORACLE_PARSER_CONTRACT_ID, variant=variant)
+
+
+def _sqlserver_active_sql_binding(family: str) -> ProfileBinding:
+    from dba.active_sql_profiles import PARSER_CONTRACT_ID, SQL_PROFILE_ID
+
+    if family == "2025":
+        return _binding(DatabaseType.SQLSERVER, family, "active-sql", "", "", "",
+                        support=SupportState.UNKNOWN)
+    return _binding(DatabaseType.SQLSERVER, family, "active-sql", SQL_PROFILE_ID,
+                    PARSER_CONTRACT_ID)
+
+
+def _sqlserver_memory_grant_binding(family: str) -> ProfileBinding:
+    from dba.memory_grant_profiles import PARSER_CONTRACT_ID, SQL_PROFILE_ID
+
+    if family == "2025":
+        return _binding(DatabaseType.SQLSERVER, family, "memory-grant", "", "", "",
+                        support=SupportState.UNKNOWN)
+    return _binding(DatabaseType.SQLSERVER, family, "memory-grant", SQL_PROFILE_ID,
+                    PARSER_CONTRACT_ID)
 
 
 def _sqlserver_plan_binding(family: str) -> ProfileBinding:
     if family == "2025":
-        return ProfileBinding(DatabaseType.SQLSERVER, family, "plan", SupportState.UNKNOWN,
-                              "", "", "", "unverified")
-    permission_id = "sqlserver_plan_2022" if family == "2022" else "sqlserver_plan_legacy"
-    privileges = requirements_for_profile(permission_id).required
-    return ProfileBinding(DatabaseType.SQLSERVER, family, "plan", SupportState.SUPPORTED,
-                          "sqlserver_plan_shared", permission_id, "sqlserver_showplan_v1",
-                          "sqlserver_plan_shared", required_privileges=privileges)
-
-
-_SQLSERVER_PLAN_BINDINGS = tuple(
-    _sqlserver_plan_binding(family)
-    for family in ("2008r2", "2012", "2014", "2016", "2017", "2019", "2022", "2025")
-)
+        # Keep the future family visible to version detection, but do not bind
+        # reviewed SQL or a parser contract until that family is supported.
+        return _binding(DatabaseType.SQLSERVER, family, "plan", "", "", "",
+                        support=SupportState.UNKNOWN)
+    return _binding(DatabaseType.SQLSERVER, family, "plan",
+                    "sqlserver_plan_shared", "sqlserver_showplan_v1",
+                    "sqlserver_plan_shared")
 
 
 _DISK_GROWTH_BINDINGS: tuple[ProfileBinding, ...] = (
-    _disk_growth_binding(DatabaseType.SQLSERVER, "2008r2", "sqlserver_disk_2008r2",
-                         "sqlserver_disk_pre2014_permissions"),
-    _disk_growth_binding(DatabaseType.SQLSERVER, "2012", "sqlserver_disk_2012",
-                         "sqlserver_disk_pre2014_permissions"),
-    *(_disk_growth_binding(DatabaseType.SQLSERVER, family, "sqlserver_disk_2014_2019",
-                           "sqlserver_disk_2014_2019_permissions")
+    _disk_growth_binding(DatabaseType.SQLSERVER, "2008r2", "sqlserver_disk_2008r2"),
+    _disk_growth_binding(DatabaseType.SQLSERVER, "2012", "sqlserver_disk_2012"),
+    *(_disk_growth_binding(DatabaseType.SQLSERVER, family, "sqlserver_disk_2014_2019")
       for family in ("2014", "2016", "2017", "2019")),
-    _disk_growth_binding(DatabaseType.SQLSERVER, "2022", "sqlserver_disk_2022",
-                         "sqlserver_disk_2022_permissions"),
-    _disk_growth_binding(DatabaseType.SQLSERVER, "2025", "", "", support=SupportState.UNKNOWN),
-    _disk_growth_binding(DatabaseType.MYSQL, "5.7", "mysql_disk_57", "mysql_disk_57_permissions"),
-    *(_disk_growth_binding(DatabaseType.MYSQL, "8.0", "mysql_disk_80",
-                           "mysql_disk_80_permissions", variant)
+    _disk_growth_binding(DatabaseType.SQLSERVER, "2022", "sqlserver_disk_2022"),
+    _disk_growth_binding(DatabaseType.SQLSERVER, "2025", "", support=SupportState.UNKNOWN),
+    _disk_growth_binding(DatabaseType.MYSQL, "5.7", "mysql_disk_57"),
+    *(_disk_growth_binding(DatabaseType.MYSQL, "8.0", "mysql_disk_80", variant)
       for variant in ("pre_8022", "8022_plus")),
-    _disk_growth_binding(DatabaseType.MYSQL, "8.4", "mysql_disk_84", "mysql_disk_84_permissions"),
-    *(_disk_growth_binding(DatabaseType.POSTGRESQL, family, "postgresql_disk_13_16",
-                           "postgresql_disk_13_18_permissions")
+    _disk_growth_binding(DatabaseType.MYSQL, "8.4", "mysql_disk_84"),
+    *(_disk_growth_binding(DatabaseType.POSTGRESQL, family, "postgresql_disk_13_16")
       for family in ("13", "14", "15", "16")),
-    *(_disk_growth_binding(DatabaseType.POSTGRESQL, family, "postgresql_disk_17_18",
-                           "postgresql_disk_13_18_permissions")
+    *(_disk_growth_binding(DatabaseType.POSTGRESQL, family, "postgresql_disk_17_18")
       for family in ("17", "18")),
-    _disk_growth_binding(DatabaseType.ORACLE, "11gr2", "oracle_disk_11gr2",
-                         "oracle_disk_11gr2_permissions"),
-    _disk_growth_binding(DatabaseType.ORACLE, "12c", "oracle_disk_12c_121",
-                         "oracle_disk_12c_121_permissions", "12_1"),
-    _disk_growth_binding(DatabaseType.ORACLE, "12c", "oracle_disk_12c_122",
-                         "oracle_disk_12c_122_permissions", "12_2_plus"),
-    *(_disk_growth_binding(DatabaseType.ORACLE, family, "oracle_disk_modern",
-                           "oracle_disk_modern_permissions")
+    _disk_growth_binding(DatabaseType.ORACLE, "11gr2", "oracle_disk_11gr2"),
+    _disk_growth_binding(DatabaseType.ORACLE, "12c", "oracle_disk_12c_121", "12_1"),
+    _disk_growth_binding(DatabaseType.ORACLE, "12c", "oracle_disk_12c_122", "12_2_plus"),
+    *(_disk_growth_binding(DatabaseType.ORACLE, family, "oracle_disk_modern")
       for family in ("18c", "19c", "21c", "23ai", "26ai")),
 )
 
 
-# These are explicit foundation routes. They are deliberately sparse until
-# later phases migrate each feature's SQL, permissions and parser atomically.
 PROFILE_BINDINGS: tuple[ProfileBinding, ...] = (
-    ProfileBinding(DatabaseType.SQLSERVER, "2008r2", "slow", SupportState.SUPPORTED,
-                   "sqlserver_2008r2_slow", "sqlserver_slow_legacy", "sqlserver_slow",
-                   "sqlserver_slow_legacy", required_privileges=("VIEW SERVER STATE", "VIEW ANY DATABASE")),
-    *(ProfileBinding(DatabaseType.SQLSERVER, family, "slow", SupportState.SUPPORTED,
-                     "sqlserver_shared_slow", "sqlserver_slow_legacy", "sqlserver_slow",
-                     "sqlserver_slow_shared", required_privileges=("VIEW SERVER STATE", "VIEW ANY DATABASE"))
-      for family in ("2012", "2014", "2016", "2017", "2019")),
-    ProfileBinding(DatabaseType.SQLSERVER, "2022", "slow", SupportState.SUPPORTED,
-                   "sqlserver_shared_slow", "sqlserver_slow_2022", "sqlserver_slow",
-                   "sqlserver_slow_shared",
-                   required_privileges=("VIEW SERVER PERFORMANCE STATE", "VIEW ANY DATABASE")),
-    ProfileBinding(DatabaseType.SQLSERVER, "2025", "slow", SupportState.UNKNOWN,
-                   "", "", "", "unverified"),
-    *_SQLSERVER_PLAN_BINDINGS,
-    ProfileBinding(DatabaseType.SQLSERVER, "2008r2", "replication", SupportState.UNSUPPORTED,
-                   "", "", "", "unsupported", "default"),
-    ProfileBinding(DatabaseType.MYSQL, "5.7", "slow", SupportState.SUPPORTED,
-                   "mysql57_slow", "mysql57_slow", "mysql_slow", "mysql_slow_legacy",
-                   required_privileges=("PROCESS", "SELECT performance_schema")),
-    *(ProfileBinding(DatabaseType.MYSQL, "8.0", "slow", SupportState.SUPPORTED,
-                     "mysql80_slow", "mysql80_slow", "mysql_slow", "mysql_slow_modern",
-                     variant, ("PROCESS", "SELECT performance_schema"))
+    _binding(DatabaseType.SQLSERVER, "2008r2", "slow", "sqlserver_2008r2_slow",
+             "sqlserver_slow", "sqlserver_slow_legacy"),
+    *(_binding(DatabaseType.SQLSERVER, family, "slow", "sqlserver_shared_slow",
+               "sqlserver_slow", "sqlserver_slow_shared")
+      for family in ("2012", "2014", "2016", "2017", "2019", "2022")),
+    _binding(DatabaseType.SQLSERVER, "2025", "slow", "", "", "unverified",
+             support=SupportState.UNKNOWN),
+    *(_sqlserver_plan_binding(family)
+      for family in ("2008r2", "2012", "2014", "2016", "2017", "2019", "2022", "2025")),
+    *(_sqlserver_top_sql_binding(family)
+      for family in ("2008r2", "2012", "2014", "2016", "2017", "2019", "2022", "2025")),
+    *(_postgresql_top_sql_binding(family) for family in ("14", "15", "16", "17", "18")),
+    _mysql_top_sql_binding("5.7"),
+    *(_mysql_top_sql_binding("8.0", variant) for variant in ("pre_8022", "8022_plus")),
+    _mysql_top_sql_binding("8.4"),
+    _oracle_top_sql_binding("11gr2"),
+    _oracle_top_sql_binding("12c", "12_1"),
+    _oracle_top_sql_binding("12c", "12_2_plus"),
+    *(_oracle_top_sql_binding(family) for family in ("18c", "19c", "21c", "23ai", "26ai")),
+    *(_oracle_plan_binding(family) for family in ("11gr2", "18c", "19c", "21c", "23ai", "26ai")),
+    _oracle_plan_binding("12c", "12_1"),
+    _oracle_plan_binding("12c", "12_2_plus"),
+    *(_sqlserver_active_sql_binding(family)
+      for family in ("2008r2", "2012", "2014", "2016", "2017", "2019", "2022", "2025")),
+    *(_sqlserver_memory_grant_binding(family)
+      for family in ("2008r2", "2012", "2014", "2016", "2017", "2019", "2022", "2025")),
+    _binding(DatabaseType.SQLSERVER, "2008r2", "replication", "", "", "unsupported",
+             support=SupportState.UNSUPPORTED),
+    _binding(DatabaseType.MYSQL, "5.7", "slow", "mysql57_slow", "mysql_slow", "mysql_slow_legacy"),
+    *(_binding(DatabaseType.MYSQL, "8.0", "slow", "mysql80_slow", "mysql_slow",
+               "mysql_slow_modern", variant)
       for variant in ("pre_8022", "8022_plus")),
-    ProfileBinding(DatabaseType.MYSQL, "8.4", "slow", SupportState.SUPPORTED,
-                   "mysql84_slow", "mysql84_slow", "mysql_slow", "mysql_slow_modern",
-                   required_privileges=("PROCESS", "SELECT performance_schema")),
-    *(ProfileBinding(DatabaseType.POSTGRESQL, family, "slow", SupportState.SUPPORTED,
-                     "pg13_18_slow", "pg13_18_slow", "postgresql_slow", "pg13_18_slow",
-                     required_privileges=("pg_monitor", "CONNECT"))
+    _binding(DatabaseType.MYSQL, "8.4", "slow", "mysql84_slow", "mysql_slow", "mysql_slow_modern"),
+    *(_binding(DatabaseType.POSTGRESQL, family, "slow", "pg13_18_slow",
+               "postgresql_slow", "pg13_18_slow")
       for family in ("13", "14", "15", "16", "17", "18")),
-    ProfileBinding(DatabaseType.ORACLE, "11gr2", "slow", SupportState.SUPPORTED,
-                   "oracle11gr2_slow", "oracle11gr2_slow", "oracle_slow", "oracle11gr2_slow",
-                   required_privileges=("CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION",
-                                        "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
-                                        "SELECT SYS.V_$TRANSACTION")),
-    ProfileBinding(DatabaseType.ORACLE, "12c", "slow", SupportState.SUPPORTED,
-                   "oracle12c_121_slow", "oracle12c_121_slow", "oracle_slow", "oracle12c_121_slow",
-                   "12_1", ("CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION",
-                            "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
-                            "SELECT SYS.V_$TRANSACTION")),
-    ProfileBinding(DatabaseType.ORACLE, "12c", "slow", SupportState.SUPPORTED,
-                   "oracle12c_122_slow", "oracle12c_122_slow", "oracle_slow", "oracle12c_122_slow",
-                   "12_2_plus", ("CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION",
-                                 "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
-                                 "SELECT SYS.V_$TRANSACTION")),
-    *(ProfileBinding(DatabaseType.ORACLE, family, "slow", SupportState.SUPPORTED,
-                     "oracle_modern_slow", "oracle_modern_slow", "oracle_slow", "oracle_modern_slow",
-                     required_privileges=("CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION",
-                                          "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
-                                          "SELECT SYS.V_$TRANSACTION"))
+    _binding(DatabaseType.ORACLE, "11gr2", "slow", "oracle11gr2_slow", "oracle_slow", "oracle11gr2_slow"),
+    _binding(DatabaseType.ORACLE, "12c", "slow", "oracle12c_121_slow", "oracle_slow",
+             "oracle12c_121_slow", "12_1"),
+    _binding(DatabaseType.ORACLE, "12c", "slow", "oracle12c_122_slow", "oracle_slow",
+             "oracle12c_122_slow", "12_2_plus"),
+    *(_binding(DatabaseType.ORACLE, family, "slow", "oracle_modern_slow",
+               "oracle_slow", "oracle_modern_slow")
       for family in ("18c", "19c", "21c", "23ai", "26ai")),
 ) + _DISK_GROWTH_BINDINGS + tuple(
-    ProfileBinding(DatabaseType.MYSQL, family, "replication", SupportState.SUPPORTED,
-                   sql_id, permission_id, parser_id, profile_family, variant,
-                   required_privileges)
-    for family, variant, sql_id, permission_id, parser_id, profile_family, required_privileges in (
-        ("5.7", "default", "mysql57_replication", "mysql57_replication",
-         "mysql57_replication", "mysql57_replication", ("REPLICATION CLIENT",)),
-        ("8.0", "pre_8022", "mysql80_pre_8022_replication", "mysql80_pre_8022_replication",
-         "mysql80_pre_8022_replication", "mysql80_pre_8022_replication", ("REPLICATION CLIENT",)),
-        ("8.0", "8022_plus", "mysql80_8022_plus_replication", "mysql80_8022_plus_replication",
-         "mysql80_8022_plus_replication", "mysql80_8022_plus_replication", ("REPLICATION CLIENT",)),
-        ("8.4", "default", "mysql84_replication", "mysql84_replication",
-         "mysql84_replication", "mysql84_replication", ("REPLICATION CLIENT",)),
+    _binding(DatabaseType.MYSQL, family, "replication", sql, parser, sql, variant)
+    for family, variant, sql, parser in (
+        ("5.7", "default", "mysql57_replication", "mysql57_replication"),
+        ("8.0", "pre_8022", "mysql80_pre_8022_replication", "mysql80_pre_8022_replication"),
+        ("8.0", "8022_plus", "mysql80_8022_plus_replication", "mysql80_8022_plus_replication"),
+        ("8.4", "default", "mysql84_replication", "mysql84_replication"),
     )
 ) + tuple(
-    ProfileBinding(DatabaseType.POSTGRESQL, family, "replication", SupportState.SUPPORTED,
-                   "pg13_18_replication", "pg13_18_replication", "pg13_18_replication",
-                   "pg13_18_replication", "default", ("pg_monitor", "CONNECT"))
-    for family in ("13", "14", "15", "16", "17", "18")
+    _binding(DatabaseType.POSTGRESQL, family, "replication", "pg13_18_replication",
+             "pg13_18_replication") for family in ("13", "14", "15", "16", "17", "18")
 ) + tuple(
-    ProfileBinding(DatabaseType.SQLSERVER, family, "replication", SupportState.SUPPORTED,
-                   "sqlserver_ag_pre2022" if family != "2022" else "sqlserver_ag_2022",
-                   "sqlserver_ag_pre2022" if family != "2022" else "sqlserver_ag_2022",
-                   "sqlserver_ag_shared", "sqlserver_ag_pre2022" if family != "2022"
-                   else "sqlserver_ag_2022", "default",
-                   ("VIEW SERVER STATE",) if family != "2022" else
-                   ("VIEW SERVER PERFORMANCE STATE",))
+    _binding(DatabaseType.SQLSERVER, family, "replication",
+             "sqlserver_ag_pre2022" if family != "2022" else "sqlserver_ag_2022",
+             "sqlserver_ag_shared", "sqlserver_ag_pre2022" if family != "2022" else "sqlserver_ag_2022")
     for family in ("2012", "2014", "2016", "2017", "2019", "2022")
 ) + (
-    ProfileBinding(DatabaseType.SQLSERVER, "2025", "replication", SupportState.UNKNOWN,
-                   "", "", "", "unverified", "default"),
+    _binding(DatabaseType.SQLSERVER, "2025", "replication", "", "", "unverified",
+             support=SupportState.UNKNOWN),
 ) + tuple(
-    ProfileBinding(DatabaseType.ORACLE, family, "replication", SupportState.SUPPORTED,
-                   sql_id, permission_id, parser_id, profile_family, variant,
-                   required_privileges)
-    for family, variant, sql_id, permission_id, parser_id, profile_family, required_privileges in (
-        ("11gr2", "default", "oracle11gr2_replication", "oracle11gr2_replication",
-         "oracle11gr2_replication", "oracle11gr2_replication",
-         requirements_for_profile("oracle11gr2_replication").required),
-        ("12c", "12_1", "oracle12c_121_replication", "oracle12c_121_replication",
-         "oracle12c_121_replication", "oracle12c_121_replication",
-         requirements_for_profile("oracle12c_121_replication").required),
-        ("12c", "12_2_plus", "oracle12c_122_replication", "oracle12c_122_replication",
-         "oracle12c_122_replication", "oracle12c_122_replication",
-         requirements_for_profile("oracle12c_122_replication").required),
-        *( (family, "default", "oracle_modern_replication", "oracle_modern_replication",
-            "oracle_modern_replication", "oracle_modern_replication",
-            requirements_for_profile("oracle_modern_replication").required)
-           for family in ("18c", "19c", "21c", "23ai", "26ai") ),
+    _binding(DatabaseType.ORACLE, family, "replication", sql, parser, sql, variant)
+    for family, variant, sql, parser in (
+        ("11gr2", "default", "oracle11gr2_replication", "oracle11gr2_replication"),
+        ("12c", "12_1", "oracle12c_121_replication", "oracle12c_121_replication"),
+        ("12c", "12_2_plus", "oracle12c_122_replication", "oracle12c_122_replication"),
+        *((family, "default", "oracle_modern_replication", "oracle_modern_replication")
+          for family in ("18c", "19c", "21c", "23ai", "26ai")),
     )
 )
 
@@ -470,10 +473,9 @@ class DiagnosticProfileResolver:
         self.bindings = bindings
 
     def validate(self) -> tuple[str, ...]:
+        """Validate version, SQL route and parser contracts; permissions live in deployment docs."""
         errors: list[str] = []
         seen: set[tuple[DatabaseType, str, str, str]] = set()
-        forbidden = {"SYSDBA", "DBA", "SELECT_CATALOG_ROLE", "SYSADMIN", "CONTROL SERVER",
-                     "SUPERUSER", "ALL PRIVILEGES", "SUPER", "SYSTEM_USER"}
         for binding in self.bindings:
             key = (binding.db_type, binding.version_family, binding.feature,
                    binding.runtime_variant)
@@ -484,21 +486,12 @@ class DiagnosticProfileResolver:
                 errors.append(f"unknown version family: {binding.db_type.value}/{binding.version_family}")
             if not isinstance(binding.support_state, SupportState):
                 errors.append(f"missing or invalid support state: {key}")
-            has_reference = any((binding.sql_profile_id, binding.permission_profile_id,
-                                 binding.parser_contract_id))
+            has_reference = bool(binding.sql_profile_id or binding.parser_contract_id)
             if binding.support_state != SupportState.UNSUPPORTED and (
                 binding.support_state != SupportState.UNKNOWN or has_reference
             ):
-                referenced = (binding.sql_profile_id, binding.permission_profile_id,
-                              binding.parser_contract_id)
-                prefix = (f"legacy:{binding.db_type.value}:{binding.version_family}:"
-                          f"{binding.feature}:{binding.runtime_variant}")
-                expected = (f"{prefix}:sql", f"{prefix}:permission", f"{prefix}:parser")
-                if any(not item for item in referenced):
-                    errors.append(f"dangling profile reference: {key}")
-                elif binding.feature == "replication":
-                    if any(item.startswith("legacy:") for item in referenced):
-                        errors.append(f"cross-route or unknown profile reference: {key}")
+                if not binding.sql_profile_id or not binding.parser_contract_id:
+                    errors.append(f"dangling SQL/parser profile reference: {key}")
                 elif binding.feature == "slow":
                     from dba.slow_profiles import validate_slow_binding
                     errors.extend(validate_slow_binding(binding))
@@ -506,42 +499,29 @@ class DiagnosticProfileResolver:
                     from dba.disk_growth_profiles import validate_disk_binding
                     errors.extend(validate_disk_binding(binding))
                 elif binding.feature == "plan":
-                    from dba.execution_plan_profiles import validate_plan_binding
-                    errors.extend(validate_plan_binding(binding))
-                elif referenced != expected:
-                    errors.append(f"cross-route or unknown profile reference: {key}")
-                if binding.feature == "replication":
-                    try:
-                        permission = requirements_for_profile(binding.permission_profile_id)
-                    except ValueError:
-                        errors.append(f"missing permission profile: {key}")
+                    if binding.db_type == DatabaseType.ORACLE:
+                        from dba.oracle_plan_profiles import validate_oracle_plan_binding
+                        errors.extend(validate_oracle_plan_binding(binding))
                     else:
-                        if tuple(permission.required) != binding.required_privileges:
-                            errors.append(f"route permission contract mismatch: {key}")
-                elif binding.feature == "slow":
-                    try:
-                        permission = requirements_for_profile(binding.permission_profile_id)
-                    except ValueError:
-                        errors.append(f"missing permission profile: {key}")
-                    else:
-                        if tuple(permission.required) != binding.required_privileges:
-                            errors.append(f"route permission contract mismatch: {key}")
-                elif binding.feature == "plan":
-                    try:
-                        permission = requirements_for_profile(binding.permission_profile_id)
-                    except ValueError:
-                        errors.append(f"missing permission profile: {key}")
-                    else:
-                        if tuple(permission.required) != binding.required_privileges:
-                            errors.append(f"route permission contract mismatch: {key}")
-            risky = forbidden.intersection(p.upper() for p in binding.required_privileges)
-            if risky:
-                errors.append(f"forbidden privilege in profile metadata: {key}")
+                        from dba.execution_plan_profiles import validate_plan_binding
+                        errors.extend(validate_plan_binding(binding))
+                elif binding.feature == "top-sql":
+                    from dba.top_sql_profiles import validate_top_sql_binding
+                    errors.extend(validate_top_sql_binding(binding))
+                elif binding.feature == "active-sql":
+                    from dba.active_sql_profiles import validate_active_sql_binding
+                    errors.extend(validate_active_sql_binding(binding))
+                elif binding.feature == "memory-grant":
+                    from dba.memory_grant_profiles import validate_memory_grant_binding
+                    errors.extend(validate_memory_grant_binding(binding))
+                elif binding.feature == "replication":
+                    if binding.sql_profile_id.startswith("legacy:"):
+                        errors.append(f"unsupported legacy SQL route: {key}")
             if binding.db_type == DatabaseType.MYSQL and binding.version_family == "8.0":
                 if binding.runtime_variant not in {"pre_8022", "8022_plus"}:
                     errors.append(f"invalid MySQL 8.0 variant: {key}")
             elif binding.db_type == DatabaseType.ORACLE and binding.version_family == "12c" \
-                    and binding.feature in {"replication", "slow", "disk-growth"}:
+                    and binding.feature in {"replication", "slow", "disk-growth", "top-sql", "plan"}:
                 if binding.runtime_variant not in {"12_1", "12_2_plus"}:
                     errors.append(f"invalid Oracle 12c variant: {key}")
             elif binding.runtime_variant != "default":
@@ -572,7 +552,7 @@ class DiagnosticProfileResolver:
             return ResolvedDiagnosticProfile(
                 database_type, feature, declared_version_family,
                 detected_version.raw_version if detected_version else None, detected_family,
-                status, SupportState.UNKNOWN, None, None, None, None, variant,
+                status, SupportState.UNKNOWN, None, None, None, variant,
             )
         lookup_variant = variant or "default"
         route = next((item for item in self.bindings if
@@ -594,8 +574,7 @@ class DiagnosticProfileResolver:
             database_type, feature, declared_version_family,
             detected_version.raw_version if detected_version else None, detected_family,
             status, route.support_state, route.profile_family,
-            route.sql_profile_id or None, route.permission_profile_id or None,
-            route.parser_contract_id or None, route.runtime_variant,
+            route.sql_profile_id or None, route.parser_contract_id or None, route.runtime_variant,
         )
 
 

@@ -1,5 +1,10 @@
 # Version Profiles (V0.9.1)
 
+> **Current authorization policy:** Database grants are deployment preparation documented in
+> [`DATABASE_PERMISSIONS.md`](DATABASE_PERMISSIONS.md). Permission Registry and per-feature
+> readiness passages below describe a superseded design, not current runtime behavior. The
+> current resolver binds SQL and parser contracts; access denials remain sanitized database errors.
+
 ## Product target and evidence states
 
 The formal product targets confirmed on 2026-10-19 are MySQL 5.7 and 8.0+, Oracle 11gR2+, PostgreSQL 14+, SQL Server 2008 R2+, MongoDB 4.0+, and Redis 4.0+. SQL Server, PostgreSQL, MySQL, and Oracle remain the current development mainline; MongoDB and Redis remain long-term Backlog targets with no current diagnostic Profile claim.
@@ -12,7 +17,7 @@ These target ranges are not implementation or verification matrices:
 - `UNVERIFIED` means a target or implementation lacks that acceptance.
 - `UNSUPPORTED` is an explicit feature/version no-route decision, not a synonym for missing E2E.
 
-The runtime `SupportState.SUPPORTED` values in the matrices below describe reviewed implementation routes; they do not by themselves mean official full-version support or live verification. A future release covered linguistically by “+” remains target-only until detection/Profile routing, SQL/permission/parser contracts where applicable, automated checks, and required acceptance are complete.
+The runtime `SupportState.SUPPORTED` values in the matrices below describe reviewed implementation routes; they do not by themselves mean official full-version support or live verification. A future release covered linguistically by “+” remains target-only until detection/Profile routing, SQL/parser contracts where applicable, automated checks, and required acceptance are complete.
 
 Current source retains PostgreSQL 13 Profile code. PostgreSQL 13 is outside the formal 14+ product target and is retained for compatibility/history without being promoted to formal support. PostgreSQL 12 is also outside the current target. Historical design and test text referring to PostgreSQL 13–18 continues to describe the code/evidence at that time.
 
@@ -63,7 +68,8 @@ older Inventory entries and warns when a family is absent. It rejects numeric
 YAML values, non-canonical strings, and the literal `unknown`. Missing family
 does not get written back to Inventory. `dba check` may show a known detected
 family as `AUTO_DETECTED` and recommends declaring it. A declared/detected
-mismatch or failed detection makes permission readiness `UNKNOWN` for check.
+mismatch or failed detection leaves the version unverified and diagnosis fails
+closed before version-specific feature SQL.
 
 ## Detection and low-privilege requirements
 
@@ -71,10 +77,11 @@ Version queries are fixed, reviewed, bounded `READ_ONLY` Registry scripts and
 run through the connected Adapter. SQL Server uses `SERVERPROPERTY`;
 PostgreSQL uses `current_setting`; MySQL uses `VERSION()`; Oracle reads
 `V$VERSION.BANNER`. Oracle version verification requires a direct object grant
-on `SYS.V_$VERSION` (`GRANT SELECT ON SYS.V_$VERSION TO <monitor_account>`).
-Toolkit reports the sanitized vendor error and the required object when this
-view cannot be read; it never grants the permission. The complete Oracle banner
-is retained in the structured check result, not emitted into structured logs.
+on `SYS.V_$VERSION`, listed in the Oracle section of
+[`DATABASE_PERMISSIONS.md`](DATABASE_PERMISSIONS.md). Toolkit reports the
+sanitized vendor error and guide pointer when this view cannot be read; it
+never grants the permission. The complete Oracle banner is retained in the
+structured check result, not emitted into structured logs.
 
 Unknown future versions have no latest-version fallback. SQL Server 10.50 maps
 to 2008 R2, while 10.0 remains unknown. MySQL 8.0 detection also preserves the
@@ -94,16 +101,16 @@ dba check sql-prod-example --json
 `show` displays only the declared Inventory family and does not connect.
 `validate` is static and offline. `check` displays declared family, detected
 raw version, normalized family and verification status alongside the existing
-account and permission summary. It does not persist detected versions.
+account-safety summary. It does not persist detected versions or assess
+feature-specific grants.
 
-The central `DiagnosticProfileResolver` returns a frozen profile containing the
-SQL bundle, permission profile, parser contract and support state from one
-binding. Replication, slow and disk-growth require declared and detected families to match
-before any version-specific feature SQL runs. `AUTO_DETECTED`, `UNVERIFIED`,
-`MISMATCH`, and unknown variants fail closed for diagnosis. `check` and
-`permissions` report permission readiness as UNKNOWN without verified version
-evidence. An unverified declared family may be used only for reference grant
-guidance, never to claim readiness.
+The central `DiagnosticProfileResolver` returns a frozen profile containing
+the SQL bundle, parser contract and support state from one binding.
+Replication, slow and disk-growth require declared and detected families to
+match before version-specific feature SQL runs. `AUTO_DETECTED`, `UNVERIFIED`,
+`MISMATCH`, and unknown variants fail closed for diagnosis. Feature grants are
+deployment guidance only; the selected database query is the runtime evidence
+of access, and a denial preserves sanitized vendor details.
 
 Slow SQL selection is profile-owned; collectors do not branch on database
 version. Required collector failures stop diagnosis. Optional failures retain
@@ -118,13 +125,12 @@ core totals. A configured-off feature such as binary logging or archiving is
 reported as `NOT_CONFIGURED`/`NOT_APPLICABLE`. Thresholds remain in the Analyzer
 and are not version-profile settings.
 
-Permission readiness, evidence completeness, and database health are separate
-outputs. `PARTIAL` permission readiness means the required contract is satisfied
-and optional context is unavailable. Optional-only gaps make data completeness
-`PARTIAL`, but do not by themselves make storage health `DEGRADED` or `UNKNOWN`.
-Health is `UNKNOWN` only when required core evidence is incomplete; otherwise it
-is based on observed storage findings. Successful queries returning zero rows,
-including Oracle `V$TRANSACTION`, are valid evidence and are not missing.
+Collection completeness and database health remain separate outputs. Optional
+evidence gaps make data completeness `PARTIAL`, but do not by themselves make
+storage health `DEGRADED` or `UNKNOWN`. Health is `UNKNOWN` only when required
+core evidence is incomplete; otherwise it is based on observed storage
+findings. Successful queries returning zero rows, including Oracle
+`V$TRANSACTION`, are valid evidence and are not missing.
 
 ### Disk-growth support matrix
 
@@ -260,6 +266,6 @@ stages. Slow emergency evidence includes sessions, requests/running SQL,
 blocking, and transaction evidence; disk-growth emergency evidence uses the
 profile's required storage sources plus available log/retention context.
 Results already collected are reused by supplemental collection. This does
-not add SQL, permission profiles, or version routes. Missing supplemental
+not add SQL or version routes. Missing supplemental
 evidence is shown as not collected or partial, not as a query failure. Each
 stage remains subject to the same resolved profile and SQL Registry.

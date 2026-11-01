@@ -1,5 +1,10 @@
 # DBA Toolkit V0.9.1 — 性能分诊与 SQL 深度诊断详细设计
 
+> **Superseded authorization references:** Permission Registry and per-feature preflight
+> references in this historical design are not current behavior. Deployment grants are listed
+> in [`../DATABASE_PERMISSIONS.md`](../DATABASE_PERMISSIONS.md); runtime retains sanitized errors
+> when a reviewed database read is denied.
+
 **性质：** 只读设计与源码核对；本文不代表新功能已经实现。
 **代码版本：** 0.9.0
 **设计日期：** 2026-10-19
@@ -112,7 +117,7 @@
 | 短窗口差值 | 两次同身份累计计数的差 / 实测时间 | 当作长期趋势，或忽略重置/条目替换 |
 | 单次执行统计 | 明确绑定某次执行的实际耗时/行数/资源 | 用缓存平均值替代本次执行，或从估算计划推实际值 |
 
-每项指标带 metric_semantics 和 window：current_request、since_cache_load、since_stats_reset、sample_delta、single_execution 或 unknown。单位明确：SQL Server cpu_time 为 ms；Oracle V$SQL CPU/elapsed 为微秒，elapsed 是数据库时间，并行时可能大于 wall time；其他单位按相应字段文档确定。不可跨库直接混排。
+每项 Top SQL 指标带 `metric_semantics` 和窗口：`CURRENT`、`CUMULATIVE`、`INTERVAL_DELTA` 或 `HISTORICAL`。单次执行统计只有源明确绑定某一次执行时才可显示，并记录它属于何种采集语义；未知/不可用通过质量状态表达，不作为第五种已证明语义。单位明确：SQL Server 当前 request cpu_time 为 ms；Oracle V$SQL CPU/elapsed 为微秒，elapsed 是数据库时间，并行时可能大于 wall time；其他单位按相应字段文档确定。不可跨库直接混排。
 
 ### 4.2 候选分类，而非单一 elapsed 排序
 
@@ -218,7 +223,7 @@ Oracle 11g–26ai 是目标兼容范围，不是全面实机通过范围。视�
 - **可选统计：** pg_stat_statements 要求服务端预先配置 shared_preload_libraries，并在数据库预先创建 extension；Toolkit 不自动安装或改参数。不可用时显示 NOT_CONFIGURED/UNSUPPORTED 与影响，不能作为普通缺权限。
 - **资源统计：** pg_stat_database 是数据库级累计；pg_stat_io 从 PostgreSQL 16 提供，属于数据库/对象级 IO 统计，不是 SQL 级归因，需分开报告。
 - **身份：** 活动 PID 配 backend_start 做会话复核；queryid/统计 epoch 以数据库版本和扩展状态为条件。
-- **版本：** PostgreSQL 13–18 为目标范围；字段、wait event、pg_stat_io、扩展能力按版本 Profile 验证。旧汇总实机是 PG16.15；较新 P0 修复后完整 E2E 应单独重跑。
+- **版本：** PostgreSQL 14+ 是正式产品目标；既有 PG13 路由/兼容代码保留，但不因此恢复 PG13 产品承诺或实机验证声明。字段、wait event、PG16+ pg_stat_io、扩展能力按版本 Profile 验证。旧汇总实机是 PG16.15；当前 HEAD 证据见 Acceptance。
 - **权限：** 复用 pg_monitor 或当前 Permission Registry 认可的最小只读权限，不要求 superuser、pg_signal_backend。新增视图同步 Permission Registry、Preflight 和一致性测试。
 
 ### 7.2 MySQL
@@ -394,3 +399,80 @@ DATABASE ACCESSED: NO
 THIRD PARTY INSTALLED: NO
 COMMIT CREATED: NO
 </pre>
+
+## 15. Phase 2 Top SQL design audit and implementation split (2026-10-21)
+
+This section is the Phase 2 design result for `V091-P2-TOPSQL-DESIGN-001`. It does not authorize or implement database SQL. The audit used the current source tree at HEAD `469083a3cf0680ad24aaad7a496740722e5b45a` and reviewed current Registry/Profile/permission code and tests. Package version remains `0.9.0`; no database was accessed.
+
+### 15.1 Source and current-capability matrix
+
+| Engine and product target | Candidate source and native scope | Current Toolkit reuse / implementation state | Metrics that may be exposed after profile validation | Hard boundary |
+|---|---|---|---|---|
+| SQL Server 2008 R2+ | `sys.dm_exec_requests` is a current-request snapshot; `sys.dm_exec_query_stats` is one row per statement in a cached plan, joined to text via handles and statement offsets. | `active_requests.sql` already collects current elapsed/CPU/logical/physical read fields. `plan_cached.sql` reads a single session's most-recent cached handle/stat fields within the Plan path; it is not a ranked instance-wide Top SQL Collector. There is no Top SQL source/Profile/Collector. | Current request elapsed/CPU/reads; cache-resident cumulative CPU, logical reads, physical reads, executions and average derived from total/count where available. | `dm_exec_query_stats` describes completed work represented by still-cached plans; in-flight requests are not in that view, and cache removal removes rows. Preserve plan handle, SQL handle, offsets, generation and cache creation time. Query Store is optional and only a later separately approved persistent-history source; never require or enable it. Version-specific DMV fields and permissions need explicit Profile routes, including SQL Server 2008 R2. |
+| PostgreSQL 14+ | `pg_stat_activity` is current backend/request evidence; `pg_stat_database` is database-wide cumulative state; optional preconfigured `pg_stat_statements` is normalized query-level cumulative statistics; PG16+ `pg_stat_io` is backend/context/object-level, not query-level. | Current activity/slow/transaction and database-wide status sources exist. No `pg_stat_statements` Profile/Registry/Collector or SQL-level Top SQL exists. | Current request age/wait; if the extension is already loaded and view available: calls, execution-time totals/mean, rows and block counters. `shared_blks_read` means shared blocks read, not proof of physical device I/O. No SQL-level CPU metric is provided by this source. | Do not install the extension, run `CREATE EXTENSION`, set `shared_preload_libraries`, restart, or reset stats. Cross-user SQL text and queryid visibility is restricted to superusers/`pg_read_all_stats`; future permission design must use the least capability already accepted by project policy and never require superuser. Database/instance statistics must not be presented as per-query attribution. |
+| MySQL 5.7 and 8.0+ | `events_statements_current` is current event evidence; `events_statements_history` is bounded per-thread recent history; `events_statements_summary_by_digest` aggregates statements by schema/digest. | Current request and blocker-directed recent history are implemented. `slow_profiles.py`, MySQL preflight and Permission Registry already model optional Performance Schema visibility. No digest summary Profile/Registry/Collector exists. | Current event elapsed timer when timing is enabled; digest execution count, sum/average timer, rows examined/sent, lock time and supported summary fields. Timer fields are elapsed/wait timer values in picoseconds, never CPU time. | Consumers/instruments, digest capacity and permissions affect completeness. A full digest table groups otherwise unmatched digests in a NULL schema/digest catch-all; digest loss/capacity and representative sampled SQL text must be exposed as quality limits. Toolkit never enables consumers/instruments or changes startup variables. Keep PROCESSLIST_ID, P_S THREAD_ID and digest identity separate. |
+| Oracle 11gR2+ | `V$SESSION` is current session/request evidence; `V$SQL` has one row per child cursor and cursor-lifetime statistics; `V$SQLSTATS` may offer SQL_ID-level aggregate rows; `GV$SQL` adds instance scope for RAC. | Active-request paths already associate some current session SQL with `V$SQL` cumulative fields. There is no independent SQL_ID/child-level Top SQL Collector/Profile, and no SQL plan collector. | Current session wait/age; cursor CPU/elapsed, buffer gets, disk reads, executions, rows and derived cumulative averages where present. | Preserve SQL_ID + CHILD_NUMBER + PLAN_HASH_VALUE and instance/CON_ID where the source exposes them; SQL_ID alone is not child identity. V$SQL statistics are cursor-cache values, updated on completion and periodically for long queries; child aging/reload and RAC scope affect interpretation. No AWR/ASH/Diagnostics/Tuning Pack dependency. |
+
+**Audit conclusion:** Top SQL is not currently implemented as a general capability in any of the four engines. SQL Server plan-cache fields and Oracle active-request cursor fields are partial source-adjacent evidence, not ranked SQL lists. MySQL recent history is not digest aggregation. PostgreSQL database-level counters are not SQL-level attribution. Existing identities, Profiles, Permission Registry, Preflight, SQL Registry, Collector bounds, Incident/ReportModel and offline renderers are reusable foundations; no parallel architecture is needed.
+
+### 15.2 Metric and evidence contract
+
+The first shared contract task should use the exact Phase 2 semantic vocabulary below. Values remain nullable; unavailable is not numeric zero.
+
+| Field | Contract |
+|---|---|
+| `database_engine`, `server_version`, `profile_id` | Identify the engine and exact route used. A target version without a matching validated Profile is not automatically supported. |
+| `native_sql_identity`, `native_plan_identity` | Engine-native typed identity; retain distinctions (query hash vs plan; digest vs thread; SQL_ID vs child; SQL Server statement offset/generation). Redacted SQL text is display evidence, not a key. |
+| `metric_name`, `metric_value`, `metric_unit` | Native metric name, nullable numeric value, and precise unit (ms/us/ps, blocks/pages, count, rows, bytes only when the source says bytes). No cross-engine unit conversion without an explicit valid conversion. |
+| `metric_semantics` | Exactly one of `CURRENT`, `CUMULATIVE`, `INTERVAL_DELTA`, `HISTORICAL`; unknown/missing capability is represented by result quality, not by inventing a metric value. |
+| `observation_time`, `sample_started_at`, `sample_finished_at`, `window_seconds` | Distinguish the observation point from a measured two-sample window. A current snapshot is not history; a cache/statistics lifetime is not a wall-clock interval. |
+| `collection_scope` | Request/session, SQL statement, digest, child cursor, database, instance or configured history store. Do not project broader scope as SQL-level. |
+| `evidence_source`, `permission_status`, `data_visibility` | Reviewed Registry/source reference, capability permission/readiness, and COMPLETE/PARTIAL/MISSING/UNSUPPORTED/UNKNOWN/TRUNCATED quality. |
+| `reset_or_eviction_limitations` | Source-specific epoch, counter reset, restart, cache churn, extension/consumer/capacity, and query-text visibility caveats. |
+
+`CURRENT` is a live request/event sample, not a ranking of completed work. `CUMULATIVE` is a native counter since the source's reset/load/compile epoch. `INTERVAL_DELTA` is the difference of two matching cumulative observations divided by measured elapsed time (and may also report raw delta count). `HISTORICAL` requires a source that explicitly retains time-bucketed history (for example an already-configured supported Query Store path); cache counters and current/history ring buffers do not qualify as durable history. Average duration is labeled `CUMULATIVE` when computed from lifetime totals/counts, or `INTERVAL_DELTA` when computed from same-window elapsed delta / execution delta; it is never relabeled as one-execution timing.
+
+CPU, logical reads, physical reads, execution count, average duration and elapsed timer are distinct metrics. SQL Server current request CPU uses milliseconds, while query-stat CPU uses microseconds (documented precision can be coarser); Oracle cursor CPU/elapsed uses microseconds and elapsed is database time which can exceed wall-clock with parallel work; MySQL Performance Schema timer units are picoseconds and are not CPU; PostgreSQL `pg_stat_statements` execution time is milliseconds, while block counts are block counters. PostgreSQL shared-block reads, MySQL rows examined, SQL Server logical reads and Oracle buffer gets must not be labeled physical disk I/O. SQL-level physical-read Top SQL is offered only where the selected native source actually provides a defensible metric.
+
+### 15.3 High-frequency short SQL and interval method
+
+An execution-count total alone means “many executions over the source lifetime,” not “high-frequency now.” A defensible frequency rate needs two explicit, on-demand reads of the same cumulative source. The invocation (not a service or daemon) may wait a user-visible bounded interval and perform exactly two serialized observations. Report `execution_delta`, actual `window_seconds`, executions/second and, when compatible counters exist, `elapsed_delta / execution_delta` as interval mean duration. The “short” threshold is configurable and is an interpretation, not a database-native fact; retain the raw values and never let it mask high cumulative resource cost or a long-tail maximum.
+
+Match both observations by exact native statement identity and the applicable generation/epoch. Reject or mark PARTIAL if a counter decreases, a reset/restart marker changes, SQL Server plan generation or cache identity changes, a PostgreSQL stats epoch changes, a MySQL digest disappears/visibility becomes incomplete, or an Oracle child/load/instance key changes. Do not treat a disappeared row as zero executions. If a source cannot expose a reliable epoch, state that silent reset cannot be ruled out and either suppress the delta or label its limitation explicitly; do not pretend monotonicity proves no reset. No state is persisted between invocations and no long-term trend is claimed.
+
+Sampling itself has cost: keep one targeted bounded query per sample, deterministic Top-N ordering at the database, timeout and max_rows, no full SQL text unless needed, and no automatic retry or multi-instance scan. Initial 3-second interval / 100-row / 3-second query / 12-second delta-stage / 25-second command figures elsewhere in this document remain proposals only; they require an approved task and lab measurement, not production defaults.
+
+### 15.4 Least privilege, degraded capability, and risk controls
+
+- Reuse the existing per-database monitor identity and preflight framework. Any new view/DMV/extension permission must be listed in `dba/permissions.py` and matched to version-specific Profile, Registry, preflight behavior, and consistency tests in one implementation task.
+- SQL Server query-stat access should use the least applicable server performance-state permission for the exact engine version; legacy 2008 R2+ routing must be verified rather than inheriting a modern blanket rule. Do not solve visibility with sysadmin, CONTROL SERVER or an unrelated broad permission.
+- PostgreSQL optional query statistics are unavailable unless server preload and database view setup already exist. Report `NOT_CONFIGURED` separately from `PERMISSION_MISSING`; do not change server/database configuration. Query text/queryid visibility is a separate permission fact from aggregate statistics visibility.
+- MySQL inspect only relevant Performance Schema consumer/instrument, lost-digest and visibility facts using reviewed read-only paths. Disabled collection is `NOT_CONFIGURED`/`PARTIAL`, not an empty Top-N; never modify setup tables in Toolkit.
+- Oracle use direct minimum SELECT on the exact approved V$ object(s); add GV$ only if RAC support is separately in scope. If a view/column is absent, denied, licensed, or outside the validated version family, show that capability as unsupported/unavailable; never substitute AWR/ASH or paid-pack APIs silently.
+- For every engine, permission denial, field mismatch, timeout, truncation, empty-but-unprovable source, reset/eviction, absent SQL text, ambiguous identity, and unavailable optional source remain distinct Collection Quality states. Preserve other successful metrics independently.
+- Production risk: a fleet-wide/high-cardinality cache scan, broad text retrieval, expensive digest ordering, unbounded SQL text, or frequent delta collection can itself add load and expose sensitive SQL. First implementation remains user-selected instance, explicit command, low bounded Top-N, serial, timeout-limited, offline and read-only. It creates no object, does not re-execute business SQL, has no background sampling and no automatic tuning/termination.
+
+### 15.5 Minimal output and staged tasks
+
+CLI should show the requested metric, top candidates, scope, semantics/window, quality and one-line limitation—not dump collector payloads. JSON carries the complete typed contract and native identities. Offline HTML adds per-metric tables, source/permission/completeness badges, window/reset caveats and redacted/truncated representative SQL; it remains self-contained with existing report budgets. Separate lists per metric are preferable to one composite score. Current-request evidence and cumulative/digest/child rankings remain separate sections.
+
+The dependency plan, authoritative task states and acceptance criteria are in Backlog. The sequence is: shared contract fixtures first (`V091-P2-TOPSQL-CONTRACT-001`); four independent engine tasks, none selected as first by this design (`V091-P2-TOPSQL-SQLSERVER-001`, `V091-P2-TOPSQL-POSTGRESQL-001`, `V091-P2-TOPSQL-MYSQL-001`, `V091-P2-TOPSQL-ORACLE-001`); opt-in interval-delta follow-up only after one cumulative source verifies (`V091-P2-TOPSQL-DELTA-001`). Every engine remains separately target/profile/implemented/E2E-verified; MongoDB and Redis are outside Phase 2 scope.
+
+### 15.6 Primary technical references
+
+- Microsoft Learn: [sys.dm_exec_query_stats](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-exec-query-stats-transact-sql?view=sql-server-ver16) documents cached-plan row lifetime, completed-query scope, execution count, worker time, physical and logical reads; [sys.dm_exec_requests](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-exec-requests-transact-sql?view=sql-server-ver16) documents current request CPU and elapsed units.
+- PostgreSQL 14: [pg_stat_statements](https://www.postgresql.org/docs/14/pgstatstatements.html) documents preload/extension prerequisites, per-database/user/queryid rows, calls, timing, rows, block counters, and SQL text/queryid visibility; PostgreSQL 16 [cumulative statistics](https://www.postgresql.org/docs/16/monitoring-stats.html) distinguishes current activity from cumulative and database-wide counters/reset behavior.
+- MySQL 8.4: [statement summary tables](https://dev.mysql.com/doc/refman/8.4/en/performance-schema-statement-summary-tables.html), [statement digests and sampling](https://dev.mysql.com/doc/refman/8.4/en/performance-schema-statement-digests.html), and [current statement events](https://dev.mysql.com/doc/refman/8.4/en/performance-schema-events-statements-current-table.html) document digest aggregation, bounded table/catch-all and sample SQL behavior, timer semantics, and current-vs-summary sources.
+- Oracle 26ai: [V$SQL](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/V-SQL.html) documents one row per child, cursor-lifetime executions/statistics, SQL_ID/CHILD_NUMBER/PLAN_HASH_VALUE, CPU/elapsed units and update timing.
+
+### 16. Shared contract implementation result (2026-10-21)
+
+`V091-P2-TOPSQL-CONTRACT-001` implements the preceding collector-neutral contract in `dba/top_sql.py` and optional shared CLI/JSON/HTML presentation hooks. Native SQL, plan and active-request identities remain separate; metric value status preserves numeric zero versus null/unavailable; collection completeness is independent of data visibility; ranking is guarded by declared direction and comparability metadata. The human report only includes allow-listed native identity fields and bounded ranked rows, never SQL text. Fixture/automation evidence is recorded in Acceptance §15. No engine Collector, Registry SQL, Adapter, database connection, or live E2E is part of this result. The first engine remains for user selection.
+
+### 17. SQL Server cache-resident Top SQL implementation (2026-10-21)
+
+`V091-P2-TOPSQL-SQLSERVER-001` adds a reviewed, bounded `top_sql` Registry query and a SQL Server profile/permission route. The query ranks `sys.dm_exec_query_stats` on the server, resolves the statement's database context through `sys.dm_exec_sql_text`, and returns one row per cached statement/compiled plan with SQL handle, statement offsets, query/plan hashes when supplied, plan generation, cumulative worker/elapsed time, logical/physical read counts, and execution count. It does not retrieve Showplan XML or return SQL text. All seven supported rankings are selected through bound parameters; Top N is 1–100 and rows/timeout are bounded by Registry and adapter settings. No captured SQL is executed and current `sys.dm_exec_requests` values are not mixed into cumulative ranking.
+
+The routed families are SQL Server 2008 R2 through 2022; the query intentionally avoids later-only DMV columns. SQL Server 2025 has an explicit `UNKNOWN` route and is not executable until its profile is reviewed. Permission routes use `VIEW SERVER STATE` through 2019 and `VIEW SERVER PERFORMANCE STATE` for 2022+, with no broad fallback grant. Worker/elapsed time are nominally microseconds but have millisecond accuracy; physical-read counters are not operating-system device I/O. Counters are scoped to cached plan/statement lifetime and may reset at recompile, cache eviction or restart. These limitations are exposed in the result. The product-facing command is `dba diagnose <database_id> top-sql --metric <metric> --top <1-100>`; SQL text is intentionally omitted from console, JSON and HTML output.
+
+Automation validates route/permission shape, legacy field compatibility, bound metric/Top-N parameters, per-statement native identity, units, average values, incomplete text/identity, truncation, empty cache and shared CLI/JSON/HTML rendering. Live SQL Server 2022 E2E remains pending when the approved local lab cannot be identity-checked/reached; see Acceptance §17. No older-version E2E is implied.

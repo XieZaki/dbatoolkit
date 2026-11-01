@@ -1,5 +1,9 @@
 # V0.9.1 Architecture: Version-Aware Diagnostic Profiles
 
+> **Superseded authorization design:** This document records the earlier Permission Registry
+> architecture. Current deployment grants are documented in [`../DATABASE_PERMISSIONS.md`](../DATABASE_PERMISSIONS.md);
+> runtime feature-grant calculation and GRANT/REVOKE generation are not implemented.
+
 **Status: APPROVED FOR IMPLEMENTATION**
 
 **Baseline:** DBA Toolkit v0.9.0

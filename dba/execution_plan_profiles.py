@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from dba.core import DatabaseType
-from dba.permissions import requirements_for_profile
 from dba.versioning import ProfileBinding
 
 
@@ -58,7 +57,7 @@ def parser_contract(contract_id: str) -> ExecutionPlanParserContract:
 def validate_plan_binding(binding: ProfileBinding) -> tuple[str, ...]:
     errors: list[str] = []
     if binding.support_state.value != "SUPPORTED" and not any((
-        binding.sql_profile_id, binding.permission_profile_id, binding.parser_contract_id
+        binding.sql_profile_id, binding.parser_contract_id
     )):
         return ()
     sql_profile = PLAN_SQL_PROFILES.get(binding.sql_profile_id)
@@ -71,20 +70,14 @@ def validate_plan_binding(binding: ProfileBinding) -> tuple[str, ...]:
         errors.append(f"execution-plan profile family mismatch: {binding.sql_profile_id}")
     if binding.parser_contract_id not in PLAN_PARSER_CONTRACTS:
         errors.append(f"unknown execution-plan parser contract: {binding.parser_contract_id}")
-    try:
-        permissions = requirements_for_profile(binding.permission_profile_id)
-    except ValueError:
-        errors.append(f"missing execution-plan permission profile: {binding.permission_profile_id}")
-    else:
-        if permissions.required != binding.required_privileges:
-            errors.append(f"execution-plan permission contract mismatch: {binding.version_family}")
     return tuple(errors)
 
 
 def validate_plan_profiles(registry: Any, bindings: tuple[ProfileBinding, ...]) -> tuple[str, ...]:
     """Validate every supported Plan route against reviewed Registry metadata."""
     errors: list[str] = []
-    plan_bindings = [binding for binding in bindings if binding.feature == "plan"]
+    plan_bindings = [binding for binding in bindings
+                     if binding.feature == "plan" and binding.db_type == DatabaseType.SQLSERVER]
     expected = {
         (DatabaseType.SQLSERVER, family)
         for family in ("2008r2", "2012", "2014", "2016", "2017", "2019", "2022")

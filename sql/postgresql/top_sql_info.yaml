@@ -1,0 +1,16 @@
+name: top_sql_info
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: Read only pg_stat_statements reset epoch and deallocation counters.
+feature: top-sql
+version_families:
+  - '14'
+  - '15'
+  - '16'
+  - '17'
+  - '18'
+runtime_variants:
+  - default

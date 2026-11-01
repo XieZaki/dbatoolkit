@@ -1,0 +1,3 @@
+SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'CON_ID')) AS con_id,
+       SYS_CONTEXT('USERENV', 'CON_NAME') AS con_name
+FROM dual

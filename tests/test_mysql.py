@@ -23,7 +23,6 @@ from dba.mysql_collectors import (
 )
 from dba.mysql_slow import build_slow_report
 from dba.mysql_slow_reporter import render_console, render_markdown
-from dba.permissions import PermissionStatus, requirements_for
 from dba.registry import SqlScriptRegistry
 from dba.settings import MySQLSettings
 
@@ -204,13 +203,6 @@ def test_mysql57_preflight_does_not_execute_mysql80_role_function() -> None:
     with target:
         assert target.get_server_version() == "5.7.44-log"
         assert "preflight_roles" not in driver.connection.executed
-        assert target.preflight_checks["permission_replication"]
-
-
-def test_mysql_disk_growth_monitoring_grants_are_optional_in_preflight_contract() -> None:
-    requirements = requirements_for(DatabaseType.MYSQL, "disk-growth", "8.4.11")
-    assert requirements.required == ()
-    assert requirements.optional == ("PROCESS", "REPLICATION CLIENT", "SELECT performance_schema")
 
 
 def test_mysql80_preflight_fails_closed_when_active_roles_cannot_be_read() -> None:
@@ -332,26 +324,22 @@ def test_preflight_fail_closed(field: str, value: Any, error: str) -> None:
     assert driver.connection.closed
 
 
-def test_newer_mysql_version_requires_same_capability_probes() -> None:
+def test_newer_mysql_version_runs_only_identity_and_account_safety_preflight() -> None:
     target, driver = adapter()
     driver.connection.results["preflight"] = [{**PREFLIGHT, "server_version": "8.4.0"}]
     target.connect()
     assert target.get_server_version() == "8.4.0"
-    assert "blocking" in driver.connection.executed
+    assert driver.connection.executed == ["preflight", "preflight_roles", "monitor_grants"]
 
 
 @pytest.mark.regression
-def test_global_select_is_non_privileged_but_permission_readiness_is_missing() -> None:
+def test_global_select_is_not_an_administrative_grant() -> None:
     target, driver = adapter()
     driver.connection.results["monitor_grants"] = [{
         "Grants": "GRANT SELECT ON *.* TO `toolkit_monitor`@`%`"
     }]
     target.connect()
     assert target.privilege_classification["classification"] == "NON_PRIVILEGED"
-    assert target.permission_observations == {
-        "GRANT SELECT ON *.* TO `toolkit_monitor`@`%`"
-    }
-    assert not target.preflight_checks["permission_slow"]
     target.disconnect()
 
 
@@ -371,7 +359,7 @@ def test_mysql_high_risk_grant_reports_trigger(grant: str) -> None:
     assert driver.connection.closed
 
 
-def test_missing_slow_permission_returns_exact_identity_reference_grant(
+def test_check_reports_account_security_without_per_feature_permission_matrix(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     inventory = tmp_path / "inventory.yaml"
@@ -386,72 +374,12 @@ def test_missing_slow_permission_returns_exact_identity_reference_grant(
     driver.connection.results["monitor_grants"] = [{
         "Grants": "GRANT SELECT ON *.* TO `dba_monitor`@`%`"
     }]
-    code = main(["--inventory", str(inventory), "diagnose", "mysql84", "slow", "--json"],
+    code = main(["--inventory", str(inventory), "check", "mysql84", "--json"],
                 provider=MemoryCredentialProvider(), driver=driver)
     payload = json.loads(capsys.readouterr().out)
-    assert code == 1
-    assert payload["permission_readiness"]["account_security"]["classification"] == "NON_PRIVILEGED"
-    assert payload["permission_readiness"]["status"] == "MISSING"
-    assert payload["permission_readiness"]["missing_required"] == ["PROCESS"]
-    assert "GRANT PROCESS ON *.* TO 'dba_monitor'@'%';" in payload["permission_readiness"]["suggested_grant"]
-    assert "GRANT SELECT ON `performance_schema`.*" not in payload["permission_readiness"]["suggested_grant"]
-    assert payload["permission_readiness"]["toolkit_executed"] is False
-    assert payload["permission_readiness"]["dba_approval_required"] is True
-    assert not any(name in {"grant", "revoke", "create_user", "alter_user"}
-                   for name in driver.connection.executed)
-
-
-def test_check_keeps_account_security_and_permission_readiness_separate(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    inventory = tmp_path / "inventory.yaml"
-    inventory.write_text(yaml.safe_dump({"databases": [{
-        "id": "mysql84", "name": "MySQL", "db_type": "mysql",
-        "host": "127.0.0.1", "port": 3306, "database": "app",
-        "credential_alias": "mysql-monitor", "enabled": True,
-        "environment": "test", "version_family": "8.0",
-    }]}), encoding="utf-8")
-    driver = FakeDriver()
-    driver.connection.results["preflight"] = [{**PREFLIGHT, "monitor_user": "dba_monitor@%"}]
-    driver.connection.results["monitor_grants"] = [{
-        "Grants": "GRANT SELECT ON *.* TO `dba_monitor`@`%`"
-    }]
-    code = main(["--inventory", str(inventory), "check", "mysql84"],
-                provider=MemoryCredentialProvider(), driver=driver)
-    rendered = capsys.readouterr().out
-    assert code == 1
-    assert "Connection" in rendered and "READY" in rendered
-    assert "Account Security" in rendered and "NON_PRIVILEGED" in rendered
-    assert "Permission Readiness" in rendered and "slow" in rendered
-    assert "MISSING" in rendered and "PROCESS" in rendered
-
-
-def test_permissions_slow_uses_atomic_version_profile(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    inventory = tmp_path / "inventory.yaml"
-    inventory.write_text(yaml.safe_dump({"databases": [{
-        "id": "mysql80", "name": "MySQL 8", "db_type": "mysql",
-        "host": "127.0.0.1", "port": 3306, "database": "app",
-        "credential_alias": "mysql-monitor", "enabled": True,
-        "environment": "test", "version_family": "8.0",
-    }]}), encoding="utf-8")
-    driver = FakeDriver()
-    driver.connection.results["preflight"] = [{**PREFLIGHT, "monitor_user": "dba_monitor@%"}]
-    driver.connection.results["monitor_grants"] = [{
-        "Grants": "GRANT SELECT ON *.* TO `dba_monitor`@`%`"
-    }]
-    code = main(["--inventory", str(inventory), "permissions", "mysql80",
-                 "--feature", "slow", "--json"],
-                provider=MemoryCredentialProvider(), driver=driver)
-    payload = json.loads(capsys.readouterr().out)
-    slow = next(row for row in payload["features"] if row["feature"] == "slow")
-    assert code == 0
-    assert slow["status"] == "MISSING"
-    assert slow["required_privileges"] == ["PROCESS", "SELECT performance_schema"]
-    assert slow["version_profile"]["sql_profile_id"] == "mysql80_slow"
-    assert slow["version_profile"]["permission_profile_id"] == "mysql80_slow"
-    assert slow["version_profile"]["parser_contract_id"] == "mysql_slow"
+    assert code == 0 and payload["success"] is True
+    assert payload["connection"]["status"] == "CONNECTED"
+    assert payload["account_security"]["classification"] == "NON_PRIVILEGED"
 
 
 def test_failed_show_grants_preserves_sanitized_vendor_error() -> None:
@@ -472,10 +400,15 @@ def test_missing_monitoring_view_connection_and_query_timeout(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     target, driver = adapter()
-    driver.connection.failures["blocking"] = PermissionError(PASSWORD)
+    driver.connection.failures["active_requests"] = Exception(
+        1142, f"SELECT command denied; PWD={PASSWORD}"
+    )
     target.connect()
-    assert not target.preflight_checks["blocking"]
-    assert "GRANT SELECT ON `performance_schema`.* TO `toolkit_monitor`@`%`" in target.permission_observations
+    denied = ActiveRequestsCollector(target).collect(INSTANCE)
+    assert denied.error_type == "QueryDenied"
+    assert "docs/DATABASE_PERMISSIONS.md" in (denied.error_message or "")
+    assert denied.database_error is not None
+    assert denied.database_error.get("classification") == "ACCESS_DENIED"
     target.disconnect()
     assert PASSWORD not in capsys.readouterr().err
     second, driver2 = adapter()
@@ -564,34 +497,35 @@ def test_metadata_and_replication_queries_use_buffered_cursor_and_read_all_rows(
     ]
     target, _ = adapter(driver)
     target.connect()
-    assert any("REPLICATION CLIENT" in item for item in target.permission_observations)
-    assert target.preflight_checks["permission_replication"]
     cursor_classes = {cursor.script_name: cursor.cursor_class
                       for cursor in driver.connection.cursors}
-    for name in ("preflight", "monitor_grants", "server_info"):
+    for name in ("preflight", "preflight_roles", "monitor_grants"):
         assert cursor_classes[name] is None
+    assert "server_info" not in cursor_classes
     grants = target._run(target.registry.get("monitor_grants", DatabaseType.MYSQL))
+    server = target.execute_readonly(target.registry.get("server_info", DatabaseType.MYSQL))
     status = target.execute_readonly(target.registry.get("replication_status", DatabaseType.MYSQL))
     assert grants.row_count == 2
+    assert server.success
     assert status.success and status.row_count == 0
     assert driver.connection.cursor_classes[-2:] == [None, None]
     assert all(cursor.closed for cursor in driver.connection.cursors)
 
 
-def test_missing_replication_permission_has_structured_preflight_guidance() -> None:
-    target, _ = adapter()
+def test_replication_query_access_denial_preserves_vendor_error_and_guide_pointer() -> None:
+    target, driver = adapter()
     target.connect()
-    target._ready = False
-    with pytest.raises(ToolkitError) as exc_info:
-        target.execute_readonly(target.registry.get("replication_status", DatabaseType.MYSQL))
-    error = exc_info.value
-    assert error.error_type == "MissingPermission"
-    assert error.permission_readiness is not None
-    assert error.permission_readiness["feature"] == "replication"
-    assert error.permission_readiness["status"] == PermissionStatus.MISSING
-    assert error.permission_readiness["missing_required"] == ("REPLICATION CLIENT",)
-    assert "GRANT REPLICATION CLIENT ON *.*" in str(error.permission_readiness["suggested_grant"])
-    assert error.permission_readiness["toolkit_executed"] is False
+    driver.connection.failures["replication_status"] = Exception(
+        1142, f"SHOW command denied to user; PWD={PASSWORD}"
+    )
+    result = target.execute_readonly(target.registry.get("replication_status", DatabaseType.MYSQL))
+    assert result.error_type == "QueryDenied"
+    assert "SHOW command denied" in (result.error_message or "")
+    assert "docs/DATABASE_PERMISSIONS.md" in (result.error_message or "")
+    assert result.database_error is not None
+    assert result.database_error.get("classification") == "ACCESS_DENIED"
+    assert PASSWORD not in repr(result.database_error)
+    target.disconnect()
 
 
 @pytest.mark.regression
@@ -610,7 +544,7 @@ def test_streaming_cursor_is_closed_before_connection_on_truncation() -> None:
 
 
 @pytest.mark.regression
-def test_permission_query_failure_closes_cursor_before_connection() -> None:
+def test_account_grant_inspection_failure_closes_cursor_before_connection() -> None:
     driver = FakeDriver()
     target, _ = adapter(driver)
     target.connect()
@@ -871,19 +805,6 @@ def test_replication_cli_explains_missing_replication_client_without_traceback(
     common = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql")]
     provider = MemoryCredentialProvider()
 
-    permission_driver = FakeDriver()
-    permission_driver.connection.results["version_detect"] = [{"raw_version": "8.4.1"}]
-    permission_driver.connection.results["monitor_grants"] = [{
-        "Grants": "GRANT SELECT ON *.* TO `toolkit_monitor`@`%`"
-    }]
-    assert main([*common, "permissions", "my", "--feature", "replication"],
-                provider=provider, driver=permission_driver) == 0
-    permission_output = capsys.readouterr()
-    assert "replication" in permission_output.out
-    assert "MISSING" in permission_output.out
-    assert "REPLICATION CLIENT" in permission_output.out
-    assert not permission_output.err
-
     diagnostic_driver = FakeDriver()
     diagnostic_driver.connection.results["version_detect"] = [{"raw_version": "8.4.1"}]
     diagnostic_driver.connection.results["monitor_grants"] = [{
@@ -896,9 +817,7 @@ def test_replication_cli_explains_missing_replication_client_without_traceback(
     assert main([*common, "diagnose", "my", "replication", "--report", str(report)],
                 provider=provider, driver=diagnostic_driver) == 1
     diagnostic_output = capsys.readouterr()
-    assert "MISSING_PERMISSION" in diagnostic_output.out
     assert "SHOW command denied" in diagnostic_output.out
-    assert "REPLICATION CLIENT" in diagnostic_output.out
-    assert "Toolkit Executed  NO" in diagnostic_output.out
+    assert "docs/DATABASE_PERMISSIONS.md" in diagnostic_output.out
     assert not diagnostic_output.err
     assert report.exists()

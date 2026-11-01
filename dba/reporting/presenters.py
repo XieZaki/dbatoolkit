@@ -7,9 +7,11 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable
 
+from dba.active_sql_report import active_sql_sections
 from dba.core import DiagnosticReport
 from dba.incident import IncidentSummary
 from dba.logging import redact
+from dba.memory_grant_report import memory_grant_sections
 from dba.reporting.model import (
     DEFAULT_HUMAN_REPORT_POLICY,
     HumanReportPolicy,
@@ -130,7 +132,7 @@ def _first(row: dict[str, Any], *keys: str) -> Any:
 
 
 def _fixed_table(rows: list[dict[str, Any]], columns: tuple[tuple[str, tuple[str, ...], Callable[[Any], str]], ...]
-                 ) -> ReportTable | None:
+                 , row_states: tuple[str, ...] = ()) -> ReportTable | None:
     if not rows:
         return None
     visible = [(label, keys, formatter) for label, keys, formatter in columns
@@ -138,12 +140,13 @@ def _fixed_table(rows: list[dict[str, Any]], columns: tuple[tuple[str, tuple[str
     if not visible:
         return None
     return ReportTable(tuple(label for label, _, _ in visible), tuple(
-        tuple(formatter(_first(row, *keys)) for _, keys, formatter in visible) for row in rows))
+        tuple(formatter(_first(row, *keys)) for _, keys, formatter in visible) for row in rows),
+        row_states=row_states)
 
 
 def _table(rows: list[dict[str, Any]], columns: tuple[tuple[str, tuple[str, ...]], ...]
-           ) -> ReportTable | None:
-    return _fixed_table(rows, tuple((label, keys, _human) for label, keys in columns))
+           , row_states: tuple[str, ...] = ()) -> ReportTable | None:
+    return _fixed_table(rows, tuple((label, keys, _human) for label, keys in columns), row_states)
 
 
 def _omitted(total: int, displayed: int, noun: str) -> str:
@@ -152,6 +155,70 @@ def _omitted(total: int, displayed: int, noun: str) -> str:
     if omitted:
         text += f" 人工报告省略其余{noun}；结构化数据请使用 --json。"
     return text
+
+
+def _top_sql_section(value: Any) -> ReportSection | None:
+    """Map a shared Top SQL contract to a bounded human section without SQL text."""
+    if hasattr(value, "to_dict"):
+        value = value.to_dict()
+    if not isinstance(value, dict):
+        return None
+    metadata = ("collection_status", "completeness", "data_visibility",
+                "database_engine", "database_version", "profile_id", "collection_timestamp",
+                "ranking_metric", "ranking_direction", "metric_name", "metric_unit",
+                "metric_semantics", "metric_scope", "collection_scope", "evidence_source", "limitations",
+                "source_metadata")
+    fields = tuple((_label(key), _human(value.get(key))[:256])
+                   for key in metadata if value.get(key) is not None)
+    raw_items: list[Any] = value.get("items", [])
+    if not isinstance(raw_items, list):
+        raw_items = []
+    rows: list[tuple[str, ...]] = []
+    for item in raw_items[:10]:
+        if not isinstance(item, dict) or item.get("rank") is None:
+            continue
+        identity = item.get("sql_identity")
+        if isinstance(identity, dict):
+            native_fields = identity.get("fields", {})
+            if not isinstance(native_fields, dict):
+                native_fields = {}
+            # Only native identity fields are rendered; SQL text and arbitrary payload keys are excluded.
+            native_keys = {"sql_handle", "plan_handle", "query_hash", "query_plan_hash",
+                           "statement_start_offset", "statement_end_offset", "database_id",
+                           "plan_generation_num", "queryid", "dbid", "userid", "pid",
+                           "backend_start", "digest", "toplevel", "schema_name",
+                           "processlist_id", "thread_id", "sql_id", "child_number",
+                           "inst_id", "plan_hash_value"}
+            is_oracle = identity.get("database_engine") == "oracle"
+            if is_oracle:
+                native_keys.add("con_id")
+            native = ", ".join(f"{key}={_human(val)[:100]}" for key, val in native_fields.items()
+                                if key in native_keys)
+            if is_oracle:
+                plan_identity = item.get("plan_identity")
+                plan_fields = (plan_identity.get("fields", {})
+                               if isinstance(plan_identity, dict)
+                               and plan_identity.get("database_engine") == "oracle"
+                               and plan_identity.get("kind") == "PLAN" else {})
+                if not isinstance(plan_fields, dict):
+                    plan_fields = {}
+                plan_hash = plan_fields.get("plan_hash_value")
+                if type(plan_hash) is not int or plan_hash <= 0:
+                    plan_hash = None
+                native += f"{', ' if native else ''}plan_hash_value={_human(plan_hash)}"
+            identity_text = f"{identity.get('database_engine', 'UNKNOWN')}:{native or 'identity unavailable'}"[:256]
+        else:
+            identity_text = "identity unavailable"
+        rows.append((str(item.get("rank")), identity_text, _human(item.get("metric_value"))))
+    table = ReportTable(("Rank", "SQL identity", "Metric value"), tuple(rows)) if rows else None
+    if value.get("collection_status") == "COLLECTED" and not raw_items:
+        summary = "已完成采集，但没有匹配记录；不生成虚假排名。"
+    elif not rows:
+        summary = "当前没有可用的已排名 Top SQL 记录；状态和限制见契约字段。"
+    else:
+        summary = _omitted(len(raw_items), len(rows), "Top SQL rows")
+    return ReportSection("top-sql", "Top SQL", summary=summary, fields=fields,
+                         tables=(table,) if table else ())
 
 
 def _sql_block(row: dict[str, Any], policy: HumanReportPolicy, label: str = "SQL") -> ReportCodeBlock | None:
@@ -238,20 +305,63 @@ def _blocking_sections(roots: list[Any], children: dict[str, list[Any]],
                                    ("Indirectly Affected", ("indirect",)),
                                    ("Direct Blocked", ("direct",)),
                                    ("Maximum Depth", ("depth",)),
-                                   ("Longest Block", ("longest",))))
+                                   ("Longest Block", ("longest",))),
+                        row_states=tuple("blocked" for _ in root_rows))
     summaries = [ReportSection(
         "root-blockers", "Root Blockers",
         summary=_omitted(len(roots), len(root_rows), "root blockers"),
         tables=(root_table,) if root_table else ())]
+    tree_states = tuple("partial" if row["role"] == "Display summary" and
+                        "省略" in str(row.get("elapsed", "")) else "blocked"
+                        for row in tree_rows)
     tree_table = _table(tree_rows, (("Root", ("root",)), ("Session", ("session",)),
                                    ("Role", ("role",)), ("Direct Blocker", ("parent",)),
                                    ("Wait", ("wait",)), ("Wait Resource", ("wait_resource",)),
-                                   ("Elapsed", ("elapsed",)), ("Login", ("login",))))
+                                   ("Elapsed", ("elapsed",)), ("Login", ("login",))),
+                        row_states=tree_states)
     tree = ReportSection("blocking", "Blocking Analysis",
                          summary="当前有界采样观察到的阻塞关系；直接与间接受影响会话分别计数。"
                          if tree_table else "当前采样未观察到阻塞关系。",
                          tables=(tree_table,) if tree_table else ())
     return summaries + [tree], related
+
+
+def _collector_complete(details: dict[str, Any], collector_name: str) -> bool:
+    if collector_name in details.get("required_unavailable", []) or \
+            collector_name in details.get("optional_unavailable", []):
+        return False
+    samples = details.get("samples", [])
+    if not isinstance(samples, list):
+        return False
+    matches = [sample for sample in samples if isinstance(sample, dict) and
+               str(sample.get("collector", sample.get("source", ""))) == collector_name]
+    return bool(matches) and all(sample.get("success", True) and not sample.get("truncated", False)
+                                 for sample in matches)
+
+
+def _blocking_state(report: DiagnosticReport, details: dict[str, Any]) -> tuple[bool, set[str]]:
+    """Return whether a clear state can be asserted and IDs proven in the blocking graph."""
+    blocking_collector = "active_requests" if report.instance.db_type.value == "sqlserver" else "blocking"
+    complete = (_collector_complete(details, blocking_collector) and
+                _collector_complete(details, "active_sessions"))
+    graph_value = details.get("blocking_graph")
+    if not isinstance(graph_value, dict):
+        return False, set()
+    roots = graph_value.get("roots")
+    children = graph_value.get("children")
+    anomalies = graph_value.get("anomalies", [])
+    unresolved = graph_value.get("unresolved", [])
+    if (not isinstance(roots, list) or not isinstance(children, dict) or anomalies or unresolved or
+            details.get("blocking_graph_reliable") is False):
+        complete = False
+        roots = roots if isinstance(roots, list) else []
+        children = children if isinstance(children, dict) else {}
+    blocked = {str(root) for root in roots}
+    for parent, descendants in children.items():
+        if isinstance(descendants, list):
+            blocked.add(str(parent))
+            blocked.update(str(child) for child in descendants)
+    return complete, blocked
 
 
 def _long_running_rows(report: DiagnosticReport, details: dict[str, Any]) -> list[dict[str, Any]]:
@@ -294,6 +404,7 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
     session_by_id = {(_session_id(row) or ""): row for row in sessions_list}
     request_by_id = {(_session_id(row) or ""): row for row in requests_list}
     sections, related = _blocking_sections(roots, children, session_by_id, request_by_id, policy)
+    blocking_complete, blocking_participants = _blocking_state(report, details)
     roles = _role_map(roots, children)
     long_by_id = {(_session_id(row) or ""): row for row in long_rows}
     for sid in long_by_id:
@@ -323,16 +434,41 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                                         _first(request, "program_name", "application_name", "program"),
                              "client_ip": _first(session, "client_net_address", "client_addr", "client_ip") or
                                           _first(request, "client_net_address", "client_addr", "client_ip"),
-                             "open_txn": _first(session, "open_transaction_count", "open_tran")})
+                             "open_txn": _first(session, "open_transaction_count", "open_tran"),
+                             "mysql_processlist_id": _first(session, "processlist_id", "session_id") or
+                                                     _first(request, "processlist_id", "session_id"),
+                             "mysql_thread_id": _first(session, "thread_id", "performance_schema_thread_id") or
+                                                _first(request, "thread_id", "performance_schema_thread_id"),
+                             "oracle_inst_id": _first(session, "inst_id") or _first(request, "inst_id"),
+                             "oracle_sid": _first(session, "sid") or _first(request, "sid"),
+                             "oracle_serial": _first(session, "serial_number", "serial_num", "serial#") or
+                                              _first(request, "serial_number", "serial_num", "serial#"),
+                             "postgresql_pid": _first(session, "pid", "process_id") or
+                                               _first(request, "pid", "process_id")})
     related_total = len(related_rows)
     related_rows = related_rows[:policy.max_related_sessions]
     identity_columns: tuple[tuple[str, tuple[str, ...]], ...] = (("Session", ("session",)), ("Role", ("role",)),
                         ("Database", ("database",)), ("Status", ("status",)),
                         ("Login", ("login",)), ("Host", ("host",)),
                         ("Program", ("program",)), ("Client IP", ("client_ip",)))
+    if report.instance.db_type.value == "mysql":
+        identity_columns += (("MySQL PROCESSLIST_ID", ("mysql_processlist_id",)),
+                             ("Performance Schema THREAD_ID", ("mysql_thread_id",)))
+    elif report.instance.db_type.value == "postgresql":
+        identity_columns += (("PostgreSQL PID", ("postgresql_pid",)),)
+    elif report.instance.db_type.value == "oracle":
+        identity_columns += (("Oracle INST_ID", ("oracle_inst_id",)),
+                             ("Oracle SID", ("oracle_sid",)),
+                             ("Oracle SERIAL#", ("oracle_serial",)))
     if report.instance.db_type.value == "sqlserver":
         identity_columns += (("Session Open Transaction Count", ("open_txn",)),)
-    identity_table = _table(related_rows, identity_columns)
+    identity_states = tuple(
+        "blocked" if str(row["session"]) in blocking_participants else
+        "partial" if (not blocking_complete or
+                      (str(row["session"]) not in session_by_id and
+                       str(row["session"]) not in request_by_id)) else "clear"
+        for row in related_rows)
+    identity_table = _table(related_rows, identity_columns, identity_states)
     identity_summary = ("PostgreSQL 会话身份来自 pg_stat_activity 采样；backend_start 和 xact_start 用于人工复核。"
                         if report.instance.db_type.value == "postgresql" else
                         "Oracle 会话身份按 INST_ID/SID 区分；事务关联依据会话地址及 SERIAL#/LOGON_TIME 交叉核验。"
@@ -376,7 +512,11 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
         runtime_columns.extend([("Wait Resource", ("wait_resource",)), ("CPU", ("cpu",)),
                                 ("Logical Reads", ("logical_reads",)), ("Reads", ("reads",)),
                                 ("Writes", ("writes",))])
-    runtime_table = _table(runtime_rows, tuple(runtime_columns))
+    runtime_states = tuple(
+        "blocked" if str(row["session"]) in blocking_participants else
+        "clear" if blocking_complete and str(row["session"]) in request_by_id else "partial"
+        for row in runtime_rows)
+    runtime_table = _table(runtime_rows, tuple(runtime_columns), runtime_states)
     if runtime_table:
         runtime_summary = ("MySQL Performance Schema 提供当前语句耗时和可见等待事件；等待 consumer 未启用时等待详情不可用。"
                            if report.instance.db_type.value == "mysql" else
@@ -385,10 +525,14 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                            "Oracle V$SESSION/V$SQL 当前 SQL 与等待信息；耗时为本次执行时长，V$SQL 资源计数在本报告中不投影。"
                            if report.instance.db_type.value == "oracle" else
                            "CPU、logical reads、reads、writes 为 DMV 当前累计值；单次采样为零不代表历史没有资源消耗。")
+        current_sql = tuple(
+            block for sid in sorted(related, key=session_order)
+            if (current_request := request_by_id.get(sid)) is not None
+            if (block := _sql_block(current_request, policy, "Current SQL")) is not None)
         sections.append(ReportSection(
             "request-runtime", "Request Runtime",
             summary=runtime_summary,
-            tables=(runtime_table,)))
+            tables=(runtime_table,), code_blocks=current_sql))
 
     root_ids = {str(item) for item in roots}
     blocked_ids = {str(child) for values in children.values() for child in values}
@@ -462,13 +606,19 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                          else "WAITFOR 等待事件；SQL 文本不可用，语义需复核" if
                          str(row.get("wait_type", "")).upper() == "WAITFOR" else None),
                      "database": _first(row, "database_name", "datname")} for row in visible]
+            row_states = tuple(
+                "blocked" if (str(_session_id(row) or "") in blocking_participants or
+                              _first(row, "blocking_session_id", "blocking_pid", "blocking_sid")
+                              not in (None, "", 0, "0")) else
+                "clear" if blocking_complete and _session_id(row) is not None else "partial"
+                for row in visible)
             table = _table(rows, (("Session", ("session",)), ("Status", ("status",)),
                                   ("Elapsed", ("elapsed",)), ("Wait", ("wait",)),
                                   ("Wait Resource", ("wait_resource",)),
                                   ("Direct Blocker", ("blocker",)),
                                   ("Root Blocker", ("root_blocker",)),
                                   ("Observation", ("interpretation",)),
-                                  ("Database", ("database",))))
+                                  ("Database", ("database",))), row_states)
             blocks = tuple(block for row in visible
                            if (block := _sql_block(row, policy)) is not None)
             if values:
@@ -483,8 +633,13 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                   "blocker": _first(row, "blocking_session_id", "blocking_pid", "blocking_sid")}
                  for row in wait_source if _first(row, "wait_type", "wait_event", "current_wait")]
     shown_waits = wait_rows[:policy.max_wait_rows]
+    wait_states = tuple(
+        "blocked" if str(row.get("session") or "") in blocking_participants else
+        "clear" if blocking_complete and row.get("session") not in (None, "") else "partial"
+        for row in shown_waits)
     wait_table = _table(shown_waits, (("Session", ("session",)), ("Wait", ("wait",)),
-                                      ("Duration", ("duration",)), ("Blocker", ("blocker",))))
+                                      ("Duration", ("duration",)), ("Blocker", ("blocker",))),
+                        wait_states)
     if wait_rows:
         sections.append(ReportSection("wait-analysis", "Wait Analysis",
                                       summary=_omitted(len(wait_rows), len(shown_waits), "wait rows"),
@@ -498,9 +653,15 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                       "host": _first(row, "host_name", "client_hostname", "machine"),
                       "program": _first(row, "program_name", "application_name", "program")}
                      for row in unrelated[:policy.max_appendix_sessions]]
+    appendix_states = tuple(
+        "blocked" if str(row["session"]) in blocking_participants else
+        "clear" if blocking_complete and row.get("session") not in (None, "") and
+        str(row["session"]) in session_by_id else "partial"
+        for row in appendix_rows)
     appendix_table = _table(appendix_rows, (("Session", ("session",)), ("Database", ("database",)),
                                            ("Status", ("status",)), ("Login", ("login",)),
-                                           ("Host", ("host",)), ("Program", ("program",))))
+                                            ("Host", ("host",)), ("Program", ("program",))),
+                            appendix_states)
     if unrelated:
         sections.append(ReportSection("appendix", "Appendix — Other Sessions",
                                       summary=_omitted(len(unrelated), len(appendix_rows), "other sessions"),
@@ -509,7 +670,8 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
 
 
 def _transaction_section(details: dict[str, Any], database_type: str,
-                         policy: HumanReportPolicy) -> ReportSection | None:
+                         policy: HumanReportPolicy,
+                         report: DiagnosticReport) -> ReportSection | None:
     rows = _dict_rows(details.get("transactions")) or _dict_rows(details.get("idle_transactions"))
     if not rows:
         return None
@@ -535,10 +697,16 @@ def _transaction_section(details: dict[str, Any], database_type: str,
                        "state": _human(_first(row, "trx_state")) if database_type == "mysql"
                        else state})
     shown = output[:policy.max_transactions]
+    blocking_complete, blocking_participants = _blocking_state(report, details)
+    transaction_states = tuple(
+        "blocked" if row.get("session") not in (None, "") and
+        str(row.get("session")) in blocking_participants else
+        "clear" if blocking_complete and row.get("session") not in (None, "") else "partial"
+        for row in shown)
     table = _table(shown, (("Session", ("session",)), ("Transaction ID", ("transaction_id",)),
                            ("Begin Time", ("begin",)), ("Begin Time Source", ("begin_source",)),
                            ("Age", ("age",)),
-                           ("Type", ("type",)), ("State", ("state",))))
+                           ("Type", ("type",)), ("State", ("state",))), transaction_states)
     return ReportSection("transaction-analysis", "Transaction Analysis",
                          summary=_omitted(len(output), len(shown), "transactions"),
                          tables=(table,) if table else ())
@@ -613,7 +781,7 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
         status = ("MISSING_REQUIRED" if required else
                   "OPTIONAL_UNAVAILABLE" if optional else
                   "FAILED" if not success else "TRUNCATED" if truncated else "COMPLETE")
-        impact = (sample.get("error_type") or sample.get("error_message") or
+        impact = (sample.get("error_message") or sample.get("error_type") or
                   ("Collector row limit reached" if truncated else "—"))
         quality.append({"collector": name, "status": status, "impact": impact})
     sampled = {str(item.get("collector", item.get("source", "unknown")))
@@ -675,6 +843,7 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                    details: dict[str, Any], policy: HumanReportPolicy) -> list[ReportSection]:
     sections: list[ReportSection] = [_recovery_section(incident, details, report.scenario,
                                                        report.instance.db_type.value, report)]
+    blocking_complete, blocking_participants = _blocking_state(report, details)
     priority = [item for item in details.get("priority_candidates", []) if isinstance(item, dict)]
     priority_rows = [{"rank": item.get("rank"), "session": item.get("session_id"),
                       "category": _human(item.get("categories", item.get("category"))),
@@ -724,7 +893,8 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                                            ("Evidence timestamp", ("evidence_timestamp",)),
                                            ("Identity quality", ("identity_quality",)),
                                            ("Identity reuse note", ("identity_reuse_note",)),
-                                           ("Identity recheck", ("identity_recheck",))))
+                                            ("Identity recheck", ("identity_recheck",))),
+                            tuple("partial" for _ in priority_rows))
     sections.append(ReportSection("priority-candidates", "Priority Review Candidates",
                                   summary="候选仅用于人工核查，不代表 Toolkit 已验证当前会话身份或建议自动终止。",
                                   tables=(priority_table,) if priority_table else ()))
@@ -799,7 +969,8 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
             victim_columns.extend([("Status", ("status",)), ("Wait Event", ("wait_event",))])
         victim_columns.extend([("Request Runtime", ("request_runtime",)),
                                ("Wait Detail", ("wait_detail",))])
-        table = _table(victim_rows, tuple(victim_columns))
+        table = _table(victim_rows, tuple(victim_columns),
+                       tuple("blocked" for _ in victim_rows))
         sections.append(ReportSection("blocked-victims", "Blocked Victims",
                                       summary="按已采样阻塞关系单独列出受害会话，不生成终止建议。",
                                       tables=(table,) if table else ()))
@@ -819,11 +990,15 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
                       "sql": row.get("sql"),
                       "interpretation": row.get("request_interpretation")}
                      for row in active_waits]
+        wait_states = tuple(
+            "blocked" if str(row.get("session") or "") in blocking_participants else
+            "clear" if blocking_complete and row.get("session") not in (None, "") else "partial"
+            for row in wait_rows)
         table = _table(wait_rows, (("Session", ("session",)), ("Status", ("state",)),
                                    ("Request Runtime", ("runtime",)),
                                    *(((("Wait Event", ("wait",)), ("SQL", ("sql",)))
                                       if is_postgresql or is_oracle else ())),
-                                   ("Interpretation", ("interpretation",))))
+                                   ("Interpretation", ("interpretation",))), wait_states)
         sections.append(ReportSection("active-waits", "Active Wait Statements",
                                       summary=("仅对无锁阻塞且精确匹配 pg_sleep(...) 的 PostgreSQL 查询分类；SQL 来自已脱敏采样。"
                                                if is_postgresql else
@@ -872,7 +1047,7 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
             ("Duration Seconds", ("transaction_age_seconds",)),
             ("Manual Action", ("action_status",)), ("Suppression Reason", ("action_reason",)),
             ("Context Note", ("sql_note",)),
-        ))
+        ), tuple("blocked" for _ in context_rows))
         sections.append(ReportSection(
             "oracle-root-sql-context", "Oracle Root Blocker SQL Context",
             summary="上一条 SQL 仅为会话上下文，不能证明其取得了当前锁。",
@@ -888,7 +1063,7 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
             "execution-plan-follow-up", "Execution Plan Follow-up",
             summary="当前 CLI 支持按会话采集执行计划。仅当目标会话仍有可用请求、权限和版本能力满足时才可成功；执行前先重新核对会话。",
             fields=tuple(plan_commands)))
-    transaction = _transaction_section(details, report.instance.db_type.value, policy)
+    transaction = _transaction_section(details, report.instance.db_type.value, policy, report)
     if transaction:
         sections.append(transaction)
     return sections
@@ -953,7 +1128,8 @@ def _disk_growth_sections(details: dict[str, Any]) -> list[ReportSection]:
                        ("other", "Other Storage Evidence")):
         value = details.get(key)
         if isinstance(value, dict):
-            rows = [{"area": label, "value": _human(item)} for label, item in value.items()]
+            rows = [{"area": label, "value": _human(item)} for label, item in value.items()
+                    if label != "wal_retention"]
         elif isinstance(value, list):
             rows = [{"area": _human(_first(row, "area", "category", "name", "database", "file")),
                      "value": _human(_first(row, "size_mb", "size_bytes", "value", "status"))}
@@ -963,6 +1139,50 @@ def _disk_growth_sections(details: dict[str, Any]) -> list[ReportSection]:
         table = _table(rows, (("Area", ("area",)), ("Value", ("value",))))
         if table:
             sections.append(ReportSection(key, title, tables=(table,)))
+    other = details.get("other")
+    wal = other.get("wal_retention") if isinstance(other, dict) else None
+    if isinstance(wal, dict):
+        fields = tuple((label, _human(wal.get(key))) for key, label in (
+            ("version", "Version"), ("in_recovery", "In recovery"),
+            ("current_lsn", "Current LSN"), ("lsn_source", "LSN source"),
+            ("slot_count_observed", "Observed slot count"),
+            ("wal_keep_size", "WAL keep size"), ("max_slot_wal_keep_size", "Max slot WAL keep size"),
+            ("max_wal_size", "Max WAL size")))
+        for key, label in (("slots_evidence", "Slot collection"),
+                           ("settings_evidence", "Settings collection"),
+                           ("archive_evidence", "Archive collection")):
+            evidence = wal.get(key)
+            fields += ((label, _human(evidence.get("status")) if isinstance(evidence, dict) else "—"),)
+            if isinstance(evidence, dict):
+                fields += ((label + " started", _human(evidence.get("started_at"))),
+                           (label + " finished", _human(evidence.get("finished_at"))))
+        archive = wal.get("archive")
+        if isinstance(archive, dict):
+            fields += tuple((label, _human(archive.get(key))) for key, label in (
+                ("archive_mode", "Archive mode"), ("archived_count", "Archived count"),
+                ("failed_count", "Failed count"), ("last_archived_time", "Last archive"),
+                ("last_failed_time", "Last failure"), ("stats_reset", "Archive stats reset")))
+        slots = _dict_rows(wal.get("slots"))
+        slot_evidence = wal.get("slots_evidence")
+        incomplete_slots = (isinstance(slot_evidence, dict)
+                            and slot_evidence.get("status") == "TRUNCATED")
+        slots_collected = (isinstance(slot_evidence, dict)
+                           and slot_evidence.get("status") in {"AVAILABLE", "EMPTY", "TRUNCATED"})
+        slot_columns = (("Slot", "slot_name"), ("Type", "slot_type"), ("Active", "active"),
+                        ("PID", "active_pid"), ("Restart LSN", "restart_lsn"),
+                        ("Confirmed LSN", "confirmed_flush_lsn"), ("WAL status", "wal_status"),
+                        ("Safe WAL bytes", "safe_wal_size"),
+                        ("LSN distance bytes", "retained_wal_estimate_bytes"))
+        slot_table = (ReportTable(tuple(label for label, _ in slot_columns),
+                                  tuple(tuple(_human(row.get(key)) for _, key in slot_columns)
+                                        for row in slots[:50])) if slots else None)
+        sections.append(ReportSection("wal-retention", "WAL Retention and Replication Slots",
+            summary=(str(wal.get("limitations", "")) + " " + str(wal.get("settings_units_note", ""))
+                     + " " + str(wal.get("safe_wal_size_note", "")) + " "
+                     + ("Slot result truncated; total slot count is unknown. " if incomplete_slots else "")
+                     + (_omitted(len(slots), min(len(slots), 50), "slots") if slots_collected
+                        else "Slot count unknown; collection unavailable.")),
+            fields=fields, tables=(slot_table,) if slot_table else ()))
     context_keys = ("dominant_space_category", "history_note", "next_diagnostic_step",
                     "required_evidence_complete", "optional_evidence_status", "data_visibility",
                     "required_unavailable", "optional_unavailable", "not_applicable",
@@ -1054,6 +1274,54 @@ def _plan_sections(details: dict[str, Any], plan_artifact: str | None,
     return sections
 
 
+def _oracle_plan_sections(details: dict[str, Any], policy: HumanReportPolicy) -> list[ReportSection]:
+    request_value = details.get("request")
+    request = request_value if isinstance(request_value, dict) else {}
+    identity_fields = (("SQL_ID", "sql_id"), ("Child Number", "child_number"),
+                       ("Instance ID", "inst_id"), ("Container ID", "con_id"),
+                       ("Requested Plan Hash", "requested_plan_hash_value"),
+                       ("Current Plan Hash", "current_plan_hash_value"))
+    fields = tuple((label, _human(request[key])) for label, key in identity_fields
+                   if key in request)
+    fields += tuple((label, _human(details[key])) for label, key in (
+        ("Plan Source", "source"), ("Plan Status", "plan_status"),
+        ("Identity Validation", "identity_validation"), ("Completeness", "completeness"),
+        ("Data Visibility", "data_visibility"),
+        ("Operator Count", "operator_count"), ("Maximum Operators", "max_operators"),
+    ) if key in details)
+    sections = [ReportSection("oracle-plan-identity", "Oracle Cached Plan Identity", fields=fields)]
+    note_rows: list[dict[str, Any]] = [{"item": "Estimate semantics", "value": details.get("statistics_note")},
+                 {"item": "Adaptive plan", "value": details.get("adaptive_plan_note")},
+                 {"item": "Cursor generation", "value": "Current shared-pool identity only; load generation is not captured."},
+                 {"item": "Plan source", "value": "Current V$SQL_PLAN cache rows; no business SQL execution or EXPLAIN."}]
+    note_rows.extend({"item": "Limitation", "value": item}
+                     for item in details.get("limitations", []) if isinstance(item, str))
+    notes = _table(note_rows, (("Item", ("item",)), ("Details", ("value",))))
+    if notes:
+        sections.append(ReportSection("oracle-plan-limitations", "Plan Semantics and Limitations",
+                                      severity="WARNING", tables=(notes,)))
+    if details.get("plan_available") is False:
+        sections.append(ReportSection("oracle-plan-availability", "Cached Plan Availability",
+            severity="WARNING", summary=str(details.get("note") or "A complete cached plan is unavailable.")))
+    nodes = _dict_rows(details.get("top_operators"))
+    shown = nodes[:500]
+    rows = [{"id": row.get("id"), "parent": row.get("parent_id"), "depth": row.get("depth"),
+             "operation": ("  " * min(row.get("depth", 0), 20)) +
+                          " ".join(str(value) for value in (row.get("operation"), row.get("options")) if value),
+             "object": ".".join(str(row[key]) for key in ("object_owner", "object_name")
+                                if row.get(key) is not None),
+             "cardinality": row.get("estimated_rows"), "cost": row.get("estimated_cost"),
+             "bytes": row.get("estimated_bytes")} for row in shown]
+    table = _table(rows, (("ID", ("id",)), ("Parent ID", ("parent",)), ("Depth", ("depth",)),
+                          ("Operation / Options", ("operation",)), ("Object", ("object",)),
+                          ("Estimated Rows", ("cardinality",)), ("Estimated Cost", ("cost",)),
+                          ("Estimated Bytes", ("bytes",))))
+    if table:
+        sections.append(ReportSection("oracle-plan-tree", "Cached Plan Tree",
+            summary=_omitted(len(nodes), len(shown), "plan nodes"), tables=(table,)))
+    return sections
+
+
 def _replication_sections(report: DiagnosticReport, policy: HumanReportPolicy) -> list[ReportSection]:
     summary = getattr(report, "summary", None)
     members = list(getattr(report, "members", ()))
@@ -1077,19 +1345,6 @@ def _replication_sections(report: DiagnosticReport, policy: HumanReportPolicy) -
         ("Toolkit Executed", "NO"),
     ))
     sections = [ReportSection("replication-summary", "Replication Summary", fields=summary_fields)]
-    permission = getattr(report, "details", {}).get("permission_readiness", {})
-    if permission:
-        permission_fields = tuple((label, _human(permission.get(key))) for key, label in (
-            ("status", "Permission Status"), ("missing_required", "Missing Required"),
-            ("missing_optional", "Missing Optional"), ("impact", "Impact"),
-            ("toolkit_executed", "Toolkit Executed"),
-            ("dba_approval_required", "DBA Approval Required")))
-        grant = permission.get("suggested_grant")
-        sections.append(ReportSection("replication-permissions", "Permission Readiness",
-                                      fields=permission_fields,
-                                      code_blocks=(ReportCodeBlock("Reference Grant (manual review only)",
-                                                                   str(grant), "sql", True),)
-                                      if grant else ()))
     visible_members = members[:policy.max_replication_rows]
     member_rows = [{"name": item.name, "local": _human(item.local), "role": item.role,
                     "vendor_role": item.vendor_role or "—", "status": item.status,
@@ -1159,15 +1414,28 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
                 ("Snapshot Consistency", str(details.get("snapshot_consistency", "BEST_EFFORT"))))
     if report.scenario == "slow":
         sections = _slow_sections(report, incident, details, policy)
+    elif report.scenario == "active-sql":
+        sections = active_sql_sections(details.get("active_sql"))
+    elif report.scenario == "top-sql":
+        top_sql_section = _top_sql_section(details.get("top_sql"))
+        sections = [top_sql_section] if top_sql_section is not None else []
+    elif report.scenario == "memory-grant":
+        sections = memory_grant_sections(details.get("memory_grant"))
     elif report.scenario == "plan":
-        sections = [_recovery_section(incident, details, report.scenario, instance.db_type.value, report),
-                    *_plan_sections(details, plan_artifact, policy)]
+        if instance.db_type.value == "oracle":
+            sections = _oracle_plan_sections(details, policy)
+        else:
+            sections = [_recovery_section(incident, details, report.scenario, instance.db_type.value, report),
+                        *_plan_sections(details, plan_artifact, policy)]
     elif report.scenario == "replication":
         sections = _replication_sections(report, policy)
     else:
         sections = _disk_growth_sections(details)
         sections.insert(0, _recovery_section(incident, details, report.scenario,
                                              instance.db_type.value, report))
+    top_sql = None if report.scenario == "top-sql" else _top_sql_section(details.get("top_sql"))
+    if top_sql is not None:
+        sections.append(top_sql)
     findings = _finding_section(report)
     if findings:
         sections.append(findings)
@@ -1184,6 +1452,11 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
         "Diagnostic Context": "未获取的证据与诊断上下文", "Priority Review Candidates": "优先核查对象",
         "Blocked Victims": "被阻塞会话", "Active Wait Statements": "主动等待语句",
         "Transaction Identity Quality": "事务身份质量",
+        "Top SQL": "Top SQL 资源排序",
+        "SQL Ordered by CPU Time": "按 CPU 时间排序的当前 SQL",
+        "SQL Ordered by Logical Reads": "按逻辑读排序的当前 SQL",
+        "SQL Ordered by Elapsed Time": "按运行耗时排序的当前 SQL",
+        "SQL Text": "SQL 文本",
     }
     headers = {"Rank": "排序", "Session": "会话", "Type": "类型", "Reason": "入选原因",
                "User": "用户", "Host": "主机", "Client IP": "客户端 IP", "Database": "数据库",
@@ -1205,11 +1478,17 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
                "Capture Started": "采集开始", "Triage Completed": "初报完成", "Capture Finished": "采集结束",
                "Snapshot Consistency": "快照一致性", "Area": "资源类别", "Value": "观测值",
                "Item": "条目", "Observed": "观测值"}
+    headers.update({"SQL identity": "SQL 原生身份", "Metric value": "指标值",
+                    "SQL Ref": "SQL 引用", "Session ID": "会话 ID", "Request ID": "请求 ID",
+                    "CPU Time": "CPU 时间", "Logical Reads": "逻辑读", "Elapsed Time": "运行耗时",
+                    "Wait": "等待", "Wait Time (ms)": "等待时长（毫秒）",
+                    "Blocking Session": "阻塞会话"})
     sections = [replace(section, title=titles.get(section.title, section.title),
-                        tables=tuple(ReportTable(tuple(headers.get(h, h) for h in table.headers), table.rows)
+                        tables=tuple(ReportTable(tuple(headers.get(h, h) for h in table.headers), table.rows,
+                                                 getattr(table, "cell_links", ()), table.row_states)
                                      for table in section.tables)) for section in sections]
     metadata = tuple((headers.get(key, key), value) for key, value in metadata)
-    return ReportModel("数据库应急诊断报告", metadata, incident, tuple(sections))
+    return ReportModel("数据库应急诊断报告", metadata, incident, tuple(sections), report.scenario)
 
 
 def _map_section(section: ReportSection, *, max_chars: int, drop_sql: bool = False) -> ReportSection:
@@ -1227,7 +1506,8 @@ def _map_section(section: ReportSection, *, max_chars: int, drop_sql: bool = Fal
     tables = tuple(ReportTable(table.headers, tuple(
         tuple(value[:max_chars] + f" [{len(value) - max_chars} characters omitted]"
               if len(value) > max_chars else value for value in row)
-        for row in table.rows)) for table in section.tables)
+        for row in table.rows), getattr(table, "cell_links", ()), table.row_states)
+        for table in section.tables)
     return replace(section, title=section.title[:max_chars], summary=section.summary[:max_chars],
                    severity=section.severity[:max_chars], fields=fields, tables=tables,
                    code_blocks=tuple(blocks))

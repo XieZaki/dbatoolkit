@@ -17,7 +17,6 @@ from dba.execution_plan import (
     PlanSample,
 )
 from dba.execution_plan_reporter import render_console, render_markdown
-from dba.permissions import requirements_for_profile
 from dba.registry import SqlScriptRegistry
 from dba.settings import SQLServerSettings
 from dba.sqlserver import SQLServerAdapter
@@ -156,7 +155,7 @@ def test_bound_registry_and_cache_fallback() -> None:
     assert driver.connection.closed
 
 
-def test_plan_profiles_bind_version_permission_sql_and_parser() -> None:
+def test_plan_profiles_bind_version_sql_and_parser() -> None:
     errors = PROFILE_RESOLVER.validate()
     assert not errors
     for family in ("2008r2", "2012", "2014", "2016", "2017", "2019"):
@@ -167,14 +166,7 @@ def test_plan_profiles_bind_version_permission_sql_and_parser() -> None:
         assert profile.version_status == VersionStatus.VERIFIED
         assert profile.support_state == SupportState.SUPPORTED
         assert profile.sql_profile_id == "sqlserver_plan_shared"
-        assert profile.permission_profile_id == "sqlserver_plan_legacy"
         assert profile.parser_contract_id == "sqlserver_showplan_v1"
-        assert requirements_for_profile(profile.permission_profile_id).required == ("VIEW SERVER STATE",)
-    current = plan_profile()
-    assert current.permission_profile_id == "sqlserver_plan_2022"
-    assert requirements_for_profile(current.permission_profile_id).required == (
-        "VIEW SERVER PERFORMANCE STATE",
-    )
     future = PROFILE_RESOLVER.resolve(
         DatabaseType.SQLSERVER, "2025",
         DetectedDatabaseVersion("17.0.1000.1", "2025"), "plan",
@@ -302,47 +294,6 @@ def test_cli_plan_unavailable_and_invalid_session(tmp_path: Path, capsys: pytest
     assert json.loads(capsys.readouterr().out)["error_type"] == "InvalidSession"
 
 
-def test_cli_plan_permission_profile_is_versioned(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    driver = FakeDriver()
-    inventory = tmp_path / "inventory.yaml"
-    inventory.write_text(yaml.safe_dump({"databases": [{"id": "test", "name": "Test",
-        "db_type": "sqlserver", "host": "test.invalid", "port": 1433,
-        "credential_alias": "monitor", "version_family": "2022"}]}))
-    args = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql"),
-            "permissions", "test", "--feature", "plan", "--json"]
-    assert main(args, provider=MemoryCredentialProvider(), driver=driver) == 0
-    feature = json.loads(capsys.readouterr().out)["features"][0]
-    assert feature["status"] == "READY"
-    assert feature["required_privileges"] == ["VIEW SERVER PERFORMANCE STATE"]
-    assert feature["version_profile"]["permission_profile_id"] == "sqlserver_plan_2022"
-
-
-def test_cli_plan_missing_permission_reports_versioned_reference_grant(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    driver = FakeDriver()
-    capabilities = driver.connection.results["monitor_capabilities"][0]
-    capabilities["view_server_performance_state"] = 0
-    capabilities["view_server_state"] = 1
-    driver.connection.results["monitor_permissions"] = [
-        {"scope": "SERVER", "permission_name": "VIEW SERVER STATE",
-         "source_type": "EXPLICIT", "source_name": "dba_monitor", "object_name": None,
-         "object_type": None, "execute_as_principal_id": None},
-    ]
-    inventory = tmp_path / "inventory.yaml"
-    inventory.write_text(yaml.safe_dump({"databases": [{"id": "test", "name": "Test",
-        "db_type": "sqlserver", "host": "test.invalid", "port": 1433,
-        "credential_alias": "monitor", "version_family": "2022"}]}))
-    args = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql"),
-            "permissions", "test", "--feature", "plan", "--json"]
-    assert main(args, provider=MemoryCredentialProvider(), driver=driver) == 0
-    feature = json.loads(capsys.readouterr().out)["features"][0]
-    assert feature["status"] == "MISSING"
-    assert feature["missing_required"] == ["VIEW SERVER PERFORMANCE STATE"]
-    assert "GRANT VIEW SERVER PERFORMANCE STATE TO [monitor]" in feature["reference_grant"]
-    assert feature["toolkit_executed_grant"] is False
-
-
 def test_cli_plan_unknown_declared_version_never_runs_collector(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -357,7 +308,8 @@ def test_cli_plan_unknown_declared_version_never_runs_collector(
     assert main(args, provider=MemoryCredentialProvider(), driver=driver) == 1
     failure = json.loads(capsys.readouterr().out)
     assert failure["error_type"] == "VersionVerificationRequired"
-    assert failure["permission_readiness"]["version_profile"]["version_status"] == "UNVERIFIED"
+    assert "permission_readiness" not in failure
+    assert failure["version_profile"]["version_status"] == "UNVERIFIED"
     assert "plan_request" not in driver.connection.executed
     assert "plan_cached" not in driver.connection.executed
 

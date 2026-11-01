@@ -1,0 +1,18 @@
+name: active_sql
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 301
+reviewed: true
+description: One bounded instance-wide active-request DMV read returning the union of three per-metric Top N sets and statement text limited in SQL to 2000 characters.
+feature: active-sql
+version_families:
+  - 2008r2
+  - "2012"
+  - "2014"
+  - "2016"
+  - "2017"
+  - "2019"
+  - "2022"
+runtime_variants:
+  - default

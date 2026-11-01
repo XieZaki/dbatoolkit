@@ -8,13 +8,11 @@ from typing import Any
 from dba.collectors import CollectorResult
 from dba.core import DatabaseType
 from dba.errors import ToolkitError
-from dba.permissions import PermissionStatus, assess_permissions, requirements_for_profile
 from dba.versioning import (
     CANONICAL_VERSION_FAMILIES,
     ProfileBinding,
     ResolvedDiagnosticProfile,
     SupportState,
-    VersionStatus,
 )
 
 
@@ -185,7 +183,7 @@ def validate_slow_binding(binding: ProfileBinding) -> tuple[str, ...]:
 
 
 def validate_slow_profiles(registry: Any, bindings: tuple[Any, ...]) -> tuple[str, ...]:
-    """Verify slow route bundles, required permissions and parser contracts."""
+    """Verify slow route bundles, required collectors and parser contracts."""
     errors: list[str] = []
     routed = [binding for binding in bindings if binding.feature == "slow"]
     expected_routes = {
@@ -209,10 +207,6 @@ def validate_slow_profiles(registry: Any, bindings: tuple[Any, ...]) -> tuple[st
             continue
         scripts = SLOW_SQL_PROFILES.get(binding.sql_profile_id)
         contract = SLOW_PARSER_CONTRACTS.get(binding.parser_contract_id)
-        try:
-            requirement = requirements_for_profile(binding.permission_profile_id)
-        except ValueError:
-            requirement = None
         if not scripts:
             errors.append(f"{binding.db_type.value}/{binding.version_family}: unknown slow SQL profile")
             continue
@@ -228,8 +222,6 @@ def validate_slow_profiles(registry: Any, bindings: tuple[Any, ...]) -> tuple[st
         if contract is None or any(not dict(contract.aliases).get(field)
                                    for field in contract.required_fields):
             errors.append(f"{binding.db_type.value}/{binding.version_family}: invalid slow parser contract")
-        if requirement is None or tuple(requirement.required) != binding.required_privileges:
-            errors.append(f"{binding.db_type.value}/{binding.version_family}: slow permission contract mismatch")
         for name in scripts.values():
             try:
                 script = registry.get(name, binding.db_type)
@@ -339,12 +331,3 @@ def normalize_slow_result(
             normalized[field] = value
         rows.append({**row, "normalized": normalized})
     return replace(result, rows=tuple(rows))
-
-
-def profile_permission_status(profile: ResolvedDiagnosticProfile, observed: set[str]) -> Any:
-    requirement = requirements_for_profile(profile.permission_profile_id or "")
-    if profile.version_status in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN,
-                                  VersionStatus.MISMATCH, VersionStatus.AUTO_DETECTED}:
-        return {"status": PermissionStatus.UNKNOWN, "missing_required": (),
-                "missing_optional": (), "available": ()}
-    return assess_permissions(requirement, observed)

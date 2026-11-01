@@ -1,0 +1,12 @@
+name: oracle_plan_identity_11g
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: Verify one current Oracle 11gR2 V$SQL child cursor using bound SQL_ID, CHILD_NUMBER and local INST_ID.
+feature: plan
+version_families:
+  - 11gr2
+runtime_variants:
+  - default

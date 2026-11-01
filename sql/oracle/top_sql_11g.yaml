@@ -1,0 +1,12 @@
+name: top_sql_11g
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 15
+max_rows: 101
+reviewed: true
+description: Bounded Oracle 11gR2 V$SQL child-cursor cumulative statistics using bound metric and Top N.
+feature: top-sql
+version_families:
+- 11gr2
+runtime_variants:
+- default

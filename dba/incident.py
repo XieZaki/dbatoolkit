@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from dba.core import DiagnosticReport
+from dba.core import DatabaseType, DiagnosticReport
 
 _TRIAGE_RULE_IDS = {
     "ROOT_BLOCKER": "TRIAGE-ROOT-01",
@@ -77,6 +77,18 @@ def _slow_sample_index(details: dict[str, Any]) -> dict[str, dict[str, Any]]:
             if isinstance(item, dict) and item.get("collector")}
 
 
+def _blocking_evidence_complete(details: dict[str, Any], graph_sample: dict[str, Any] | None,
+                                graph: Any) -> bool:
+    full_profile_status = details.get("full_profile_evidence_status")
+    if (details.get("data_visibility") in {"PARTIAL", "UNKNOWN"}
+            or full_profile_status in {"PARTIAL", "INCOMPLETE", "PENDING", "UNKNOWN", "FAILED"}):
+        return False
+    return (graph_sample is not None and graph_sample.get("success") is True
+            and not graph_sample.get("truncated") and isinstance(graph, dict)
+            and not graph.get("anomalies") and not graph.get("unresolved")
+            and not graph.get("identity_conflicts"))
+
+
 def _slow_sample_reference(details: dict[str, Any], collector: str, source_path: str,
                            facts: dict[str, Any]) -> dict[str, Any]:
     sample = _slow_sample_index(details).get(collector)
@@ -133,16 +145,32 @@ def _is_open_transaction(root: dict[str, Any]) -> bool | None:
 
 
 def _quality(details: dict[str, Any], scenario: str) -> tuple[str, tuple[str, ...]]:
+    if scenario == "active-sql":
+        result = details.get("active_sql", {})
+        if not isinstance(result, dict) or result.get("collection_status") != "COLLECTED":
+            return "INCOMPLETE", ("Active SQL request source was not collected",)
+        if result.get("completeness") == "PARTIAL":
+            return "PARTIAL", ("Some active-request SQL text or native statement identity is unavailable",)
+        if result.get("completeness") == "COMPLETE":
+            return "COMPLETE", ()
+        return "INCOMPLETE", ("Active SQL request evidence is incomplete",)
+    if scenario == "top-sql":
+        result = details.get("top_sql", {})
+        if not isinstance(result, dict) or result.get("collection_status") != "COLLECTED":
+            return "INCOMPLETE", ("Top SQL source was not collected",)
+        if result.get("completeness") == "PARTIAL":
+            return "PARTIAL", tuple(str(item) for item in result.get("limitations", []))
+        if result.get("completeness") != "COMPLETE":
+            return "INCOMPLETE", tuple(str(item) for item in result.get("limitations", []))
+        return "COMPLETE", ()
     if scenario == "replication":
         if not details.get("required_evidence_complete", False):
             return "INCOMPLETE", ("Replication role and status evidence",)
         samples = details.get("samples", [])
         bad = [item for item in samples if isinstance(item, dict)
                and (not item.get("success", True) or item.get("truncated"))]
-        permission = details.get("permission_readiness", {})
-        if bad or isinstance(permission, dict) and permission.get("status") in {"PARTIAL", "MISSING", "UNKNOWN"}:
-            return "PARTIAL", tuple(str(item.get("collector", "replication evidence")) for item in bad) or (
-                "Replication monitoring permissions or optional evidence",)
+        if bad:
+            return "PARTIAL", tuple(str(item.get("collector", "replication evidence")) for item in bad)
         return "COMPLETE", ()
     if details.get("plan_available") is False:
         return "PARTIAL", ("Execution plan",)
@@ -209,6 +237,8 @@ def _wait_summary(details: dict[str, Any]) -> dict[str, str] | None:
 def build_incident_summary(report: DiagnosticReport, report_path: str | None = None) -> IncidentSummary:
     """Normalize slow and disk-growth evidence without inferring missing facts."""
     details = getattr(report, "details", {})
+    oracle_cached_plan_only = (report.scenario == "plan"
+                               and report.instance.db_type == DatabaseType.ORACLE)
     incomplete = bool(details.get("incomplete"))
     completeness, missing = _quality(details, report.scenario)
     findings = list(report.findings)
@@ -261,6 +291,9 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
               "CRITICAL" if severity == "CRITICAL" else
               "DEGRADED" if active_now or has_warning_finding or severity in {"WARNING", "HIGH"}
               or report.scenario != "disk-growth" and completeness == "PARTIAL" else "HEALTHY")
+    if report.scenario in {"top-sql", "active-sql", "memory-grant"} or oracle_cached_plan_only:
+        # Isolated cache evidence does not assess current database health.
+        status = "UNKNOWN"
 
     concurrency = details.get("concurrency", {})
     impact: dict[str, int] = {}
@@ -381,7 +414,8 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
                 rollback_risk="UNKNOWN", evidence_complete=True))
 
     immediate = None
-    if active_now:
+    not_assessed_only = report.scenario in {"top-sql", "active-sql", "memory-grant"} or oracle_cached_plan_only
+    if active_now and not not_assessed_only:
         immediate = {"priority": severity,
                      "action": ("Review the execution plan and runtime metrics in the detailed report."
                                 if report.scenario == "plan" else
@@ -391,7 +425,7 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
                                 if primary == "BLOCKING" and root_session is not None else
                                 "Review the detailed report and validate the observed database impact."),
                      "approval_required": True}
-    elif completeness == "COMPLETE":
+    elif completeness == "COMPLETE" and not not_assessed_only:
         immediate = {"priority": "INFO",
                      "action": "No obvious active database-side issue detected in this snapshot.",
                      "approval_required": False}
@@ -428,7 +462,8 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
         if report.scenario == "disk-growth" else (),
         status=status, severity=severity,
         primary_problem=primary,
-        observed_now=("ACTIVE" if active_now else
+        observed_now=("NOT_ASSESSED" if not_assessed_only else
+                      "ACTIVE" if active_now else
                       "UNKNOWN" if completeness == "INCOMPLETE" else
                       "No core storage risk observed in available required evidence."
                       if report.scenario == "disk-growth" else
@@ -493,9 +528,7 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
     graph_source = ("active_requests" if db_type == "sqlserver" else
                     "active_sessions" if db_type == "oracle" else "blocking")
     graph_sample = samples.get(graph_source)
-    graph_complete = (graph_sample is not None and graph_sample.get("success") is True
-                      and not graph_sample.get("truncated") and not graph.get("anomalies")
-                      and not graph.get("unresolved") and not graph.get("identity_conflicts"))
+    graph_complete = _blocking_evidence_complete(details, graph_sample, graph)
     graph_children = graph.get("children", {})
     graph_children = graph_children if isinstance(graph_children, dict) else {}
     graph_roots = {str(value) for value in graph.get("roots", [])}
@@ -1005,10 +1038,7 @@ def build_performance_triage(report: DiagnosticReport) -> dict[str, Any]:
                     "active_sessions" if db_type == "oracle" else "blocking")
     graph_sample = samples.get(graph_source)
     graph = details.get("blocking_graph", {})
-    graph_complete = (graph_sample is not None and graph_sample.get("success") is True
-                      and not graph_sample.get("truncated") and isinstance(graph, dict)
-                      and not graph.get("anomalies") and not graph.get("unresolved")
-                      and not graph.get("identity_conflicts"))
+    graph_complete = _blocking_evidence_complete(details, graph_sample, graph)
     unknown_reasons: list[str] = []
     if not graph_complete:
         if graph_sample is None:
@@ -1021,10 +1051,16 @@ def build_performance_triage(report: DiagnosticReport) -> dict[str, Any]:
             unknown_reasons.append("Blocking graph has cycles, conflicting edges, or identity anomalies.")
         if isinstance(graph, dict) and (graph.get("unresolved") or graph.get("identity_conflicts")):
             unknown_reasons.append("Blocking graph has unresolved sessions or identity conflicts.")
-    permission = details.get("permission_readiness", {})
-    permission_status = permission.get("status") if isinstance(permission, dict) else None
-    if permission_status in {"PARTIAL", "MISSING", "UNKNOWN", "UNSUPPORTED"}:
-        unknown_reasons.append(f"Permission readiness is {permission_status}; affected evidence may be incomplete.")
+    partial_visibility = details.get("data_visibility") == "PARTIAL"
+    unknown_visibility = details.get("data_visibility") == "UNKNOWN"
+    full_profile_status = details.get("full_profile_evidence_status")
+    if partial_visibility:
+        unknown_reasons.append("Blocking evidence has PARTIAL data visibility; independence cannot be confirmed.")
+    elif unknown_visibility:
+        unknown_reasons.append("Blocking evidence visibility is UNKNOWN; independence cannot be confirmed.")
+    if full_profile_status in {"PARTIAL", "INCOMPLETE", "PENDING", "UNKNOWN", "FAILED"}:
+        unknown_reasons.append(
+            f"Full-profile diagnostic evidence is {full_profile_status}; independence cannot be confirmed.")
     if not assessments:
         unknown_reasons.append("No triage candidate was observed in this snapshot; this is not a health assertion.")
     assessment_states = {item["classification_status"] for item in assessments}
@@ -1040,9 +1076,8 @@ def build_performance_triage(report: DiagnosticReport) -> dict[str, Any]:
         "database_type": db_type,
         "server_version": details.get("version"),
         "profile": {key: profile.get(key) for key in (
-            "sql_profile_id", "permission_profile_id", "parser_contract_id", "runtime_variant")
+            "sql_profile_id", "parser_contract_id", "runtime_variant")
                     if isinstance(profile, dict) and profile.get(key) is not None},
-        "permission_status": permission_status or "UNKNOWN",
         "snapshot_time": max((str(item.get("finished_at")) for item in samples.values()
                                if item.get("finished_at")), default=report.diagnosed_at.isoformat()),
         "status": status,

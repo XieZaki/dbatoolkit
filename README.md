@@ -6,7 +6,7 @@
 V0.7 历史版本摘要：当时保留 SQL Server、PostgreSQL 和 MySQL 诊断，并新增 Oracle 12c+ 连接、基础采集和 Slow Diagnose。该历史句不代表当前 Oracle 最低版本；当前正式目标见上方版本范围。运行不依赖 Internet。
 V0.7.1 已在隔离 Oracle Free 23 容器使用 python-oracledb Thin 及专用监控账号完成真实 CLI 端到端验证；结果见 [验证记录](docs/VERIFICATION_V0_7_1.md)。
 V0.8 增加四库 `diagnose <database_id> disk-growth` 当前空间与日志保留诊断，Docker 实测结果见 [V0.8 验证记录](docs/VERIFICATION_V0_8.md)。
-V0.8.1 增加四库统一 Monitor Permission Registry、权限状态与只生成不执行的 Grant/Revoke 建议，详见 [监控权限说明](docs/MONITOR_PERMISSIONS.md)。
+首次运行前由 DBA 按目标数据库和版本准备只读监控账号，见 [Database Permissions](docs/DATABASE_PERMISSIONS.md)。Toolkit 不提供程序内权限预检或 GRANT/REVOKE 生成功能。
 V0.8.2 增加 Windows/Linux 可重复离线部署、六库 Runtime Manifest、SQL Server ODBC 18→17 回退、`doctor` 和 `runtime-info`。部署和升级流程见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 V0.8.2.1 增加实例级非敏感 Connection Profile 解析及 OS Credential Store 命令，凭据缺失时回退为仅本次运行的交互输入。
 V0.8.3 增加 `dba check` / `dba status`、基于 Inventory 的 Runtime Doctor、人类可读默认输出和统一 JSON Presenter；结构化运行日志改为有界文件输出。
@@ -29,13 +29,22 @@ python -m venv .venv
 .venv/Scripts/dba diagnose <database_id> slow
 .venv/Scripts/dba diagnose <database_id> disk-growth
 .venv/Scripts/dba diagnose <database_id> replication
+.venv/Scripts/dba diagnose <sqlserver_database_id> top-sql --metric cpu_time --top 10
+.venv/Scripts/dba diagnose <sqlserver_database_id> active-sql --sort cpu --top 10
+.venv/Scripts/dba diagnose <sqlserver_database_id> memory-grant
 ```
+
+SQL Server `top-sql` ranks completed statements retained in the plan cache. Metrics are cumulative for the cached plan/statement lifetime, not live rates; select `--metric` from `cpu_time`, `logical_reads`, `physical_reads`, `execution_count`, `elapsed_time`, `average_cpu_time`, or `average_elapsed_time`. `--top` is limited to 1–100. SQL text is not emitted; native statement/plan identity and cache/reset limitations are reported. SQL Server 2008 R2–2022 routes are implemented, but only exact versions and scenarios listed as E2E-verified in the Acceptance ledger have live evidence; SQL Server 2025 remains unverified.
+
+SQL Server `active-sql` ranks requests present in one current snapshot by current-request CPU, logical reads, or elapsed time (`--sort cpu|logical-reads|elapsed`; default `cpu`; `--top` 1–100). Unlike `top-sql`, it does not rank completed plan-cache history or report cumulative cache totals. The offline report contains all three rankings and one bounded SQL Text section; query text is capped at 2,000 characters. This route has automated/static coverage only until a scoped live E2E is recorded in the Acceptance ledger.
+
+SQL Server `memory-grant` reports current requests waiting for or holding a memory grant from two separate, bounded DMV samples. It preserves application-request identity within each sampling query, retains raw KB metrics, and marks missing/conflicting request context as incomplete. The samples are not atomic; no SQL text or execution plan is collected. An empty wait sample is not a database health claim. The MVP is implemented but remains `E2E_PENDING` until the SQL Server 2022 live acceptance is recorded.
 
 Replication diagnosis is observational only. It reads status from the selected Inventory instance, does not connect to discovered peers, and never runs failover, promotion, restart, reset, resynchronization, or repair. See [Replication Diagnosis](docs/REPLICATION_DIAGNOSIS.md).
 
-默认输出面向 DBA 阅读。自动化需要结构化结果时，在命令后添加 `--json`。高级部署与排查命令见 `dba -h`，包括 `show`、`validate`、`doctor`、`runtime-info`、`credentials`、`test-connection`、`permissions` 和 `collect`。
+默认输出面向 DBA 阅读。自动化需要结构化结果时，在命令后添加 `--json`。高级部署与排查命令见 `dba -h`，包括 `show`、`validate`、`doctor`、`runtime-info`、`credentials`、`test-connection` 和 `collect`。
 
-`dba check <database_id>` 分别显示 Account Security 与各 Feature 的 Permission Readiness。权限不足不等于账号过权：例如 MySQL 只有全局只读 `SELECT` 时可为 `NON_PRIVILEGED`，同时 `slow` 因缺少 `PROCESS` 而为 `MISSING`。使用 `dba permissions <database_id> --feature slow` 查看 Registry 需求；诊断缺少 required grant 时返回具体原因和仅供人工审核的参考 GRANT，Toolkit 永不执行授权。
+首次使用前应由 DBA 为专用监控账号准备目标数据库所需权限。权限不足时 Toolkit 保留数据库访问错误；请按目标引擎与版本核对 [Database Permissions](docs/DATABASE_PERMISSIONS.md)。Toolkit 不生成或执行 GRANT/REVOKE。
 
 `diagnose` 默认提供事故处置摘要；Human HTML 是有行数和体积预算的 DBA 分析报告，不是原始采集数据仓库。`--json` 提供机器可读诊断数据，运行日志使用 JSONL。报告名为 `reports/<database_id>_<scenario>_<本地时间>.html`，同一秒冲突时追加 `_02` 等后缀。明确诊断 SQL Server 执行计划且 XML 可用时，会在同目录生成配对 `.sqlplan`；HTML 不嵌入原始 XML。Reference Kill/Cancel/Terminate 命令只有在阻塞根会话、受影响会话和采样完整性均有证据时才会显示；命令始终要求 DBA 人工审核，Toolkit 不执行。
 
@@ -45,7 +54,7 @@ SQL Server 真实连接安装 `python -m pip install -e ".[sqlserver]"`，并通
 
 多运维机首次部署、升级、回滚和 Git 敏感数据检查见 [Repository & Release 流程](docs/REPOSITORY.md)。Windows/Linux 升级脚本只使用本地 wheelhouse，不拉取代码、不改本地 Inventory 或 Credential Store。
 
-将 Inventory 中的目标实例地址、端口、database、credential_alias 配置正确，并明确设置 `enabled: true`。各库禁用示例位于 `examples/inventory/`，不会进入默认生产 Inventory。真实 Inventory 仅放在本机 `config/inventory/` 并由 Git 忽略。密码不能写入 Inventory。直接运行 `check`、`status`、`test-connection`、`collect` 或 `diagnose`；当别名在可用凭据库中确实不存在时，Toolkit 会隐藏输入数据库账号密码，并询问是否安全保存。高级用户可预配置：首选 Windows Credential Manager / Linux 安全 Keyring；无桌面或 OS Store 不可用时，先显式运行 `dba credentials init --backend encrypted` 创建 AES-256-GCM + Argon2id 用户级加密 Store。`dba credentials set` 仍可用于批量预配置和轮换。Toolkit 没有密码命令行参数。详见 [Credential Security](docs/CREDENTIAL_SECURITY.md)。
+将 Inventory 中的目标实例地址、端口、database、credential_alias 配置正确，并明确设置 `enabled: true`。各库禁用示例位于 `examples/inventory/`，不会进入默认生产 Inventory。真实 Inventory 仅放在本机 `config/inventory/` 并由 Git 忽略。密码不能写入 Inventory。直接运行 `check`、`status`、`test-connection`、`collect` 或 `diagnose`；当别名在可用凭据库中确实不存在时，Toolkit 会隐藏输入数据库账号密码，并询问是否安全保存。高级用户可预配置：首选 Windows Credential Manager / Linux 安全 Keyring；在 Windows 无法使用 OS Store 且需要加密文件写入时，必须显式运行 `dba credentials init --backend sqlite`。旧 JSON 加密 Store 在本版本中只读，可用于查看和显式迁移，不接受 set/delete/rekey/JIT 写入；SQLite 不会由 auto 自动选择。Toolkit 没有密码命令行参数。详见 [Credential Security](docs/CREDENTIAL_SECURITY.md)。
 
 ## Inventory 文件组织
 
@@ -55,10 +64,6 @@ SQL Server 真实连接安装 `python -m pip install -e ".[sqlserver]"`，并通
 
 ```powershell
 .venv/Scripts/dba --settings config/runtime.yaml test-connection my-sqlserver
-.venv/Scripts/dba --settings config/runtime.yaml permissions my-sqlserver
-.venv/Scripts/dba --settings config/runtime.yaml permissions my-sqlserver --feature slow
-.venv/Scripts/dba --settings config/runtime.yaml permissions my-sqlserver --feature slow --generate-grant
-.venv/Scripts/dba --settings config/runtime.yaml permissions my-sqlserver --all-features --generate-revoke
 .venv/Scripts/dba --settings config/runtime.yaml collect my-sqlserver server-info
 .venv/Scripts/dba --settings config/runtime.yaml collect my-sqlserver database-status
 .venv/Scripts/dba --settings config/runtime.yaml collect my-sqlserver active-sessions
@@ -69,7 +74,9 @@ SQL Server 真实连接安装 `python -m pip install -e ".[sqlserver]"`，并通
 V0.2.1 实机验证前先运行 `dba driver-info`，显示 Python 架构、pyodbc 版本和 ODBC Driver 名称，不读取 Inventory、不获取凭据、不连接数据库。缺少依赖时返回 1，且仅提示企业离线安装需求。`collect <id> long-running` 是 `long-running-requests` 的兼容别名。只对人工指定的一个 database_id 验证，不扫描 Inventory。
 
 每条命令按 Inventory 的 `credential_alias` 从安全存储读取凭据，必要时对当前运行隐藏交互输入，然后连接、完成预检、采集并关闭连接。当前诊断适配器覆盖 SQL Server、PostgreSQL、MySQL 和 Oracle；MongoDB/Redis 仍是长期目标，尚无诊断实现。各数据库各场景的实现和实测边界见 [Version Profiles](docs/VERSION_PROFILES.md) 与 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。默认输出 DBA 可读摘要；在命令后添加 `--json` 获取脱敏结构化结果。SQL 执行审计写入 `logs/dba.jsonl`，不混入正常终端输出，也不包含 SQL 文本或原始驱动异常。
-`permissions` 汇总四库已实现 Feature 的权限状态。生成 Grant/Revoke 时只读取 Inventory 与 Credential Provider，不连接数据库；SQL 仅打印为 DBA 人工审核文本，Toolkit 不执行。权限矩阵、Feature 状态语义及版本限制见 [docs/MONITOR_PERMISSIONS.md](docs/MONITOR_PERMISSIONS.md)。
+## Database Permissions
+
+首次使用前，由数据库管理员按实际数据库版本完成对应监控账号授权。授权 SQL、适用范围和可选权限见 [docs/DATABASE_PERMISSIONS.md](docs/DATABASE_PERMISSIONS.md)。权限不足时诊断会保留数据库返回的访问错误，并提示核对该文档；Toolkit 不逐条预检权限、不生成授权 SQL，也不执行 GRANT/REVOKE。
 SQL 执行审计包含脚本名称、SHA-256 摘要、有效超时、行数上限、返回行数、截断标志、结果和错误类别。Ctrl+C 中断也关闭已取得的连接；CLI 返回 130。
 `--settings` 可省略，此时使用内置安全默认值；指定后严格读取该文件，拼写错误或密码等未知字段会被拒绝。
 
@@ -81,14 +88,13 @@ SQL Server 连接失败会报告实际选用的 ODBC Driver，以及生效的 `E
 
 CollectorResult 包含 database_id、collector_name、started_at、finished_at、elapsed_ms、rows、row_count、truncated、success、error_type、error_message。时间使用 UTC，行内时间保留服务器值。达到 max_rows 时即标记 truncated=true，包括恰好等于上限的情况；长请求筛选保留原采集的截断标志。活动请求按耗时降序采集，SQL 文本为批次文本，最多 16384 字符，超限时另有 sql_text_truncated 标志。活动会话包括 sleeping 会话并排除工具自身；客户端 IP 在不可获取时为空。
 
-## 监控账号预检及安全边界
+## 监控账号安全边界
 
-预检验证实际读取基础实例、数据库状态、会话和请求的能力，并检查跨会话可见性。旧版本至 SQL Server 2019 使用 VIEW SERVER STATE；2022+ 使用 VIEW SERVER PERFORMANCE STATE，数据库列表要求 VIEW ANY DATABASE。失败消息指出缺少的能力，只提供人工审核建议，绝不执行 GRANT。
+首次部署权限由 DBA 按目标引擎和版本准备，统一见 [Database Permissions](docs/DATABASE_PERMISSIONS.md)。连接阶段只执行身份、版本和单独的高风险账号安全检查，不计算每项诊断的缺权状态，也不生成 GRANT。诊断实际读取被数据库拒绝时，Toolkit 保留脱敏后的数据库错误并提示核对该文档。
 
 SQL 兼容目标扩展至 2008 R2（10.50）及以上，但尚未完成该版本实机验证。预检读取 ProductVersion 并检查会话 DMV 的实际列能力：现代实现使用 sys.dm_exec_sessions.database_id/open_transaction_count；缺列时改用受审查的 active_sessions_legacy。旧版从 sys.sysprocesses.dbid/open_tran 获取真实值并带来源列，其进程统计语义不等同于新版会话统计；不伪造 0 或数据库名称。元数据因会话变化或权限不可见时返回数据库原始 NULL，并带可能原因说明。列能力信息缺失时拒绝继续。旧服务器与 Driver 18 的 TLS、补丁和证书互通仍须在目标环境验证，不能从 SQL 静态兼容推断连接兼容。
 
-同时拒绝 sa 等账号、sysadmin/db_owner 以及服务器和当前数据库（含可见用户对象/Schema）上的非监控有效权限；对象权限枚举也受查询超时保护。权限信息不完整、达到行数上限或探测失败时拒绝继续。该检查不能证明账号在其他数据库没有写权限；仍须 DBA 保证整个实例使用专用最小权限监控账号。数据库状态列表受元数据可见性限制，监控账号可能看不到离线数据库，不为此要求更高权限。
-预检还保守检查当前登录/用户令牌的显式授权（包含角色），拒绝非监控权限及可转授权权限。对象级 EXECUTE GRANT 若明确被 DENY 覆盖，则按实际权限消除误报；无法确认时仍拒绝，转授权权限也仍拒绝。两项列加密密钥定义查看权限属于只读元数据权限。生产账号的权限配置由 DBA 人工完成。
+仍保留账号安全边界：拒绝已知的高权限角色、控制/委派权限和可确认的写能力；这些检查用于防止 Toolkit 被配置为高权限或可写身份，不用于判断某项功能是否具备所需读取权限。可见性受限或数据库拒绝某条只读查询时，不把缺少结果伪装成空数据或健康状态。生产账号必须由 DBA 配置为专用最小权限监控账号。
 
 V0.2.1 验证记录见 [docs/VERIFICATION_V0_2_1.md](docs/VERIFICATION_V0_2_1.md)。用户明确授权的空 Docker 测试环境流程见 [docs/DOCKER_VERIFICATION_PLAN.md](docs/DOCKER_VERIFICATION_PLAN.md)，显式运行 `tests/integration/run_docker_verification.ps1`；普通 pytest 不连接数据库。初始化例外仅用于新建空测试容器，Toolkit 始终使用专用监控账号和受审查只读 SQL。
 
@@ -126,7 +132,7 @@ V0.3 测试记录见 [docs/VERIFICATION_V0_3.md](docs/VERIFICATION_V0_3.md)。�
 .venv/Scripts/dba --settings config/runtime.yaml diagnose my-postgresql slow
 ```
 
-PostgreSQL 诊断连接使用 psycopg 3、专用监控账号、autocommit、只读事务及服务端 statement_timeout。预检拒绝超级用户和具创建数据库/角色、复制或绕过行级安全属性的账号，要求有效的跨会话统计与设置读取能力；可由 DBA 人工审核 `pg_monitor` 内置角色，Toolkit 不授予权限。`pg_stat_activity`、`pg_locks`、`pg_stat_database`、复制/归档视图和必要设置通过已审查只读 SQL 探测。空复制视图不代表权限缺失。
+PostgreSQL 诊断连接使用 psycopg 3、专用监控账号、autocommit、只读事务及服务端 statement_timeout。连接安全预检拒绝超级用户和具创建数据库/角色、复制或绕过行级安全属性的账号；每项只读查询在实际执行时由数据库判定访问权，拒绝时保留原始脱敏错误。`pg_stat_activity`、`pg_locks`、`pg_stat_database`、复制/归档视图和必要设置均来自已审查只读 SQL。空复制视图不表示权限缺失。
 
 Slow Diagnose 对 `pg_stat_activity` 客户端连接做有界采样并排除自身 PID；活动 SQL 时长由服务器 `clock_timestamp()` 计算。报告区分总连接、活动查询、等待、被阻塞和 idle in transaction，会列出当前活动 SQL Top N、达到阈值的长 SQL、多层阻塞图、Root Blocker 来源与事务证据。非 active 会话的 `query` 是最后执行的查询，不能当作当前查询；`client_hostname` 为空时明确标记不可得。采样不是原子快照，截断或失败会标记不完整。配置项包括 `long_running_seconds`、`slow_top_n`、`high_concurrency_threshold` 和 `idle_transaction_seconds`。
 
@@ -146,7 +152,7 @@ Root Blocker 存在且会话与阻塞采样完整时，报告可生成 `SELECT p
 
 MySQL 5.7、8.0+ 是产品目标；当前代码通过版本 Profile 区分 5.7、8.0 和 8.4 的已审查路径，不由目标声明推断所有未来版本或所有诊断能力已经实现。连接使用 PyMySQL、专用监控账号和只读 Registry SQL。默认校验证书及主机名；内网 CA 可通过 `mysql.ssl_ca` 指定，隔离测试容器可显式设置 `mysql.ssl_enabled: false`。连接和读取超时有界、autocommit=true、禁用 local infile；使用流式游标和 `max_rows`，达到上限会标记截断并关闭连接。PyMySQL `read_timeout` 限制等待网络响应的时间，不能保证整批流式结果的绝对墙钟时长。
 
-监控账号预检按 MySQL 版本 Profile 检查所需 Performance Schema/PROCESSLIST、事务和锁能力，并拒绝活动角色和非监控全局/Schema/表/列权限。通常需 DBA 人工审核全局 `PROCESS`、`SHOW DATABASES`，以及必要对象的 `SELECT`；Toolkit 不执行 GRANT。预检无法穷尽所有动态权限、存储程序或其他隐含写能力，生产仍需 DBA 保证账号最小权限。某些视图只显示监控账号有权看到的对象，报告不会补造缺失值。
+MySQL 连接安全预检拒绝已知危险或可写直接授权，并在无法确认活动角色安全性时 fail closed；它不为每个诊断计算所需权限。Performance Schema consumer 状态用于采集路径选择，具体视图访问由实际只读查询决定。权限不足时保留数据库错误；生产仍需 DBA 按 [Database Permissions](docs/DATABASE_PERMISSIONS.md) 配置最小权限账号。某些视图只显示监控账号有权看到的对象，报告不会补造缺失值。
 
 活动语句优先读取 `events_statements_current` 与当前等待；等待 consumer 关闭时使用受审查的无等待查询，语句 consumer 关闭时使用线程查询降级，并把缺失字段与不完整结论明确列出。长 SQL 时长在服务器端获取，Sleep + 未结束 InnoDB 事务必须有 `innodb_trx` 证据；阻塞图来自 `data_lock_waits`/`data_locks`。Root Blocker 的 `KILL QUERY <id>;` 与 `KILL <id>;` 仅为人工审核文本；Sleep 会话通常没有当前查询可供 KILL QUERY 取消。Toolkit 不执行 KILL，也不把当前进程信息当作可靠的“上一条 SQL”。MySQL 8.0.46 的隔离 Docker 验证是历史结果。2026-10-20 MySQL 8.4 当前 HEAD 代表性回归为 `PARTIAL`；导入模块版本与 PyMySQL 分发元数据不一致，已登记 `MYSQL-DRIVER-PROVENANCE-001`。最近语句能力有源码与自动化测试覆盖，但本轮没有完成其独立 live acceptance；它不等同于 Phase 2 Digest Top SQL。其他目标版本、TLS 与监控权限须按目标环境验收。历史记录见 [docs/VERIFICATION_V0_6.md](docs/VERIFICATION_V0_6.md)，当前验收见 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。
 
@@ -193,7 +199,7 @@ python -m pip wheel ".[all-db]" --wheel-dir deployment/wheelhouse
 - `credentials.py`：凭据接口、交互式 Provider、仅内存 Mock、生产拒绝 Mock。
 - `registry.py` / `security.py`：外置 SQL+同名 YAML 元数据、审查标志、只读风险、限额、保守危险词检查。
 - `adapters.py` / `collectors.py`：统一 Adapter/CollectorResult 接口、独立 NativeTool。
-- `sqlserver.py` / `preflight.py` / `sqlserver_collectors.py`：SQL Server 连接、权限预检、五类基础 Collector。
+- `sqlserver.py` / `preflight.py` / `sqlserver_collectors.py`：SQL Server 连接、身份/版本与账号安全检查、基础 Collector。
 - `postgresql.py` / `postgresql_collectors.py` / `postgresql_slow.py`：PostgreSQL 只读连接、监控预检、基础采集及 Slow Diagnose。
 - `mysql.py` / `mysql_collectors.py` / `mysql_slow.py`：MySQL 5.7/8.0/8.4 已有版本路径的只读连接、监控预检、基础采集及 Slow Diagnose。
 - `oracle.py` / `oracle_collectors.py` / `oracle_slow.py`：Oracle 11gR2+ 目标范围内已有版本路径的 Thin 只读连接、监控预检、基础采集及 Slow Diagnose。
@@ -236,7 +242,7 @@ dba --settings config/runtime.yaml collect my-oracle long-running
 dba --settings config/runtime.yaml diagnose my-oracle slow
 ```
 
-Oracle 监控账号需专用非 SYS/SYSTEM 账号，直接授予 CREATE SESSION，并由 DBA 人工审核后直接授予 SYS.V_$INSTANCE、V_$DATABASE、V_$SESSION、V_$SQL、V_$TRANSACTION 的 SELECT；V_$LOCK、V_$LOCKED_OBJECT、V_$PROCESS、V_$SESSION_WAIT 为可选证据视图。缺少可选锁视图时只使用 V$SESSION 的阻塞关系并在报告标记证据缺失；不会自动 GRANT。账号不得有角色、写权限对象授权或自有对象。预检是本次连接的保守检查，不是整个数据库授权模型的完整证明。
+Oracle 监控授权按数据库版本和使用功能见 [Database Permissions](docs/DATABASE_PERMISSIONS.md)。Toolkit 不逐条预检授权，也不会自动生成或执行 GRANT。
 
 当前执行时长依据 SQL_EXEC_START；V$SQL elapsed/cpu/read 字段明确标为跨执行累计值。Idle Transaction 要求 INACTIVE 会话与 V$TRANSACTION 真实关联。报告列出当前/上次 SQL、来源字段、锁链、多层根阻塞者、异常和采样质量；无法可靠取得客户端 IP 时明确显示 unavailable。ReferenceCommand 仅为纯文本，Toolkit **不会执行 KILL SESSION**。
 

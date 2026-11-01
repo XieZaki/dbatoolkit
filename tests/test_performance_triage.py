@@ -49,7 +49,6 @@ def _chain_report(*, truncated: bool = False) -> DiagnosticReport:
             {"session_id": 20, "blocking_session_id": 10, "elapsed_ms": 90000},
             {"session_id": 40, "elapsed_ms": 14000},
         ],
-        "permission_readiness": {"status": "READY"},
     }
     return _report(DatabaseType.SQLSERVER, details, findings)
 
@@ -96,6 +95,42 @@ def test_truncated_block_graph_withholds_root_and_independence_conclusions() -> 
     assert by_sid[40]["classification_status"] == "UNKNOWN"
 
 
+@pytest.mark.parametrize("visibility_details", [
+    {"data_visibility": "PARTIAL"},
+    {"data_visibility": "UNKNOWN"},
+    {"full_profile_evidence_status": "INCOMPLETE"},
+])
+def test_partial_data_visibility_withholds_independent_slow_classification(
+    visibility_details: dict,
+) -> None:
+    row = {"processlist_id": 12, "thread_id": 54, "database_name": "sakila",
+           "duration_ms": 70000, "wait_type": None}
+    details = {
+        "samples": [
+            {"collector": "blocking", "success": True, "truncated": False,
+             "finished_at": NOW.isoformat()},
+            {"collector": "long_running", "success": True, "truncated": False,
+             "finished_at": NOW.isoformat()},
+        ],
+        "blocking_graph": {"roots": [], "children": {}, "anomalies": []},
+        "all_requests": [row], "long_running": [row],
+        **visibility_details,
+    }
+    report = _report(DatabaseType.MYSQL, details, (
+        Finding("LONG_RUNNING_SQL", Severity.WARNING, {"threshold_seconds": 10},
+                "Review observed request duration."),
+    ))
+
+    triage = build_performance_triage(report)
+    assessment = next(item for item in triage["assessments"]
+                      if item["native_identity"].get("processlist_id") == 12)
+
+    assert "INDEPENDENT_SLOW_SQL" not in assessment["classifications"]
+    assert assessment["classification_status"] == "UNKNOWN"
+    assert assessment["classification_evidence"]["INDEPENDENT_SLOW_SQL"]["status"] == "UNKNOWN"
+    assert any("independence cannot be confirmed" in reason for reason in triage["unknown_reasons"])
+
+
 @pytest.mark.parametrize("db_type,source,identity", [
     (DatabaseType.SQLSERVER, "active_requests", {"session_id": 52, "request_id": 7}),
     (DatabaseType.POSTGRESQL, "blocking", {"pid": 52, "backend_start": "2026-10-20T09:00:00Z"}),
@@ -114,7 +149,6 @@ def test_native_database_identity_is_not_collapsed(db_type: DatabaseType, source
                      "finished_at": NOW.isoformat()}],
         "blocking_graph": {"roots": [], "children": {}, "anomalies": []},
         "all_requests": [row], "long_running": [row],
-        "permission_readiness": {"status": "READY"},
     }
     assessment = build_performance_triage(_report(db_type, details))["assessments"][0]
     native = assessment["native_identity"]
@@ -127,16 +161,14 @@ def test_native_database_identity_is_not_collapsed(db_type: DatabaseType, source
         assert native["inst_id"] == 2 and native["serial_number"] == 8
 
 
-def test_missing_permission_and_empty_snapshot_are_unknown_not_healthy() -> None:
+def test_failed_required_sample_and_empty_snapshot_are_unknown_not_healthy() -> None:
     report = _report(DatabaseType.POSTGRESQL, {
         "samples": [{"collector": "blocking", "success": False, "truncated": False}],
-        "permission_readiness": {"status": "MISSING", "missing_optional": ["blocking"]},
     })
     triage = build_performance_triage(report)
     assert triage["status"] == "UNKNOWN"
     assert triage["assessments"] == []
     assert any("not a health assertion" in reason for reason in triage["unknown_reasons"])
-    assert any("Permission readiness is MISSING" in reason for reason in triage["unknown_reasons"])
 
 
 def test_identity_ambiguity_and_graph_anomaly_degrade_classification() -> None:
@@ -159,7 +191,6 @@ def test_oracle_serial_number_conflict_suppresses_sid_only_root_attribution() ->
                    "transaction_age_seconds": 200, "transaction_id": "xid-1"}],
         "all_sessions": [{"inst_id": 1, "sid": 52, "serial_number": 9}],
         "all_requests": [],
-        "permission_readiness": {"status": "READY"},
     }, (Finding("LONG_TRANSACTION", Severity.WARNING,
                 {"inst_id": 1, "sid": 52, "serial_number": 8,
                  "transaction_age_seconds": 200, "transaction_id": "xid-1"},
@@ -198,6 +229,43 @@ def test_cli_and_html_share_labels_sources_and_uncertainty_without_sql_text() ->
     assert "blocking" in html or "active_requests" in html
     assert triage["database_id"] == "lab"
     assert triage["server_version"] == "16.0"
+
+
+@pytest.mark.parametrize("report,expected_status,expected_reason", [
+    (_report(DatabaseType.ORACLE, {
+        "version": "23.0.0.0.0",
+        "samples": [{"collector": "active_sessions", "success": False,
+                     "truncated": False, "finished_at": NOW.isoformat()}],
+        "data_visibility": "PARTIAL",
+        "emergency_evidence_complete": False,
+    }), "UNKNOWN", "No triage candidate was observed"),
+    (_chain_report(truncated=True), "PARTIAL", "Blocking evidence source active_requests was truncated"),
+])
+def test_empty_or_partial_cli_triage_exposes_status_and_evidence_limits(
+    report: DiagnosticReport, expected_status: str, expected_reason: str,
+) -> None:
+    triage = build_performance_triage(report)
+    report.details["performance_triage"] = triage
+    if expected_status == "PARTIAL":
+        report.details["data_visibility"] = "PARTIAL"
+        triage = build_performance_triage(report)
+        report.details["performance_triage"] = triage
+
+    console = render_emergency_triage(
+        report, build_priority_candidates(report, include_blocking_victims=True),
+        capture_started_at=NOW.isoformat())
+    json_result = json.loads(render_json({"report": asdict(report)}))["report"]
+    html = HtmlReportRenderer().render(build_report_model(
+        report, build_incident_summary(report, "reports/lab_slow.html")))
+
+    assert triage["status"] == expected_status
+    assert f"总体状态：{expected_status}" in console
+    assert f"数据可见性：{report.details.get('data_visibility', 'UNKNOWN')}" in console
+    assert any(expected_reason in reason for reason in triage["unknown_reasons"])
+    assert expected_reason in console
+    assert json_result["details"]["performance_triage"] == triage
+    assert expected_status in html
+    assert expected_reason in html
 
 
 def test_evidence_references_never_copy_captured_sql_or_credentials() -> None:

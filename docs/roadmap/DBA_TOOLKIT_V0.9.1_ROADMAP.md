@@ -40,7 +40,7 @@ An open-ended `+` target never auto-promotes a future release. A new family beco
 - Only the Inventory-selected instance is contacted; no Inventory-wide diagnosis and no discovered-peer connection.
 - Production operation is read-only, bounded, version-aware, least-privilege, offline, and fail-closed.
 - SQL comes only from reviewed Registry entries with explicit timeout and row bounds.
-- Version-Aware Profile, Permission Registry, Preflight, parser contract, and Registry SQL evolve atomically.
+- Version-Aware Profile, parser contract, and reviewed Registry SQL evolve together. Required database permissions are documented as deployment preparation in `docs/DATABASE_PERMISSIONS.md`; the approved `PERMISSION-PREFLIGHT-001` simplification supersedes historical references to runtime Permission Registry/readiness.
 - Credentials never enter Inventory, CLI arguments, logs, reports, environment variables, or repository artifacts.
 - Reference termination or permission commands are text for human review; Toolkit never executes them.
 - No automatic KILL, cancel/terminate, failover, restart, repair, DDL/DML, GRANT/REVOKE, index, hint, parameter, or forced-plan action.
@@ -54,9 +54,9 @@ An open-ended `+` target never auto-promotes a future release. A new family beco
 The following remain part of the product and may not be silently removed:
 
 - Credential Provider, encrypted credential storage, JIT resolution, and current-user Credential Session security.
-- Inventory directory model and non-sensitive per-instance Connection Profile.
+- Inventory directory model and non-sensitive per-instance Connection Profile. Directory scans skip symbolic-link YAML files and do not traverse symbolic-link directories; explicitly selected YAML files retain direct-load behavior. Disabled assets remain visible to list/show and are rejected before Credential Resolver use by connection and diagnosis operations.
 - Version-Aware Diagnostic Profiles and fail-closed version routing.
-- Permission Registry, Account Security, Feature Readiness, and database-specific Preflight.
+- Database permission preparation guide; runtime keeps version detection, read-only SQL enforcement, and narrowly justified dangerous-account safeguards, not feature permission readiness.
 - Offline Runtime Manifest, lock inputs, wheelhouse, bootstrap, upgrade, and rollback flows.
 - SQL Registry review, read-only enforcement, bounded collection, cleanup, and redaction.
 - Four-database Slow/Blocking, Disk-Growth, and Replication capabilities.
@@ -66,6 +66,8 @@ The following remain part of the product and may not be silently removed:
 - Linux deployment/IPC validation and old driver/TLS interoperability work.
 - MongoDB and Redis as long-term extensions, not current diagnosis claims.
 - `pt-query-digest` and `pgBadger` as optional, separate offline-log-analysis PoCs, not runtime dependencies.
+
+Credential maintenance remains a preserved project foundation. The user approved a conditional close of `CRED-MAINT-001` limited to the Windows-local, explicitly selected SQLite Provider and authenticated read-only legacy JSON compatibility; see the Backlog for canonical state and Acceptance §31 for evidence. This does not approve real-Store migration or production release, and it does not eliminate the documented same-user tampering, parent-directory replacement, file rollback, power-loss/storage, or older-Toolkit write risks.
 
 ## 5. Phase dependency chain
 
@@ -121,7 +123,7 @@ Use existing four-database Slow/Blocking and P0 staged evidence to distinguish R
 ### Scope
 
 - Single instance, one best-effort snapshot, serial bounded SQL, and existing Slow collectors.
-- Reuse shared Incident, ReportModel, Presenter, Profile, Permission, and Registry paths.
+- Reuse shared Incident, ReportModel, Presenter, Version Profile, and Registry paths, plus narrowly scoped account-safety checks. Feature grants are prepared by the DBA from the deployment guide.
 - Preserve database-native identity, transaction, wait, and blocking semantics.
 - Every triage conclusion names its observed evidence source and completeness; missing, failed, truncated, unsupported, or identity-conflicting evidence degrades to UNKNOWN/PARTIAL rather than a healthy/no-issue claim.
 - Leave an explicit route to Phase 2 Top SQL without running expensive ranking queries by default.
@@ -146,19 +148,34 @@ Identify long-running, high-frequency short, high cumulative CPU, high logical-r
 
 ### Scope
 
-- Keep metric semantics explicit: `CURRENT_REQUEST`, `CUMULATIVE`, `DATABASE_HISTORY`, `SAMPLE_DELTA`, `SINGLE_EXECUTION`, or `UNKNOWN`.
+- Keep Top SQL metric semantics explicit as `CURRENT`, `CUMULATIVE`, `INTERVAL_DELTA`, or `HISTORICAL`; report missing/unknown capability through quality state rather than a fabricated metric value.
 - Use separate Top-N lists per metric; never create a cross-database composite health score.
 - Evaluate MySQL digest summaries, SQL Server query stats, Oracle V$SQL/V$SQLSTATS child semantics, and optional preconfigured PostgreSQL pg_stat_statements as separate database tasks.
 - Do not auto-install PostgreSQL extensions, enable Performance Schema consumers, change server parameters, or infer physical reads from unrelated counters.
 - Short-window delta sampling remains opt-in until reset, identity, and cost behavior are tested.
+- Implement a database-neutral result/quality contract first, without selecting the first database; then implement each engine source independently through its existing Profile, reviewed Registry, Collector, and shared reports. Update the deployment permission guide when a new source needs a grant.
+- Distinguish source capabilities: current request, cache-resident cumulative statistics, optional database statement statistics, and explicitly sampled interval deltas. A missing metric remains unavailable, never zero.
+- SQL Server current-request Active SQL ranking from `sys.dm_exec_requests` is a separate `CURRENT` snapshot capability from cache-resident cumulative `sys.dm_exec_query_stats` Top SQL. It does not change or satisfy the four-engine cumulative Top SQL collector sequence, and it is not comprehensive-diagnosis integration.
+- Keep MySQL recent statement history separate from digest rankings; keep database/instance I/O statistics separate from SQL attribution; do not require Query Store, extensions, or premium diagnostics packs.
 
 ### Entry criteria
 
-Phase 1 conclusions and evidence semantics are accepted. The user then selects the first database task based on safe test availability and operational value.
+Phase 1 conclusions and evidence semantics are accepted. First build the database-neutral result contract; before any engine source task, the user selects that engine based on safe test availability and operational value. This design deliberately does not select the first database.
 
 ### Exit criteria
 
 At least one explicitly supported database distinguishes a long current request, a high-frequency short statement, and a lock-wait victim using correct metric semantics. Each database is accepted independently.
+
+### Implementation order
+
+1. `V091-P2-TOPSQL-CONTRACT-001`: shared metric/evidence contract, quality states, and serialization fixtures; no database SQL.
+2. Implement and verify the four independent engine collectors (`V091-P2-TOPSQL-SQLSERVER-001`, `...-POSTGRESQL-001`, `...-MYSQL-001`, `...-ORACLE-001`) one at a time; the sequence remains SQL Server, PostgreSQL, MySQL, then Oracle. Backlog is the sole source of task state; sequence position does not imply live verification outside the exact version/scope recorded in Acceptance.
+3. Only after all four engine collectors are verified, define and approve a separate task to integrate them into the comprehensive diagnosis flow. Per-engine collector tasks do not modify that flow.
+4. `V091-P2-TOPSQL-DELTA-001`: opt-in bounded two-sample deltas only after at least one cumulative engine source is verified; this does not authorize a daemon or default double-sampling.
+
+The user's sequencing decision is explicit: complete all four Top SQL collectors before comprehensive-diagnosis integration. Do not create a duplicate integration Task ID before that gate is met.
+
+Every engine task must include version-family field routing, least-privilege review, preflight/visibility states, bounds, automated tests, and scoped real E2E before that feature is called verified. Task lifecycle state is maintained only in Backlog.
 
 ## 9. Phase 3 — Deep SQL and execution-plan diagnosis
 
@@ -198,6 +215,12 @@ Extend the existing Disk-Growth and Replication foundations one scenario at a ti
 ### Entry and exit criteria
 
 The user selects one bounded scenario. It extends existing profiles and permissions, has database-specific acceptance, and does not duplicate Disk-Growth or Replication. Completion of one database scenario does not imply parity across four databases.
+
+On 2026-10-28 the user approved conditional closure of the SQL Server Memory Grant scenario on its implemented and baseline-tested scope, with the deferred production-release evidence gates retained in Acceptance §26. This is not full live verification. PostgreSQL WAL / replication slots may be planned next as one bounded scenario; implementation requires separate approval and must first assess existing Disk-Growth and Replication coverage. Work remains sequential.
+
+On 2026-10-28 the user approved the PostgreSQL WAL retention and replication-slot enhancement within the existing disk-growth route. Its canonical status is in Backlog and its actual evidence is in Acceptance §27; it does not close the separate Memory Grant release gates.
+
+On 2026-10-28 the user accepted conditional closure of the PostgreSQL WAL enhancement. Its remaining real-environment evidence gates are retained in Acceptance §27. The next authorized work is a four-engine integration inventory and regression, not another incident scenario; conditional scenario closure does not establish production release readiness.
 
 ## 11. Phase 5 — Unified HTML incident workbench
 

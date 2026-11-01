@@ -45,6 +45,8 @@ DEFAULT_HUMAN_REPORT_POLICY = HumanReportPolicy()
 class ReportTable:
     headers: tuple[str, ...]
     rows: tuple[tuple[str, ...], ...]
+    cell_links: tuple[tuple[int, int, str], ...] = ()
+    row_states: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class ReportCodeBlock:
     content: str
     language: str = "text"
     collapsed: bool = False
+    anchor_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,3 +76,4 @@ class ReportModel:
     metadata: tuple[tuple[str, str], ...]
     incident_summary: IncidentSummary
     sections: tuple[ReportSection, ...]
+    scenario: str = ""

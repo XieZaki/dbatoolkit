@@ -106,6 +106,9 @@ def test_database_specific_connection_resolution(
     {"xxx": "x"},
     {"password": 'DBA-Test-Secret-987654'},
     {"auth": {"password": 'DBA-Test-Secret-987654'}},
+    {"secret": "<TEST_ONLY>"},
+    {"auth": {"token": "<TEST_ONLY>"}},
+    {"unknown_secret_option": "<TEST_ONLY>"},
     {"username": "monitor"},
     {"user": "monitor"},
     {"token": 'DBA-Test-Secret-987654'},
@@ -333,6 +336,38 @@ def test_cli_show_and_test_connection_expose_only_effective_safe_fields(
     assert merged["query_timeout"] == 20
 
 
+@pytest.mark.parametrize("store_state", ["READY", "LOCKED", "DENIED"])
+@pytest.mark.parametrize("native_drivers,selected", [
+    (("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"), "ODBC Driver 18 for SQL Server"),
+    (("ODBC Driver 17 for SQL Server",), "ODBC Driver 17 for SQL Server"),
+    ((), None),
+])
+@pytest.mark.parametrize("db_type", ["sqlserver", "postgresql", "mysql", "oracle"])
+def test_show_never_accesses_credential_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    store_state: str, native_drivers: tuple[str, ...], selected: str | None, db_type: str,
+) -> None:
+    from dba import runtime
+    from dba.credential_session import CredentialSessionClient
+
+    def forbidden_session(_: CredentialSessionClient) -> dict[str, str]:
+        pytest.fail(f"show accessed credential session ({store_state})")
+
+    monkeypatch.setattr(CredentialSessionClient, "status", forbidden_session)
+    monkeypatch.setattr(runtime, "installed_odbc_drivers", lambda: native_drivers)
+    monkeypatch.setattr(runtime, "_package", lambda _: {"status": "READY"})
+    inventory = tmp_path / "inventory.yaml"
+    inventory.write_text(yaml.safe_dump({"databases": [{
+        "id": "safe", "name": "Safe", "db_type": db_type, "host": "test.invalid",
+        "port": 1433, "credential_alias": "safe-alias", "environment": "test",
+    }]}), encoding="utf-8")
+    assert main(["--inventory", str(inventory), "show", "safe", "--json"]) == 0
+    output = capsys.readouterr().out
+    assert PASSWORD not in output
+    if db_type == "sqlserver":
+        assert json.loads(output)["effective_connection"]["selected_driver"] == selected
+
+
 def test_cli_uses_stored_credential_alias_without_interactive_provider(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -348,6 +383,58 @@ def test_cli_uses_stored_credential_alias_without_interactive_provider(
     result = json.loads(capsys.readouterr().out)
     assert result["credential"] == {"alias": "shared", "backend": "Fake OS Store"}
     assert PASSWORD not in json.dumps(result)
+
+
+@pytest.mark.parametrize(("command", "extra"), [
+    ("test-connection", ()),
+    ("diagnose", ("slow",)),
+    ("collect", ("server-info",)),
+    ("check", ()),
+    ("status", ()),
+])
+def test_disabled_asset_is_rejected_before_credential_resolution(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str,
+    extra: tuple[str, ...],
+) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(yaml.safe_dump({"databases": [{
+        "id": "disabled", "name": "Disabled", "db_type": "sqlserver",
+        "host": "test.invalid", "port": 1433, "credential_alias": "synthetic-alias",
+        "enabled": False,
+    }]}), encoding="utf-8")
+
+    class FakeResolver:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def get_credential(self, alias: str) -> Credential:
+            self.calls.append(alias)
+            return Credential("synthetic-user", "synthetic-password")
+
+    resolver = FakeResolver()
+    driver = FakeDriver()
+    args = ["--inventory", str(inventory_path), "--sql-root", str(ROOT / "sql"),
+            command, "disabled", *extra, "--json"]
+    assert main(args, provider=resolver, driver=driver) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["error_type"] == "InstanceDisabled"
+    assert resolver.calls == []
+    assert driver.calls == []
+
+
+def test_disabled_asset_remains_visible_to_list_and_show(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(yaml.safe_dump({"databases": [{
+        "id": "disabled", "name": "Disabled", "db_type": "sqlserver",
+        "host": "test.invalid", "port": 1433, "credential_alias": "synthetic-alias",
+        "enabled": False,
+    }]}), encoding="utf-8")
+    assert main(["--inventory", str(inventory_path), "list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["databases"][0]["enabled"] is False
+    assert main(["--inventory", str(inventory_path), "show", "disabled", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["enabled"] is False
 
 
 def test_cli_has_no_password_argument(capsys: pytest.CaptureFixture[str]) -> None:

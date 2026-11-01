@@ -1,0 +1,18 @@
+name: top_sql
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 15
+max_rows: 101
+reviewed: true
+description: Bounded SQL Server cache-resident per-statement cumulative query statistics; returns native statement and compiled-plan identities, never executes captured SQL or retrieves Showplan XML.
+feature: top-sql
+version_families:
+  - 2008r2
+  - "2012"
+  - "2014"
+  - "2016"
+  - "2017"
+  - "2019"
+  - "2022"
+runtime_variants:
+  - default

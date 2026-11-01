@@ -49,7 +49,7 @@ def is_structured_incomplete_diagnosis(command: tuple[str, ...], returncode: int
 def is_oracle_create_session_block(command: tuple[str, ...], returncode: int,
                                    output: str) -> bool:
     if returncode == 0 or len(command) < 2 or command[0] not in {
-        "check", "test-connection", "permissions", "collect", "diagnose"
+        "check", "test-connection", "collect", "diagnose"
     }:
         return False
     try:
@@ -61,32 +61,6 @@ def is_oracle_create_session_block(command: tuple[str, ...], returncode: int,
         isinstance(error, dict)
         and error.get("vendor_code") == "ORA-01045"
         and "CREATE SESSION" in str(error.get("message", ""))
-    )
-
-
-def is_expected_oracle_disk_permission_block(command: tuple[str, ...], returncode: int,
-                                             output: str) -> bool:
-    """Recognize only the documented local Oracle test account's missing core grants."""
-    if returncode == 0 or command != ("diagnose", "oraclefree", "disk-growth"):
-        return False
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError:
-        return False
-    readiness = payload.get("permission_readiness")
-    expected_missing = {
-        "SELECT SYS.DBA_TABLESPACE_USAGE_METRICS",
-        "SELECT SYS.DBA_TABLESPACES",
-        "SELECT SYS.DBA_DATA_FILES",
-        "SELECT SYS.DBA_TEMP_FREE_SPACE",
-    }
-    return bool(
-        payload.get("error_type") == "MissingPermission"
-        and isinstance(readiness, dict)
-        and readiness.get("feature") == "disk-growth"
-        and readiness.get("status") == "MISSING"
-        and set(readiness.get("missing_required", ())) == expected_missing
-        and readiness.get("toolkit_executed") is False
     )
 
 
@@ -130,7 +104,6 @@ def test_real_cli_against_explicit_local_test_inventory() -> None:
             ("show", instance.id),
             ("check", instance.id),
             ("test-connection", instance.id),
-            ("permissions", instance.id, "--all-features"),
             *(('collect', instance.id, collector)
               for collector in supported_collectors(instance.db_type.value)),
             ("diagnose", instance.id, "slow"),
@@ -167,20 +140,15 @@ def test_real_cli_against_explicit_local_test_inventory() -> None:
         expected_create_session_block = is_oracle_create_session_block(
             command, result.returncode, output
         )
-        expected_oracle_disk_permission_block = is_expected_oracle_disk_permission_block(
-            command, result.returncode, output
-        )
         outcomes.append({
             "command": list(command), "exit_code": result.returncode, "elapsed_ms": elapsed_ms,
             "output_bytes": len(output.encode("utf-8")),
             **({"expected_blocker": "ORA-01045 CREATE SESSION"}
                if expected_create_session_block else {}),
-            **({"expected_blocker": "Oracle disk-growth core grants missing"}
-               if expected_oracle_disk_permission_block else {}),
         })
         assert result.returncode == 0 or is_structured_incomplete_diagnosis(
             command, result.returncode, output
-        ) or expected_create_session_block or expected_oracle_disk_permission_block, (
+        ) or expected_create_session_block, (
             f"CLI command failed: {' '.join(command)}"
         )
         if expected_create_session_block:

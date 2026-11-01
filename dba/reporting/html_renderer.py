@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
+from dataclasses import replace
 from html import escape
 from importlib.resources import files
 
@@ -28,34 +31,107 @@ class HtmlReportRenderer:
             template = template.replace("{{" + key + "}}", value)
         return template
 
-    def _table(self, table: ReportTable) -> str:
+    def _table(self, table: ReportTable, *, table_id: str | None = None,
+               session_search: bool = False, tree: bool = False) -> str:
         headers = "".join(f"<th scope=\"col\">{_escape(_label(header))}</th>" for header in table.headers)
-        rows = "".join("<tr>" + "".join(f"<td>{_escape(value)}</td>" for value in row) + "</tr>"
-                       for row in table.rows)
-        return self._fragment("table.html", HEADERS=headers, ROWS=rows)
+        links = {(row_index, column_index): target
+                 for row_index, column_index, target in getattr(table, "cell_links", ())
+                 if type(row_index) is int and type(column_index) is int and isinstance(target, str)
+                 and re.fullmatch(r"#[a-z][a-z0-9_-]{0,100}", target)}
+        state_labels = {
+            "blocked": ("danger", "已确认参与阻塞"),
+            "clear": ("clear", "完整采样确认未参与阻塞"),
+            "partial": ("caution", "阻塞状态未能确认"),
+        }
+        rendered_rows = []
+        for row_index, row in enumerate(table.rows):
+            cells = []
+            for column_index, value in enumerate(row):
+                normalized = str(redact(value)).strip().upper()
+                badge_class = {
+                    "CRITICAL": "danger", "HIGH": "danger", "FAILED": "danger",
+                    "MISSING_REQUIRED": "danger", "COMPLETE": "clear", "HEALTHY": "clear",
+                    "READY": "clear", "WARNING": "caution", "PARTIAL": "caution",
+                    "OPTIONAL_UNAVAILABLE": "caution", "TRUNCATED": "caution",
+                    "UNKNOWN": "caution", "NOT_COLLECTED": "caution",
+                    "IDENTITY_INCOMPLETE": "caution", "NOT_ASSESSED": "caution",
+                }.get(normalized)
+                escaped = (f'<span class="state-badge {badge_class}">{_escape(_label(str(value)))}</span>'
+                           if badge_class else _escape(value))
+                state = table.row_states[row_index] if row_index < len(table.row_states) else ""
+                if column_index == 0 and state in state_labels:
+                    state_class, state_text = state_labels[state]
+                    escaped = f'<span class="state-badge {state_class}">{state_text}</span> {escaped}'
+                target = links.get((row_index, column_index))
+                if target is not None:
+                    escaped = f'<a href="{_escape(target)}">{escaped}</a>'
+                cell_class = ' class="tree-session"' if tree and column_index == 1 else ""
+                cells.append(f"<td{cell_class}>{escaped}</td>")
+            state = table.row_states[row_index] if row_index < len(table.row_states) else ""
+            if state not in {"blocked", "clear", "partial"}:
+                state = ""
+            row_class = f' class="row-{state}" data-diagnostic-state="{state}"' if state else ""
+            rendered_rows.append(f"<tr{row_class}>" + "".join(cells) + "</tr>")
+        rows = "".join(rendered_rows)
+        identifier = f' id="{_escape(table_id)}"' if table_id and re.fullmatch(
+            r"[a-z][a-z0-9_-]{0,100}", table_id) else ""
+        search_attr = ' data-session-search="true"' if session_search else ""
+        table_markup = f"<table{identifier}{search_attr}><thead><tr>{headers}</tr></thead><tbody>{rows}</tbody></table>"
+        return f'<div class="table-wrap">{table_markup}</div>'
 
-    def _section(self, section: ReportSection) -> str:
+    def _section(self, section: ReportSection, *, slow: bool = False) -> str:
         fields = "".join(self._fragment("field.html", LABEL=_escape(_label(label)), VALUE=_escape(value))
                          for label, value in section.fields)
-        tables = "".join(self._table(table) for table in section.tables)
+        searchable = section.section_id in {"appendix", "session-sources"}
+        tables = "".join(self._table(
+            table,
+            table_id=("sessionTable" if section.section_id == "appendix" and index == 0 else
+                      "sessionIdentityTable" if section.section_id == "session-sources" and index == 0 else
+                      f"{section.section_id}-table-{index + 1}" if slow else None),
+            session_search=searchable,
+            tree=section.section_id == "blocking")
+            for index, table in enumerate(section.tables))
         blocks: list[str] = []
         for block in section.code_blocks:
             code = self._fragment("code_block.html", TITLE=_escape(_label(block.title)),
                                   LANGUAGE=_escape(block.language), CONTENT=_escape(block.content))
-            blocks.append(self._fragment("details.html", TITLE=_escape(_label(block.title)), BODY=code)
-                          if block.collapsed else code)
+            if slow:
+                copy_button = (f'<button class="button button-copy" type="button" data-copy="{_escape(block.content)}">'
+                               '复制文本</button>')
+                code = code.replace("<div class=\"code-block\">", '<div class="code-block code-copyable">', 1)
+                code = code.replace("<h3>", f"{copy_button}<h3>", 1)
+            anchor_id = getattr(block, "anchor_id", None)
+            if anchor_id and re.fullmatch(r"[a-z][a-z0-9_-]{0,100}", anchor_id):
+                code = f'<div id="{_escape(anchor_id)}">{code}</div>'
+            if block.collapsed:
+                detail = self._fragment("details.html", TITLE=_escape(_label(block.title)), BODY=code)
+                if slow:
+                    detail = detail.replace("<details>", '<details data-expandable>', 1)
+                blocks.append(detail)
+            else:
+                blocks.append(code)
         summary = f"<p>{_escape(section.summary)}</p>" if section.summary else ""
         body = summary + (f"<dl class=\"fields\">{fields}</dl>" if fields else "") + tables + "".join(blocks)
         severity = _escape(section.severity.upper())
         section_html = self._fragment("section.html", ID=_escape(section.section_id),
                                       TITLE=_escape(_label(section.title)), SEVERITY=severity, BODY=body)
+        if slow:
+            section_html = section_html.replace("<section id=", '<section class="report-section" id=', 1)
+            if section.section_id == "immediate-recovery":
+                section_html = section_html.replace(
+                    'class="report-section"', 'class="report-section manual-action"', 1)
         if section.collapsed:
             section_html = section_html.replace(f'id="{_escape(section.section_id)}"', "")
-            return self._fragment("collapsible_section.html", ID=_escape(section.section_id),
-                                  TITLE=_escape(_label(section.title)), BODY=section_html)
+            collapsible = self._fragment("collapsible_section.html", ID=_escape(section.section_id),
+                                         TITLE=_escape(_label(section.title)), BODY=section_html)
+            if slow:
+                collapsible = collapsible.replace("<details", '<details data-expandable', 1)
+            return collapsible
         return section_html
 
     def render(self, model: ReportModel) -> str:
+        if model.scenario == "slow":
+            return self._render_slow(model)
         incident = model.incident_summary
         cards = (
             ("状态", _label(incident.status)), ("主要问题", _label(incident.primary_problem)),
@@ -101,10 +177,106 @@ class HtmlReportRenderer:
         page = page.replace("{{BODY}}", body)
         return page + "\n"
 
+    def _render_slow(self, model: ReportModel) -> str:
+        if any(section.section_id == "report-budget" for section in model.sections):
+            # Evidence was already reduced by the shared policy. Keep the final shell
+            # compact enough to honor a caller's hard byte ceiling.
+            return self.render(replace(model, scenario="bounded-slow"))
+        incident = model.incident_summary
+        sections = {section.section_id: section for section in model.sections}
+        metadata = dict(model.metadata)
+
+        def pick(values: Mapping[str, object], *keys: str) -> object | None:
+            return next((values[key] for key in keys if values.get(key) not in (None, "")), None)
+
+        status = incident.status or "UNKNOWN"
+        severity = incident.severity or "UNKNOWN"
+        status_class = ("danger" if severity in {"CRITICAL", "HIGH"} or status == "CRITICAL" else
+                        "clear" if status == "HEALTHY" and incident.data_completeness == "COMPLETE" else
+                        "caution" if status in {"DEGRADED", "PARTIAL"} or
+                        incident.data_completeness != "COMPLETE" else "unknown")
+        metadata_html = "".join(
+            f'<div class="hero-meta-item"><span>{_escape(_label(key))}</span><strong>{_escape(value)}</strong></div>'
+            for key, value in model.metadata)
+
+        def meta_value(*keys: str, default: str = "UNKNOWN") -> str:
+            return next((str(metadata[key]) for key in keys if metadata.get(key) not in (None, "")), default)
+
+        impact = incident.impact
+        timing = incident.timing
+        metrics = (
+            ("阻塞请求", pick(impact, "blocked_requests", "blocked_sessions", "blocked_statements")),
+            ("活动请求", pick(impact, "active_requests", "active_sessions")),
+            ("未结束事务", pick(impact, "open_transactions", "idle_transactions", "long_transactions")),
+            ("最长阻塞", pick(timing, "longest_block", "longest_blocking", "blocking_duration")),
+        )
+        metric_html = "".join(
+            f'<article class="metric {"danger" if label == "阻塞请求" and value not in (None, 0, "0") else ""}">'
+            f'<span class="metric-label">{_escape(label)}</span><strong>{_escape("—" if value is None else value)}</strong></article>'
+            for label, value in metrics)
+        summary_lines = [
+            f"诊断：{model.title}",
+            f"实例：{meta_value('Instance', '实例')}",
+            f"数据库：{meta_value('Database Type', '数据库类型')} / {meta_value('Version', '版本')}",
+            f"采集：{meta_value('Capture Started', '采集开始', default='N/A')} — "
+            f"{meta_value('Capture Finished', '采集结束', default='N/A')}",
+            f"一致性：{meta_value('Snapshot Consistency', '快照一致性', default='UNKNOWN')}",
+            f"状态：{status} / {severity}；问题：{incident.primary_problem}；观测：{incident.observed_now}",
+            *[f"影响 {key}：{value}" for key, value in incident.impact.items()],
+            *[f"时间 {key}：{value}" for key, value in incident.timing.items()],
+        ]
+        summary_copy = "\n".join(summary_lines)
+
+        def render_section(section_id: str, *, collapsed: bool = False) -> str:
+            section = sections.get(section_id)
+            if section is None:
+                return ""
+            if collapsed and not section.collapsed:
+                section = replace(section, collapsed=True)
+            return self._section(section, slow=True)
+
+        root_blockers = render_section("root-blockers")
+        root_cause = render_section("root-cause")
+        chain = render_section("blocking")
+        recovery = render_section("immediate-recovery")
+        quality = render_section("collection-quality")
+        appendix_sections = "".join(render_section(item, collapsed=True)
+                                    for item in ("session-sources", "appendix") if item in sections)
+        reserved = {"root-blockers", "root-cause", "blocking", "immediate-recovery",
+                    "collection-quality", "session-sources", "appendix"}
+        evidence_sections = "".join(
+            render_section(section.section_id, collapsed=True)
+            for section in model.sections if section.section_id not in reserved)
+        toc_items = [("summary", "故障概况"), ("root-assessment", "根阻塞判断"),
+                     ("blocking-chain", "阻塞传播链"), ("manual-action", "人工处置参考"),
+                     ("evidence", "诊断证据"), ("collection-quality", "采集完整性"),
+                     ("session-appendix", "会话附录")]
+        toc = "".join(f'<a href="#{anchor}">{_escape(label)}</a>' for anchor, label in toc_items)
+        page = self._template("slow_report.html")
+        values = {
+            "PAGE_TITLE": _escape(model.title), "TITLE": _escape(model.title),
+            "STATUS": _escape(_label(status)), "SEVERITY": _escape(_label(severity)),
+            "STATUS_CLASS": status_class,
+            "PRIMARY_PROBLEM": _escape(_label(incident.primary_problem)),
+            "OBSERVED_NOW": _escape(_label(incident.observed_now)),
+            "COMPLETENESS": _escape(_label(incident.data_completeness)),
+            "SNAPSHOT_CONSISTENCY": _escape(_label(meta_value(
+                "Snapshot Consistency", "快照一致性", default="UNKNOWN"))),
+            "METADATA": metadata_html, "METRICS": metric_html,
+            "TOC": toc, "ROOT_ASSESSMENT": root_blockers + root_cause,
+            "BLOCKING_CHAIN": chain, "RECOVERY": recovery,
+            "EVIDENCE": evidence_sections, "QUALITY": quality,
+            "APPENDIX": appendix_sections, "SUMMARY_COPY": _escape(summary_copy),
+        }
+        for key, value in values.items():
+            page = page.replace("{{" + key + "}}", value)
+        return page + "\n"
+
 
 def _label(value: str) -> str:
     translations = {
         "UNKNOWN": "未知", "HEALTHY": "健康", "DEGRADED": "需关注", "NOT_DETECTED": "未观测到",
+        "NOT_ASSESSED": "未评估",
         "BLOCKING": "锁与阻塞", "IDLE_TRANSACTION": "长期未提交事务", "LONG_RUNNING_SQL": "慢 SQL",
         "HIGH_CONCURRENCY": "高并发", "Database": "数据库", "Instance": "实例",
         "Database Type": "数据库类型", "Version": "版本", "Scenario": "诊断场景",
@@ -142,6 +314,10 @@ def _label(value: str) -> str:
         "Direct Blocked": "直接阻塞会话", "Direct Blocker": "直接阻塞者",
         "SQL identifier type": "SQL 标识类型",
         "Root Blocker": "根阻塞会话", "Wait Resource": "等待资源描述",
+        "MySQL PROCESSLIST_ID": "MySQL PROCESSLIST_ID",
+        "Performance Schema THREAD_ID": "Performance Schema THREAD_ID",
+        "PostgreSQL PID": "PostgreSQL PID", "Oracle INST_ID": "Oracle INST_ID",
+        "Oracle SID": "Oracle SID", "Oracle SERIAL#": "Oracle SERIAL#",
         "Observation": "当前观测", "Session Open Transaction Count": "会话级未结束事务计数",
         "Identity quality": "身份可信度", "Identity reuse note": "会话复用提示",
         "Target Session": "目标会话", "Open Transaction": "未结束事务",

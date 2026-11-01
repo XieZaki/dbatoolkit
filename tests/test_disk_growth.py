@@ -11,7 +11,7 @@ import yaml
 from test_oracle import ROOT
 from test_oracle import fixture as oracle_fixture
 
-from dba.cli import _disk_growth_permission_impact, main
+from dba.cli import main
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import Credential, CredentialProvider
@@ -26,7 +26,6 @@ from dba.disk_growth_reporter import render_console, render_markdown
 from dba.incident import build_incident_summary
 from dba.inventory import ValidationError
 from dba.oracle import OracleAdapter
-from dba.presentation import render_human
 from dba.registry import SqlScriptRegistry
 from dba.security import check_sql
 from dba.versioning import PROFILE_BINDINGS, PROFILE_RESOLVER, DetectedDatabaseVersion
@@ -63,6 +62,163 @@ def instance(db_type: DatabaseType) -> DatabaseInstance:
                             "test", environment="development")
 
 
+@pytest.mark.parametrize("family", ["17", "18"])
+def test_postgresql_new_version_slot_evidence_is_not_lost(family: str) -> None:
+    profile = resolved_disk_profile(DatabaseType.POSTGRESQL, family, f"{family}.1")
+    contract = sql_profile_for_disk(profile.sql_profile_id or "")
+    report = build_disk_report(instance(DatabaseType.POSTGRESQL), (
+        result("disk_database", {"size_bytes": 1}),
+        result("disk_slots_17_plus", {"slot_name": "slot1", "slot_type": "logical",
+                                      "active": False, "wal_status": "lost",
+                                      "restart_lsn": None, "safe_wal_size": None}),
+        result("disk_wal_settings", {"in_recovery": False, "max_slot_wal_keep_size": "-1"}),
+    ), f"{family}.1", required_collectors=contract.required,
+       optional_collectors=contract.optional, profile_id=contract.profile_id)
+    wal = report.details["other"]["wal_retention"]
+    assert wal["slots"][0]["wal_status"] == "lost"
+    assert wal["slots"][0]["restart_lsn"] is None
+    assert wal["slots_evidence"]["status"] == "AVAILABLE"
+    assert "PG_SLOT_WAL_UNAVAILABLE" in {finding.title for finding in report.findings}
+
+
+@pytest.mark.parametrize("status,alert", [("reserved", False), ("extended", False),
+                                          ("unreserved", True), ("lost", True), (None, False)])
+@pytest.mark.parametrize("slot_type", ["physical", "logical"])
+def test_postgresql_wal_status_semantics(status: str | None, alert: bool, slot_type: str) -> None:
+    report = report_with_default_profile(DatabaseType.POSTGRESQL, (
+        result("disk_slots", {"slot_name": "test", "slot_type": slot_type, "active": True,
+                              "wal_status": status, "safe_wal_size": None,
+                              "restart_lsn": None, "retained_wal_estimate_bytes": None}),
+        result("disk_wal_settings", {"in_recovery": True, "current_lsn": None,
+                                     "max_slot_wal_keep_size": "-1"}),
+    ), "16")
+    wal = report.details["other"]["wal_retention"]
+    assert wal["lsn_source"] == "pg_last_wal_receive_lsn"
+    assert wal["slots"][0]["safe_wal_size"] is None
+    assert ("PG_SLOT_WAL_UNAVAILABLE" in {x.title for x in report.findings}) is alert
+
+
+def test_postgresql_wal_report_projects_the_same_slot_fields() -> None:
+    from dba.reporting.presenters import _disk_growth_sections
+
+    report = report_with_default_profile(DatabaseType.POSTGRESQL, (
+        result("disk_slots", {"slot_name": "fixture", "slot_type": "physical", "active": True,
+                              "restart_lsn": "0/123", "wal_status": "reserved", "safe_wal_size": 42}),
+        result("disk_wal_settings", {"in_recovery": False, "current_lsn": "0/456"}),
+    ), "16")
+    sections = _disk_growth_sections(report.details)
+    wal = next(section for section in sections if section.section_id == "wal-retention")
+    assert wal.tables
+    assert "fixture" in str(wal.tables[0])
+    assert "0/123" in str(wal.tables[0])
+
+
+@pytest.mark.parametrize("status", ["reserved", "extended", "unreserved", "lost"])
+@pytest.mark.parametrize("slot_type", ["physical", "logical"])
+def test_wal_nonempty_report_contract(status: str, slot_type: str) -> None:
+    from dba.reporting.presenters import _disk_growth_sections, _finding_section
+
+    slot = {"slot_name": "slot_fixture", "slot_type": slot_type, "active": True,
+            "active_pid": 77, "restart_lsn": None, "confirmed_flush_lsn": None,
+            "wal_status": status, "safe_wal_size": None, "retained_wal_estimate_bytes": None}
+    report = report_with_default_profile(DatabaseType.POSTGRESQL, (
+        result("disk_slots", slot), result("disk_wal_settings", {"in_recovery": False,
+            "current_lsn": "0/ABC", "max_slot_wal_keep_size": "-1"}),
+    ), "16")
+    encoded = json.loads(json.dumps(report.details, default=str))
+    assert encoded["other"]["wal_retention"]["slots"][0] == slot
+    section = next(x for x in _disk_growth_sections(report.details) if x.section_id == "wal-retention")
+    table = section.tables[0]
+    row = dict(zip(table.headers, table.rows[0], strict=True))
+    assert row["Slot"] == slot["slot_name"] and row["Type"] == slot_type
+    assert row["PID"] == "77" and row["WAL status"] == status
+    assert all(row[key] == "—" for key in ("Restart LSN", "Confirmed LSN", "Safe WAL bytes"))
+    assert "-1 means unlimited" in section.summary
+    risk = status in {"lost", "unreserved"}
+    assert ("PG_SLOT_WAL_UNAVAILABLE" in {x.title for x in report.findings}) is risk
+    assert (_finding_section(report) is not None) is risk
+
+
+def test_wal_truncated_report_does_not_claim_total_slot_count() -> None:
+    from dba.reporting.presenters import _disk_growth_sections
+
+    report = report_with_default_profile(DatabaseType.POSTGRESQL, (
+        result("disk_slots", {"slot_name": "observed"}, truncated=True),
+    ), "16")
+    section = next(x for x in _disk_growth_sections(report.details) if x.section_id == "wal-retention")
+    assert "total slot count is unknown" in section.summary
+    assert dict(section.fields)["Slot collection"] == "TRUNCATED"
+    assert dict(section.fields)["Observed slot count"] == "1"
+
+
+@pytest.mark.parametrize("collected", [(), ("failed",)])
+def test_wal_unavailable_report_does_not_claim_empty(collected: tuple[str, ...]) -> None:
+    from dba.reporting.presenters import _disk_growth_sections
+
+    samples = (result("disk_slots", success=False),) if collected else ()
+    report = report_with_default_profile(DatabaseType.POSTGRESQL, samples, "16")
+    section = next(x for x in _disk_growth_sections(report.details) if x.section_id == "wal-retention")
+    assert "Slot count unknown" in section.summary
+    assert "共0条" not in section.summary
+    assert dict(section.fields)["Observed slot count"] == "—"
+
+
+@pytest.mark.parametrize("family,slot_name", [("14", "disk_slots"), ("15", "disk_slots"),
+                                              ("17", "disk_slots_17_plus"), ("18", "disk_slots_17_plus")])
+def test_postgresql_wal_profile_has_one_versioned_slot_source(family: str, slot_name: str) -> None:
+    profile = resolved_disk_profile(DatabaseType.POSTGRESQL, family, f"{family}.1")
+    names = sql_profile_for_disk(profile.sql_profile_id or "").ordered_scripts
+    assert [name for name in names if name in {"disk_slots", "disk_slots_17_plus"}] == [slot_name]
+    assert names.count("disk_wal_settings") == 1
+
+
+@pytest.mark.parametrize("case,expected,count", [
+    ("missing", "NOT_COLLECTED", None),
+    ("empty", "EMPTY", 0),
+    ("failed", "PERMISSION_DENIED", None),
+    ("truncated", "TRUNCATED", 1),
+])
+def test_postgresql_wal_slot_evidence_state(case: str, expected: str, count: int | None) -> None:
+    cases = {"empty": result("disk_slots"), "failed": result("disk_slots", success=False),
+             "truncated": result("disk_slots", {"slot_name": "x"}, truncated=True)}
+    collected = (cases[case],) if case in cases else ()
+    report = report_with_default_profile(DatabaseType.POSTGRESQL, collected, "16")
+    wal = report.details["other"]["wal_retention"]
+    assert wal["slots_evidence"]["status"] == expected
+    assert wal["slot_count_observed"] == count
+
+
+def test_postgresql_wal_distances_are_not_summed_and_nulls_survive() -> None:
+    slots = ({"slot_name": "physical", "slot_type": "physical", "active": True,
+              "restart_lsn": "0/10", "confirmed_flush_lsn": None,
+              "retained_wal_estimate_bytes": 100},
+             {"slot_name": "logical", "slot_type": "logical", "active": True,
+              "restart_lsn": None, "confirmed_flush_lsn": "0/20",
+              "retained_wal_estimate_bytes": None})
+    report = report_with_default_profile(DatabaseType.POSTGRESQL, (
+        result("disk_slots", *slots), result("disk_wal_settings", {"in_recovery": False,
+               "max_slot_wal_keep_size": "-1", "wal_keep_size": "128MB"}),
+    ), "16")
+    wal = report.details["other"]["wal_retention"]
+    assert wal["lsn_source"] == "pg_current_wal_lsn"
+    assert wal["slots"] == list(slots)
+    assert "total_retained_wal_bytes" not in wal
+    assert wal["max_slot_wal_keep_size"] == "-1"
+
+
+@pytest.mark.parametrize("error,status", [("QueryDenied", "PERMISSION_DENIED"),
+                                           ("QueryTimeout", "TIMEOUT"),
+                                           ("QueryFailed", "FAILED")])
+def test_postgresql_wal_failed_evidence_is_classified(error: str, status: str) -> None:
+    now = datetime.now(timezone.utc)
+    sample = CollectorResult("demo", "disk_slots", now, now, 1.0, (), 0, False,
+                             False, error, None)
+    report = report_with_default_profile(DatabaseType.POSTGRESQL, (sample,), "16")
+    wal = report.details["other"]["wal_retention"]
+    assert wal["slots_evidence"]["status"] == status
+    assert wal["slot_count_observed"] is None
+
+
 def result(name: str, *rows: dict[str, Any], success: bool = True,
            truncated: bool = False) -> CollectorResult:
     now = datetime.now(timezone.utc)
@@ -96,7 +252,7 @@ def test_registry_dispatch_uses_reviewed_scripts(db_type: DatabaseType) -> None:
     assert report.details["history_note"] == HISTORY_NOTE
 
 
-def test_disk_growth_profiles_bind_fixed_sql_roles_and_permissions() -> None:
+def test_disk_growth_profiles_bind_fixed_sql_and_parser_roles() -> None:
     registry = SqlScriptRegistry(ROOT / "sql")
     assert validate_disk_profiles(registry, PROFILE_BINDINGS) == ()
     assert PROFILE_RESOLVER.validate() == ()
@@ -457,55 +613,6 @@ def test_oracle_fra_empty_result_is_not_configured_not_missing() -> None:
     assert report.details["other"]["fra_status"] == "NOT_CONFIGURED"
     assert "disk_fra" in report.details["not_applicable"]
     assert "disk_fra" not in report.details["optional_unavailable"]
-
-
-def test_oracle_permission_cli_shows_current_optional_impact_and_required_contract(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    oracle_instance, _, _, driver = oracle_fixture()
-    driver.connection.data["preflight_object_grants"].extend(
-        {"owner": "SYS", "table_name": name, "privilege": "SELECT", "grantable": "NO"}
-        for name in ("DBA_TABLESPACE_USAGE_METRICS", "DBA_TABLESPACES",
-                     "DBA_DATA_FILES", "DBA_TEMP_FREE_SPACE")
-    )
-    inventory = tmp_path / "inventory.yaml"
-    inventory.write_text(yaml.safe_dump({"databases": [
-        {**vars(oracle_instance), "db_type": "oracle", "version_family": "19c"}]}),
-        encoding="utf-8")
-
-    class Provider(CredentialProvider):
-        def get_credential(self, alias: str) -> Credential:
-            return Credential("MONITOR", "TOPSECRET")
-
-    assert main(["--inventory", str(inventory), "--sql-root", str(ROOT / "sql"),
-                 "permissions", oracle_instance.id, "--feature", "disk-growth", "--json"],
-                provider=Provider(), driver=driver) == 0
-    payload = json.loads(capsys.readouterr().out)
-    row = next(item for item in payload["features"] if item["feature"] == "disk-growth")
-    assert row["status"] == "PARTIAL"
-    assert row["missing_required"] == []
-    assert row["missing_optional"]
-    assert "Required disk-growth permissions are ready" in row["impact"]
-    assert "Missing required grants prevent core" not in row["impact"]
-    assert row["required_privileges"]
-    assert row["reference_grant"]
-    assert "TO MONITOR" in row["reference_grant"]
-    assert "TO \"dba_monitor\"" not in row["reference_grant"]
-    human = render_human("permissions", payload)
-    assert "disk-growth required permissions" in human
-    assert "disk-growth reference grants" in human
-    assert "Toolkit did NOT execute this script." in human
-    assert "required permissionsUNKNOWN" not in human
-    assert "reference grantsUNKNOWN" not in human
-
-
-@pytest.mark.parametrize(("status", "expected"), [
-    ("MISSING", "Required disk-growth permissions are missing"),
-    ("PARTIAL", "Required disk-growth permissions are ready"),
-    ("READY", "Required and configured optional disk-growth permissions are available"),
-])
-def test_disk_growth_permission_impact_matches_readiness(status: str, expected: str) -> None:
-    assert _disk_growth_permission_impact(status).startswith(expected)
 
 
 def test_binary_log_allowlist_is_exact() -> None:

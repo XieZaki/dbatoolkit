@@ -17,7 +17,7 @@ from dba.credentials import CredentialProvider, Mode, validate_monitoring_creden
 from dba.errors import ToolkitError, driver_error, sqlserver_connection_error
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
-from dba.registry import SqlScript, SqlScriptRegistry
+from dba.registry import SqlScript, SqlScriptRegistry, fetch_bounded_rows
 from dba.settings import SQLServerSettings
 
 
@@ -100,7 +100,6 @@ class SQLServerAdapter(Adapter):
         self._ready = False
         self._version = ""
         self.preflight_checks: dict[str, bool] = {}
-        self.permission_observations: set[str] = set()
         self.privilege_classification: dict[str, Any] = {}
         self.capabilities: ServerCapabilities | None = None
         self.odbc_driver: str | None = None
@@ -127,6 +126,8 @@ class SQLServerAdapter(Adapter):
                 "active_sessions",
                 "active_sessions_legacy",
                 "active_requests",
+                "memory_grant_waiting",
+                "memory_grant_granted",
             ):
                 self.registry.authorize(self.registry.get(name), DatabaseType.SQLSERVER)
             phase = "Connection"
@@ -280,7 +281,9 @@ class SQLServerAdapter(Adapter):
         return redact(value)
 
     def execute_readonly(
-        self, script: SqlScript, *, plan_parameters: tuple[int, int, int] | None = None
+        self, script: SqlScript, *, plan_parameters: tuple[int, int, int] | None = None,
+        top_sql_parameters: tuple[int, str] | None = None,
+        active_sql_top_n: int | None = None,
     ) -> CollectorResult:
         if not self._ready:
             raise ToolkitError(
@@ -292,18 +295,40 @@ class SQLServerAdapter(Adapter):
         if not isinstance(script, SqlScript):
             return self._run(script)
         is_plan = script.metadata.name in {"plan_request", "plan_cached"}
-        if is_plan != (plan_parameters is not None):
-            raise ToolkitError("InvalidParameters", "Plan probes require controlled bound parameters.")
+        is_top_sql = script.metadata.name == "top_sql"
+        is_active_sql = script.metadata.name == "active_sql"
+        if (is_plan != (plan_parameters is not None)
+                or is_top_sql != (top_sql_parameters is not None)
+                or is_active_sql != (active_sql_top_n is not None)
+                or sum(value is not None for value in
+                       (plan_parameters, top_sql_parameters, active_sql_top_n)) > 1):
+            raise ToolkitError("InvalidParameters",
+                               "Plan probes require matching controlled parameters; Top SQL and Active SQL "
+                               "probes require their matching controlled parameters.")
         if plan_parameters is not None:
             size1, size2, session_id = plan_parameters
             if (type(size1) is not int or type(size2) is not int or type(session_id) is not int
                     or size1 != self.settings.plan_max_xml_size or size2 != size1
                     or not 1 <= session_id <= 32767):
                 raise ToolkitError("InvalidParameters", "Plan limits or session identifier are invalid.")
-        return self._run(script, plan_parameters)
+        if top_sql_parameters is not None:
+            top_n, metric = top_sql_parameters
+            if (type(top_n) is not int or not 1 <= top_n <= 100
+                    or metric not in {"cpu_time", "logical_reads", "physical_reads", "execution_count",
+                                      "elapsed_time", "average_cpu_time", "average_elapsed_time"}):
+                raise ToolkitError("InvalidParameters", "Top SQL limit or ranking metric is invalid.")
+        if active_sql_top_n is not None and (type(active_sql_top_n) is not int
+                                             or not 1 <= active_sql_top_n <= 100):
+            raise ToolkitError("InvalidParameters", "Active SQL Top N must be an integer between 1 and 100.")
+        parameters: tuple[Any, ...] | None = (
+            plan_parameters or top_sql_parameters
+            or ((active_sql_top_n, active_sql_top_n, active_sql_top_n)
+                if active_sql_top_n is not None else None)
+        )
+        return self._run(script, parameters)
 
     def _run(
-        self, script: SqlScript, parameters: tuple[int, int, int] | None = None
+        self, script: SqlScript, parameters: tuple[Any, ...] | None = None
     ) -> CollectorResult:
         """Private execution path shared only with the fixed preflight probes."""
         started_at = datetime.now(timezone.utc)
@@ -311,6 +336,7 @@ class SQLServerAdapter(Adapter):
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
         truncated = False
+        result_bytes = 0
         error: ToolkitError | None = None
         script_name = "unregistered"
         authorized = False
@@ -332,9 +358,12 @@ class SQLServerAdapter(Adapter):
             if cursor.description is None:
                 raise ToolkitError("InvalidResult", "Read-only script returned no rowset.")
             columns = [str(item[0]) for item in cursor.description]
-            values = cursor.fetchmany(script.metadata.max_rows)
-            truncated = len(values) >= script.metadata.max_rows
-            rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in values)
+            bounded = fetch_bounded_rows(
+                cursor, script.metadata.max_rows, script.metadata.max_result_bytes
+            )
+            truncated = bounded.truncated
+            result_bytes = bounded.result_bytes
+            rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in bounded.rows)
         except ToolkitError as exc:
             error = exc
         except (ValidationError, OSError, UnicodeError) as exc:
@@ -344,10 +373,10 @@ class SQLServerAdapter(Adapter):
                     "SQL is not an unchanged reviewed script from this registry.",
                 )
                 if not authorized
-                else driver_error(exc, "Query")
+                else driver_error(exc, "Query", secret=self._password, driver=self.odbc_driver or "pyodbc")
             )
         except Exception as exc:
-            error = driver_error(exc, "Query")
+            error = driver_error(exc, "Query", secret=self._password, driver=self.odbc_driver or "pyodbc")
         except BaseException:
             error = ToolkitError("QueryInterrupted", "Query interrupted.")
             raise
@@ -360,8 +389,10 @@ class SQLServerAdapter(Adapter):
             if error is not None:
                 rows = ()
                 truncated = False
+                result_bytes = 0
                 self._close()
-            details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated}
+            details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
+                                       "result_bytes": result_bytes}
             if authorized:
                 details.update(
                     {
@@ -370,9 +401,20 @@ class SQLServerAdapter(Adapter):
                             script.metadata.timeout_seconds, self.settings.query_timeout
                         ),
                         "max_rows": script.metadata.max_rows,
+                        "max_result_bytes": script.metadata.max_result_bytes,
                     }
                 )
             self._audit(script_name, started, error, details)
+        database_error_payload: dict[str, Any] | None = None
+        if error is not None and error.database_error is not None:
+            detail = error.database_error
+            if isinstance(detail, dict):
+                database_error_payload = detail
+            else:
+                to_dict = getattr(detail, "to_dict", None)
+                payload = to_dict() if callable(to_dict) else None
+                if isinstance(payload, dict):
+                    database_error_payload = payload
         return CollectorResult(
             self.instance.id,
             script_name,
@@ -385,6 +427,7 @@ class SQLServerAdapter(Adapter):
             error is None,
             error.error_type if error else None,
             str(error) if error else None,
+            database_error_payload,
         )
 
     def _audit(

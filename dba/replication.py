@@ -8,14 +8,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from dba.core import DatabaseInstance, DatabaseType, DiagnosticReport, Finding, Severity
-from dba.permissions import (
-    OraclePrincipal,
-    PermissionStatus,
-    assess_permissions,
-    privilege_reasons,
-    render_profile_sql,
-    requirements_for_profile,
-)
 from dba.replication_collectors import (
     REPLICATION_PARSER_CONTRACTS,
     REPLICATION_SQL_PROFILES,
@@ -23,15 +15,6 @@ from dba.replication_collectors import (
     collect_replication_evidence,
 )
 from dba.versioning import ResolvedDiagnosticProfile, resolve_profile_for_adapter
-
-
-def _grant_principal(adapter: Any, instance: DatabaseInstance) -> str | OraclePrincipal:
-    if instance.db_type == DatabaseType.ORACLE:
-        principal = getattr(adapter, "principal", None)
-        return (principal if isinstance(principal, OraclePrincipal)
-                else OraclePrincipal.unverified(None))
-    current_user = getattr(adapter, "current_user", None)
-    return current_user if isinstance(current_user, str) and current_user else "monitor"
 
 
 @dataclass(frozen=True)
@@ -542,27 +525,30 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
         state = _sqlserver(evidence)
     else:
         state = _oracle(evidence, policy)
+    for sample in evidence.samples:
+        if sample.collector_name not in evidence.required_collectors or sample.success:
+            continue
+        vendor_error = sample.database_error or {}
+        if vendor_error.get("classification") != "ACCESS_DENIED":
+            continue
+        vendor_message = vendor_error.get("message") or sample.error_message
+        state_issues = state["issues"]
+        state_issues.append(_issue(
+            "COLLECTOR_ACCESS_DENIED",
+            "WARNING",
+            f"Replication query {sample.collector_name} was denied. "
+            "Review docs/DATABASE_PERMISSIONS.md for this database version and operation.",
+            vendor_message=vendor_message,
+            evidence={"collector": sample.collector_name, "database_error": vendor_error},
+        ))
     required_samples = [sample for sample in evidence.samples
                         if sample.collector_name in evidence.required_collectors]
     required_ok = bool(required_samples) and all(sample.success and not sample.truncated for sample in required_samples)
     all_ok = all(sample.success and not sample.truncated for sample in evidence.samples)
-    requirements = requirements_for_profile(resolved.permission_profile_id or "")
-    readiness = assess_permissions(requirements, getattr(adapter, "permission_observations", None))
-    if readiness["status"] == PermissionStatus.MISSING:
-        failed_status = next((sample for sample in evidence.samples
-                              if sample.collector_name in {"replication_status",
-                                                           "replication_status_legacy"}
-                              and not sample.success), None)
-        vendor_error = (failed_status.database_error.get("message")
-                        if failed_status and failed_status.database_error else None)
-        state["issues"].append(_issue("MISSING_PERMISSION", "WARNING",
-                                      "Required replication monitoring permissions are missing.",
-                                      vendor_message=vendor_error,
-                                      evidence={"missing_required": readiness["missing_required"]}))
     if not required_ok:
         state["issues"].append(_issue("REQUIRED_EVIDENCE_MISSING", "WARNING",
                                       "Required replication role or status evidence could not be collected."))
-    completeness = "INCOMPLETE" if not required_ok else "COMPLETE" if all_ok and readiness["status"] == PermissionStatus.READY else "PARTIAL"
+    completeness = "INCOMPLETE" if not required_ok else "COMPLETE" if all_ok else "PARTIAL"
     issues: list[ReplicationIssue] = state["issues"][:policy.max_issues]
     severity_rank = {"INFO": 0, "WARNING": 1, "HIGH": 2, "CRITICAL": 3}
     max_severity = max((severity_rank.get(issue.severity, 1) for issue in issues), default=0)
@@ -613,30 +599,15 @@ def diagnose_replication(adapter: Any, policy: ReplicationPolicy = DEFAULT_REPLI
     }
     actions = tuple(ReplicationAction(action_text.get(issue.code, issue.message)) for issue in issues
                     if issue.severity in {"WARNING", "HIGH", "CRITICAL"})
-    missing = readiness["missing_required"]
     account_security = getattr(adapter, "privilege_classification", None)
     if not isinstance(account_security, dict) or account_security.get("classification") not in {
         "NON_PRIVILEGED", "PRIVILEGED", "UNKNOWN",
     }:
         account_security = {"classification": "NON_PRIVILEGED",
                             "evidence_source": "monitor_preflight"}
-    permission = {"status": readiness["status"].value,
-                  "account_security": account_security,
-                  "missing_required": missing,
-                  "missing_optional": readiness["missing_optional"],
-                  "available": readiness["available"],
-                  "missing_reasons": privilege_reasons(requirements, missing),
-                  "impact": requirements.impact,
-                  "suggested_grant": render_profile_sql(
-                      resolved.permission_profile_id or "", instance.db_type,
-                      _grant_principal(adapter, instance),
-                      instance.database, evidence.version) if missing else None,
-                  "toolkit_executed": False,
-                  "dba_approval_required": bool(missing)}
     details = {"incomplete": completeness == "INCOMPLETE",
                "required_evidence_complete": required_ok,
                "samples": _sample_payload(evidence),
-               "permission_readiness": permission,
                "vendor_evidence": {sample.collector_name: list(sample.rows[:policy.max_members])
                                    for sample in evidence.samples if sample.success},
                "version_profile": asdict(resolved),

@@ -45,18 +45,22 @@ class FakeCursor:
         self.connection = connection
         self.description: list[Column] | None = None
         self.rows: list[dict[str, Any]] = []
+        self.offset = 0
         self.closed = False
 
-    def execute(self, sql: str) -> None:
+    def execute(self, sql: str, params: Any = None) -> None:
         name = self.connection.scripts[sql]
         self.connection.executed.append(name)
+        self.connection.bound_parameters.append((name, params))
         if name in self.connection.failures:
             raise self.connection.failures[name]
         self.rows = list(self.connection.results.get(name, []))
+        self.offset = 0
         self.description = [Column(key) for key in self.rows[0]] if self.rows else [Column("pid")]
 
     def fetchmany(self, size: int) -> list[tuple[Any, ...]]:
-        rows = self.rows[:size]
+        rows = self.rows[self.offset:self.offset + size]
+        self.offset += len(rows)
         return [tuple(row.values()) for row in rows]
 
     def close(self) -> None:
@@ -70,6 +74,7 @@ class FakeConnection:
         self.closed = False
         self.rollbacks = 0
         self.executed: list[str] = []
+        self.bound_parameters: list[tuple[str, Any]] = []
         self.cursors: list[FakeCursor] = []
         self.results: dict[str, list[dict[str, Any]]] = {
             "preflight": [dict(PREFLIGHT)],
@@ -141,18 +146,34 @@ def test_adapter_preflight_credentials_timeout_and_close() -> None:
 
 
 @pytest.mark.parametrize("field,value,error", [
-    ("read_all_stats", False, "cross-session activity"),
-    ("read_all_settings", False, "monitoring settings"),
     ("rolsuper", True, "non-privileged"),
     ("transaction_read_only", "off", "read-only"),
     ("server_version_num", 110000, "PostgreSQL 12"),
 ])
-def test_preflight_rejects_insufficient_monitor(field: str, value: Any, error: str) -> None:
+def test_preflight_rejects_unsafe_or_unsupported_monitor(field: str, value: Any, error: str) -> None:
     target, driver = adapter()
     driver.connection.results["preflight"] = [{**PREFLIGHT, field: value}]
     with pytest.raises(ToolkitError, match=error):
         target.connect()
     assert driver.connection.closed
+
+
+def test_reviewed_collector_access_denial_keeps_vendor_message_and_guide_pointer() -> None:
+    class DeniedError(Exception):
+        sqlstate = "42501"
+
+    target, driver = adapter()
+    target.connect()
+    driver.connection.failures["active_sessions"] = DeniedError(
+        "permission denied for view pg_stat_activity"
+    )
+    result = ActiveSessionsCollector(target).collect(INSTANCE)
+    assert not result.success and result.error_type == "QueryDenied"
+    assert "permission denied for view pg_stat_activity" in (result.error_message or "")
+    assert "docs/DATABASE_PERMISSIONS.md" in (result.error_message or "")
+    assert result.database_error is not None
+    assert result.database_error.get("classification") == "ACCESS_DENIED"
+    target.disconnect()
 
 
 def test_connection_query_failure_timeout_and_registry(capsys: pytest.CaptureFixture[str]) -> None:
@@ -192,6 +213,24 @@ def test_collector_rows_limit_ranking_and_query_redaction() -> None:
     driver.connection.results["server_info"] = [{"version": "x"}, {"version": "y"}]
     limited = target.execute_readonly(script)
     assert limited.row_count == 2 and limited.truncated
+
+
+@pytest.mark.parametrize(("duration_ms", "expected_count"), [(9999, 0), (10000, 1)])
+def test_postgres_long_running_threshold_is_inclusive_at_configured_boundary(
+    duration_ms: int, expected_count: int
+) -> None:
+    target, driver = adapter(settings=PostgreSQLSettings(long_running_seconds=10))
+    driver.connection.results["long_running"] = [session(55, duration_ms=duration_ms)]
+    target.connect()
+
+    result = LongRunningCollector(target).collect(INSTANCE)
+
+    assert result.success
+    assert result.row_count == expected_count
+    assert len(result.rows) == expected_count
+    if expected_count:
+        assert result.rows[0]["duration_ms"] == 10000
+    target.disconnect()
 
 
 def test_blocking_graph_multilevel_multiple_roots_cycle() -> None:
@@ -495,8 +534,10 @@ def test_pg_cli_connection_collect_and_diagnose(tmp_path: Path,
     human_report = tmp_path / "slow-human.html"
     assert main([*common, "diagnose", "pg", "slow", "--report", str(human_report)],
                 provider=provider, driver=driver) == 0
-    assert first_stage and "long_running" not in first_stage[0]
-    assert report_absent_at_triage == [True]
+    assert len(first_stage) == 2
+    assert "long_running" not in first_stage[0]
+    assert "long_running" in first_stage[1]
+    assert report_absent_at_triage == [True, True]
     assert first_stage[0].count("active_sessions") == 1
     assert first_stage[0].count("transactions") == 1
     assert first_stage[0].count("blocking") == 1

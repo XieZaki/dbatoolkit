@@ -138,16 +138,22 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
                                         "stats_reset": row.get("stats_reset"),
                                         "note": "Cumulative counters; no current temp footprint or rate."}
         other["largest_relations"] = _rows(results, "disk_relations")
-        slots = _rows(results, "disk_slots")
-        slots_result = results.get("disk_slots")
+        slot_source = "disk_slots_17_plus" if "disk_slots_17_plus" in results else "disk_slots"
+        slots = _rows(results, slot_source)
+        slots_result = results.get(slot_source)
         other["slots"] = slots
         other["slot_status"] = ("UNAVAILABLE" if slots_result is None or not slots_result.success
                                  or slots_result.truncated else
                                  "NOT_CONFIGURED" if not slots else "CONFIGURED")
         for row in slots:
             retained = _number(row.get("retained_wal_estimate_bytes"))
+            status = str(row.get("wal_status") or "").lower()
+            if status in {"lost", "unreserved"}:
+                add("PG_SLOT_WAL_UNAVAILABLE", Severity.WARNING, slot_source,
+                    {"slot_name": row.get("slot_name"), "wal_status": status},
+                    "Review slot availability and consumer state manually; do not delete the slot automatically.")
             if row.get("active") is False and retained is not None and retained > 0:
-                add("PG_WAL_RETENTION_SLOT", Severity.WARNING, "disk_slots",
+                add("PG_WAL_RETENTION_SLOT", Severity.WARNING, slot_source,
                     {"slot_name": row.get("slot_name"), "slot_type": row.get("slot_type"),
                      "active": False, "retained_wal_estimate_bytes": retained},
                     "Confirm consumer state; ask the DBA to review slot retention manually.")
@@ -168,6 +174,40 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
             other["archive_status"] = "UNAVAILABLE"
         other["replicas"] = _rows(results, "disk_replicas")
         other["wal_filesystem"] = WAL_NOTE
+        def evidence_state(name: str) -> dict[str, Any]:
+            sample = results.get(name)
+            if sample is None:
+                return {"status": "NOT_COLLECTED"}
+            if not sample.success:
+                return {"status": "PERMISSION_DENIED" if sample.error_type in
+                        {"MissingPermission", "PermissionDenied", "QueryDenied"} else
+                        "TIMEOUT" if sample.error_type == "QueryTimeout" else "FAILED",
+                        "error_type": sample.error_type}
+            return {"status": "TRUNCATED" if sample.truncated else
+                    "AVAILABLE" if sample.rows else "EMPTY",
+                    "started_at": sample.started_at.isoformat(),
+                    "finished_at": sample.finished_at.isoformat(), "row_count": sample.row_count}
+
+        settings_rows = _rows(results, "disk_wal_settings")
+        settings = settings_rows[0] if settings_rows else {}
+        other["wal_retention"] = {
+            "version": version, "in_recovery": settings.get("in_recovery"),
+            "current_lsn": settings.get("current_lsn"),
+            "lsn_source": ("pg_last_wal_receive_lsn" if settings.get("in_recovery") is True
+                           else "pg_current_wal_lsn" if settings.get("in_recovery") is False else None),
+            "wal_keep_size": settings.get("wal_keep_size"),
+            "max_slot_wal_keep_size": settings.get("max_slot_wal_keep_size"),
+            "max_wal_size": settings.get("max_wal_size"),
+            "slots": slots,
+            "slot_count_observed": len(slots) if slots_result is not None and slots_result.success else None,
+            "slots_evidence": evidence_state(slot_source),
+            "settings_evidence": evidence_state("disk_wal_settings"),
+            "archive_evidence": evidence_state("disk_archiver"),
+            "archive": archiver[0] if archiver else None,
+            "settings_units_note": "Values are PostgreSQL current_setting text, not converted byte counts; -1 means unlimited for max_slot_wal_keep_size.",
+            "safe_wal_size_note": "NULL can mean a lost slot or an unlimited max_slot_wal_keep_size; other cases remain unknown.",
+            "limitations": "LSN distances are not exclusive physical disk usage; no growth trend or overall health assessed. Samples are not atomic.",
+        }
         for row in (_rows(results, "disk_transactions") or _rows(results, "transactions")):
             age = _number(row.get("transaction_age_seconds"))
             if age is not None and age >= 3600:
@@ -305,9 +345,9 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
         if redo_rows and redo_rows[0].get("log_mode") == "NOARCHIVELOG":
             not_applicable.extend(("disk_archive", "disk_archive_volume"))
     if instance.db_type == DatabaseType.POSTGRESQL:
-        slots_result = results.get("disk_slots")
+        slots_result = results.get("disk_slots_17_plus") or results.get("disk_slots")
         if slots_result and slots_result.success and not slots_result.truncated and not slots_result.rows:
-            not_applicable.append("disk_slots")
+            not_applicable.append(slots_result.collector_name)
     missing_required = [name for name in required_collectors if name not in results]
     failed_required = [name for name in required_collectors if name in results
                        and (not results[name].success or results[name].truncated)]
@@ -327,7 +367,8 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
                 "finished_at": result.finished_at.isoformat(), "elapsed_ms": result.elapsed_ms,
                 "row_count": result.row_count,
                 "success": result.success, "truncated": result.truncated,
-                "error_type": result.error_type} for result in collected]
+                "error_type": result.error_type, "error_message": result.error_message,
+                "database_error": result.database_error} for result in collected]
     totals: dict[str, float] = {}
     for row in space:
         size = (_number(row.get("size_bytes")) or _number(row.get("allocated_bytes"))

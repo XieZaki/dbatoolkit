@@ -15,6 +15,7 @@
 - 仅显式调用的隔离 Docker 集成测试可按用户授权创建测试对象、运行测试事务并 ROLLBACK/清理；这些脚本位于 tests/integration，不能通过 Toolkit 或正式 Registry 执行。诊断账号始终只读，禁止 KILL。
 - 用户确认的本地 Docker 实验室是有界测试资源：仅限已核实身份的指定本机实例和样例库，不能据数据库名相同扩展到其他 Inventory、主机或服务。用户已授权在这些隔离实验室中由独立测试驱动进行有界的管理员级准备、DDL/DML、负载、参数/账号测试与清理；每次运行前仍须审阅脚本实际连接目标、SQL、对象、权限、时长/并发/资源上限和清理/恢复路径。优先复用已有样例数据和脚本；常规实验室操作不需重复申请，但高资源、实例重启、数据卷/备份删除或不可逆操作不在常规授权内。不得删除 Docker 数据卷或宿主机备份目录。
 - 测试驱动与产品诊断身份必须分离。可从用户指定的本地测试驱动配置在本地进程内读取已确认实验室的测试凭据；不得输出凭据、写入提示词/命令行/环境变量/日志/报告/仓库，或复制、修改、删除该配置。测试驱动管理员权限绝不转借给 Toolkit；Toolkit 仍使用独立最小权限监控账号、Reviewed SQL Registry、Preflight、超时/行数边界和只读执行路径。
+- 检查或汇总本地实验室 Python 配置时，禁止 import/exec/eval 或打印原始配置；只可通过 `dba.lab_config` 的静态 AST 读取器读取固定 allowlist 中的 `DATABASES.<mysql|pg|oracle|sqlserver>.{host,port,database,user}`。普通配置对象不包含 `password`；只有连接专用接口可返回脱敏 `Secret`，并仅在建立数据库连接时显式传给连接回调。调用方不能传入字段名扩展 allowlist。Allowlist 必须依据已确认的消费者字段合同；测试仅使用合成临时配置，源配置不得复制、修改或持久化。
 - 仅针对用户确认且身份核实的本机 Docker SQL Server 实验室，允许保留实例级 `Encrypt=no` / `TrustServerCertificate=yes` 临时例外以推进核心诊断验收。该例外不得改变产品/生产 TLS 默认值、不得复制到生产 Inventory，也不得描述为符合生产 TLS 标准；实验室 TLS 证书加固单独跟踪。凭据加密、最小权限和 Toolkit 只读边界不受此例外影响。
 - Inventory 仅存 credential_alias，不保存 password/pwd/secret/token。日志禁止凭据与带密码连接串。
 - 生产只使用专用最小权限监控账号；禁止 sa/root/SYS/SYSTEM/postgres 超级用户及其他最高权限账号。
@@ -24,7 +25,7 @@
 - Credential session data must remain in process memory only and must never be persisted to disk, environment variables, registry, shell history, logs, or reports.
 - Credential session IPC must be restricted to the current OS user and must fail closed when peer identity cannot be verified.
 - Master passwords must not be retained after encrypted credential store unlock. Credential session expiration must be absolute and bounded.
-- Credential Session Agent may retain a derived data key only in process memory to perform an explicitly approved encrypted-store JIT update; it must never retain the master password, persist the key, and must invalidate/clear the session immediately after a successful mutation.
+- Credential Session Agent may retain a derived data key only in process memory; it must never retain the master password or persist the key. The legacy JSON encrypted-file backend is read-only: GET and metadata reads require server-side target Store binding, and initialize/SAVE/SET/DELETE/rekey are rejected at the Provider and Session boundaries. Migration may read the old Store but must leave it unchanged. The explicitly selected SQLite backend retains its bounded session only with server-side file/Store binding and fresh authenticated reads on each operation; lock, expiry and authentication failure clear it. SQLite is never selected by `auto`, and no real Store is migrated automatically.
 - Inventory `connection` 仅允许按数据库类型审核过的非敏感连接参数。统一 Resolver 顺序为 instance.connection > 对应数据库 runtime settings > 代码安全默认值；未知项和任意层级的敏感字段必须由 validate 拒绝。
 - SQL 独立存储；正式加载必须 READ_ONLY 且 reviewed=true，设置 timeout_seconds/max_rows。
 - MySQL Registry 的 SELECT 以外只读语句采用封闭精确白名单：`SHOW BINARY LOGS`、`SHOW GRANTS`、`SHOW SLAVE STATUS`、`SHOW REPLICA STATUS`。每条必须是独立审核的固定 Registry 脚本；禁止扩大为任意 SHOW。复制状态查询按版本路由，需要专用监控账号具备只读 `REPLICATION CLIENT`，不得使用 SUPER/BINLOG_ADMIN。
@@ -32,11 +33,11 @@
 - Adapter 只接受自身 Registry 签发并在执行前复核内容/元数据未变更的已审查脚本。禁止任意 SQL 字符串执行接口。
 - SQL Server 使用 pyodbc，Microsoft ODBC Driver 18 优先、17 兼容回退；默认连接超时 5 秒、显式加密并验证证书；autocommit=true，不执行初始化修改语句。每次执行前为新游标设置有效超时=min(metadata.timeout_seconds, runtime.query_timeout)。
 - PostgreSQL 使用 psycopg 3；默认 SSL verify-full、连接超时 5 秒。连接启动参数启用只读事务和有界 statement_timeout，诊断连接 autocommit，断开时关闭；无任意 SQL、修改会话状态的初始化 SQL 或后台取消动作。监控账号需要跨会话统计与设置读取能力，不能是超级用户或具管理属性的账号。
-- MySQL 使用 PyMySQL 1.1 系列；默认 SSL 验证证书和主机名、连接超时 5 秒，autocommit、禁用 local infile。生产只允许专用监控账号；预检拒绝已知非监控直接权限及活动角色，并实际探测 Performance Schema、InnoDB 事务和锁视图。预检不能证明所有隐含或存储程序权限都只读。流式游标有界提取，截断时关闭连接，避免游标关闭时遍历全部剩余行；read_timeout 是网络读取限制，不等于整批查询绝对墙钟上限。
-- Account Security classification and Permission Readiness are independent. Missing permissions never imply a privileged account. Assess each Feature from the shared Permission Registry; show required/optional gaps, capability impact, and text-only minimum grants. `READY` has no generic impact warning. MySQL classifies grants using privilege, scope, grant option and role/principal evidence; global read-only `SELECT` is not admin, while known administrative privileges and grant option remain high-risk. Unresolved roles are `UNKNOWN` and fail closed. Never execute GRANT/REVOKE or account-management SQL.
-- Oracle 使用 python-oracledb Thin；只接受 service_name 或 SID 其一，账号必须专用且仅持必要直接只读授权。预检拒绝 SYS/SYSTEM、已授角色、非监控系统权限、写权限对象授权和自有对象；核心 V_$ 视图必须可读。V_$LOCK、V_$LOCKED_OBJECT、V_$PROCESS、V_$SESSION_WAIT 缺少时标记能力不足，锁链可降级为 V$SESSION 证据。Toolkit 不执行权限变更；call_timeout 限制驱动调用而非完整流程墙钟。Oracle KILL SESSION 仅为已确认单实例完整根会话的纯文本 ReferenceCommand；RAC 跨实例快照缺失时不生成。任何 Oracle 诊断 SQL 均来自 Registry。
+- MySQL 使用 PyMySQL 1.1 系列；默认 SSL 验证证书和主机名、连接超时 5 秒，autocommit、禁用 local infile。生产只允许专用监控账号；连接安全检查确认身份、Performance Schema 是否启用及已知危险/可写授权与活动角色，不判断单项诊断是否具备所需读取权限。Collector 被数据库拒绝时保留脱敏后的数据库错误并提示查看部署授权文档。流式游标有界提取，截断时关闭连接，避免游标关闭时遍历全部剩余行；read_timeout 是网络读取限制，不等于整批查询绝对墙钟上限。
+- Database permissions are deployment preparation documented only in `docs/DATABASE_PERMISSIONS.md`; README links to that guide. Do not maintain a Permission Registry, per-feature readiness/missing-permission calculation, or GRANT/REVOKE generator. When a database denies a reviewed read, retain the sanitized vendor error and point the operator to the guide. Keep version routing, read-only Registry enforcement, and any separately justified dangerous-account safety checks; never execute GRANT/REVOKE or account-management SQL.
+- Oracle 使用 python-oracledb Thin；只接受 service_name 或 SID 其一，账号必须专用且仅持必要直接只读授权。账号安全检查拒绝 SYS/SYSTEM、已授角色、非监控系统权限、写权限对象授权和自有对象；具体 V_$ / DBA 视图可见性由所选只读查询的实际结果判定，可选证据缺失时按场景降级。Toolkit 不执行权限变更；call_timeout 限制驱动调用而非完整流程墙钟。Oracle KILL SESSION 仅为已确认单实例完整根会话的纯文本 ReferenceCommand；RAC 跨实例快照缺失时不生成。任何 Oracle 诊断 SQL 均来自 Registry。
 - fetchmany(max_rows) 有界读取，达到上限就标记 truncated=true（表示可能截断，不额外读取整批结果）；请求 SQL 文本也有独立长度上限和标志。
-- 连接自动执行只读预检：拒绝 sysadmin/db_owner、非监控有效权限、权限信息截断、不完整或缺少跨会话可见性；实际探测四类基础采集能力。有效权限检查限于服务器和当前数据库，其他数据库仍需 DBA 按最小权限配置。
+- 连接时执行身份、版本、只读配置/能力及必要的危险账号安全检查；不逐项预检诊断读取权限。数据库拒绝受审查的只读 SQL 时，报告保留脱敏后的数据库错误并提示查看 `docs/DATABASE_PERMISSIONS.md`。只读 Registry 执行、版本路由及查询边界仍是强制安全检查。
 - 不将 readonly 驱动提示、静态检查或预检宣称为所有数据库写权限的完整证明。当前不支持 Azure SQL Database 的不同权限模型；SQL 兼容目标为 2008 R2+，2022+ 使用 VIEW SERVER PERFORMANCE STATE。目标不等于已通过实机验证。
 - 旧版会话字段必须通过实际列能力检测选择受审查的兼容 SQL。sys.sysprocesses.dbid/open_tran 返回真实进程数据并注明来源，不能伪装为新版会话统计或编造缺失值。缺失列能力信息拒绝继续。Driver 18 与老服务器的 TLS/补丁互通须另行实测。
 - 查询失败关闭游标和连接；连接非 autocommit 时尝试 rollback，失败仍尝试 close。驱动异常仅映射为受控错误类别/消息，禁止透传原始异常或连接串。
@@ -50,9 +51,18 @@
 - 空间来源需区分数据文件、各类事务日志、Temp/TempDB/Oracle TEMP、Backup、Audit、Trace、Dump、普通日志。
 - 不擅自增加 Web UI、微服务、Docker、CI/CD、无需求依赖或完整诊断。普通测试使用 Fake Driver，不连接任何真实数据库。
 
-- 新增 Collector、Analyzer 或 Registry SQL 引入系统视图、DMV、数据库角色或权限时，必须同步维护 dba/permissions.py 的 Permission Registry、对应 Preflight 和权限一致性测试。GRANT/REVOKE 只可生成为人工审核文本，永不从 Toolkit 执行。
+- 新增 Collector、Analyzer 或 Registry SQL 引入系统视图、DMV、数据库角色或权限时，必须核对并更新 `docs/DATABASE_PERMISSIONS.md` 中的部署授权说明及相关 SQL/版本路由测试。不得新增运行时 Permission Registry、逐 Feature 权限预检或 GRANT/REVOKE 生成器。
 - Runtime 依赖以 deployment/runtime-manifest.yaml、pyproject extras 和 requirements lock 输入共同维护；生产 bootstrap 仅从本地 wheelhouse 使用 --no-index 安装，不自动访问互联网、执行 MSI/RPM/DEB、调用系统包管理器、修改 PATH/注册表或删除已有 .venv。
 - SQL Server ODBC 选择顺序固定为 Driver 18 优先、Driver 17 兼容回退；连接必须显式设置 Encrypt 与 TrustServerCertificate。Oracle 固定默认 Thin Mode，不把 Instant Client 作为必需依赖。
+
+## Windows 本地真实 E2E 执行约束
+
+- SQL Server、PostgreSQL、MySQL、Oracle 的真实连接和 E2E 只能从获准的 Windows 宿主机上下文执行，使用 Windows PowerShell 和项目 `.venv`。终端显示 PowerShell 或路径看似相同，不足以证明进程能访问 Windows 主机资源。
+- 每次真实连接前，确认实际操作系统/进程上下文、工作目录、Python 与 CLI 可执行文件、唯一目标 Inventory 的 host/port/`environment=test`，以及现有凭据会话可用。只测试用户指定的资产，不扫描 Inventory、不猜测目标。
+- 严禁在 Codex 隔离环境执行真实数据库 E2E；隔离环境的 `127.0.0.1` 不代表 Windows 宿主机。不得把隔离环境中的 Credential Manager、命名管道或 Docker 端口拒绝解释为数据库环境故障。
+- 若工具无法取得获准的 Windows 本地执行上下文，必须在访问数据库前停止，提供用户可在 Windows PowerShell 执行的完整命令并等待结果。不得重复运行已证明被同一隔离限制阻断的连接，不得读取/绕过凭据文件、改用另一套数据库或把 Fake/Mock 测试称为真实 E2E。
+- E2E 报告注明 `WINDOWS_LOCAL_REAL_E2E`、`ISOLATED_OFFLINE_TEST` 或 `NOT_EXECUTED`；这些仅为证据来源标签，不是产品枚举。单元测试与静态检查只能作为离线证据。
+- 导出的诊断 JSON 中将 `report.instance.credential_alias` 脱敏为 `[REDACTED]`；内部凭据解析仍保留真实 alias。不得输出用户名、密码或其他凭据值。
 
 ## CLI presentation rules
 
@@ -60,8 +70,8 @@
 - Structured SQL execution logs are internal output and must not dominate normal terminal output. Keep them in a protected log sink and continue redacting sensitive fields.
 - New features expose reusable domain results through the common presentation layer. Adapters and analyzers must not print directly to the terminal or build command-specific console output.
 - New diagnosis scenarios extend `dba diagnose <database_id> <scenario>` unless a documented architectural reason requires another command.
-- Human-facing errors explain the failure, impact, and next safe action when known. Never omit permission trigger details or expose credentials.
-- `dba check` and `dba status` compose existing runtime, credential, preflight, permission, and collector capabilities; they must not duplicate database-specific analyzer logic.
+- Human-facing errors explain the failure, impact, and next safe action when known. Access-denied errors retain sanitized vendor evidence and point to `docs/DATABASE_PERMISSIONS.md`; do not infer a missing grant that was not established by the failed query.
+- `dba check` and `dba status` compose existing runtime, credential, identity/version/account-safety preflight, and collector capabilities; they must not duplicate database-specific analyzer logic.
 - Human diagnose output is an incident-response summary, not a full evidence dump.
 - Default terminal output should prioritize impact, duration, root-cause candidate, source, recovery action, and termination risk.
 - Selected SQL, related sessions, Top-N analysis and evidence needed for DBA decisions belong in self-contained offline HTML reports; `--json` remains the structured machine-readable format within the collectors' own limits.
@@ -90,6 +100,6 @@
 - Database adapters consume resolved credentials and do not implement credential-storage-specific logic.
 - Debug and exception output follow the same secret-redaction rules as normal output.
 - Replication diagnosis is observational only and reads metadata from the single Inventory-selected instance; it must not connect to discovered peers.
-- Slow diagnosis resolves SQL, complete permission requirements, parser contract, support state, runtime variant, and required/optional collector slots atomically through `DiagnosticProfileResolver`. Slow SQL changes must update Permission Registry, Preflight, profile metadata, and consistency tests together; no Collector may branch on server version.
+- Slow diagnosis resolves SQL, parser contract, support state, runtime variant, and collector slots atomically through `DiagnosticProfileResolver`. Slow SQL changes must update version/profile metadata, the deployment permission guide where needed, and consistency tests; no Collector may branch on server version.
 - DBA Toolkit must never automatically promote, fail over, restart, reset, reconfigure, resynchronize, or repair database replication.
 - Replication lag must not be converted between bytes and time unless supported by explicit reliable rate evidence; a single snapshot cannot establish a trend.

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import io
 import json
+import logging
+import traceback
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from dba.cli import main
 from dba.collectors import CollectorResult
 from dba.core import DatabaseType
 from dba.inventory import Inventory, ValidationError
-from dba.permissions import VERSION_DETECTION_PRIVILEGES
 from dba.registry import SqlScript, SqlScriptRegistry
 from dba.versioning import (
     CANONICAL_VERSION_FAMILIES,
@@ -30,6 +33,7 @@ from dba.versioning import (
     build_version_profile,
     detect_database_version,
     normalize_version,
+    validate_version_family,
     version_status,
 )
 
@@ -221,7 +225,6 @@ def test_registry_detector_normalizer_status_resolver_integration(
     assert profile.support_state == expected_support
     if expected_support == SupportState.SUPPORTED:
         assert profile.sql_profile_id and not profile.sql_profile_id.startswith("legacy:")
-        assert profile.permission_profile_id and not profile.permission_profile_id.startswith("legacy:")
         assert profile.parser_contract_id and not profile.parser_contract_id.startswith("legacy:")
     assert profile.runtime_config_state == RuntimeConfigState.UNKNOWN
     assert profile.data_visibility == DataVisibility.UNKNOWN
@@ -238,7 +241,6 @@ def test_mysql_minor_variant_selects_one_atomic_binding() -> None:
     assert pre.runtime_variant == "pre_8022"
     assert current.runtime_variant == "8022_plus"
     assert pre.sql_profile_id == current.sql_profile_id == "mysql80_slow"
-    assert pre.permission_profile_id == current.permission_profile_id == "mysql80_slow"
     assert pre.parser_contract_id == current.parser_contract_id == "mysql_slow"
 
 
@@ -285,8 +287,6 @@ def test_static_registry_rejects_duplicate_dangling_and_forbidden_metadata() -> 
     assert any("duplicate" in error for error in duplicate.validate())
     dangling = DiagnosticProfileResolver((replace(valid, sql_profile_id="missing"),))
     assert any("unknown slow SQL profile" in error for error in dangling.validate())
-    forbidden = DiagnosticProfileResolver((replace(valid, required_privileges=("sysadmin",)),))
-    assert any("forbidden privilege" in error for error in forbidden.validate())
     invalid_variant = DiagnosticProfileResolver((replace(
         valid, db_type=DatabaseType.MYSQL, version_family="8.0", runtime_variant="latest"
     ),))
@@ -316,6 +316,121 @@ def test_inventory_version_family_is_strict_and_optional(
     else:
         with pytest.raises(ValidationError, match="version_family"):
             Inventory.load(path)
+
+
+def _probe_invalid_inventory_version_family(tmp_path: Path, case: str) -> tuple[bool, bool]:
+    secret = "SYNTHETIC_" + "SECRET_DO_NOT_LEAK_2026"
+    candidate: Any = {
+        "ordinary": "not-a-supported-family",
+        "password-marker": f"password={secret}",
+        "token-marker": f"token={secret}",
+        "raw-secret": secret,
+        "wrong-type": {"dynamic": secret},
+    }[case]
+    path = tmp_path / "inventory.yaml"
+    path.write_text(yaml.safe_dump({"databases": [{
+        "id": "sample", "name": "Sample", "db_type": "sqlserver",
+        "host": "test.invalid", "port": 1433, "credential_alias": "sample-monitor",
+        "version_family": candidate,
+    }]}), encoding="utf-8")
+
+    try:
+        Inventory.load(path)
+    except Exception as exc:
+        exception_outputs: list[str] = []
+        current: BaseException | None = exc
+        while current is not None:
+            exception_outputs.extend((str(current), repr(current)))
+            current = current.__cause__ or current.__context__
+        exception_outputs.append("".join(traceback.format_exception(exc)))
+        message = str(exc)
+        leaked = any(secret in output for output in exception_outputs)
+        useful = "version_family" in message and str(path) in message and (
+            "supported:" in message or "quoted string" in message
+        )
+        return not leaked, useful
+    return False, False
+
+
+@pytest.mark.parametrize("case", [
+    "ordinary", "password-marker", "token-marker", "raw-secret", "wrong-type",
+])
+def test_invalid_inventory_version_family_never_echoes_input(
+    tmp_path: Path, case: str,
+) -> None:
+    secret_absent, message_is_useful = _probe_invalid_inventory_version_family(tmp_path, case)
+    if not secret_absent:
+        raise AssertionError("synthetic secret leaked through Inventory validation")
+    assert message_is_useful, "Inventory error should identify the field, location and accepted values"
+
+
+def _probe_cli_version_family_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch, json_output: bool,
+) -> tuple[bool, bool]:
+    secret = "SYNTHETIC_" + "SECRET_DO_NOT_LEAK_2026"
+    path = tmp_path / "inventory.yaml"
+    path.write_text(yaml.safe_dump({"databases": [{
+        "id": "sample", "name": "Sample", "db_type": "sqlserver",
+        "host": "test.invalid", "port": 1433, "credential_alias": "sample-monitor",
+        "version_family": secret,
+    }]}), encoding="utf-8")
+
+    log_stream = io.StringIO()
+    logger = logging.Logger("inventory-version-family-test", level=logging.INFO)
+    logger.propagate = False
+    handler = logging.StreamHandler(log_stream)
+    handler.setFormatter(logging.Formatter("%(message)s %(event)s"))
+    logger.addHandler(handler)
+    monkeypatch.setattr("dba.cli.configure_logging", lambda: logger)
+
+    argv = ["--inventory", str(path), "validate"]
+    if json_output:
+        argv.append("--json")
+    exit_code = main(argv)
+    captured = capsys.readouterr()
+    log_output = log_stream.getvalue()
+    outputs = (captured.out, captured.err, log_output)
+    if any(secret in output for output in outputs):
+        return False, False
+
+    if json_output:
+        try:
+            payload = json.loads(captured.out)
+        except (json.JSONDecodeError, TypeError):
+            return True, False
+        useful = (exit_code == 1 and payload.get("success") is False
+                  and "version_family" in payload.get("error_message", "")
+                  and ("supported:" in payload["error_message"]
+                       or "quoted string" in payload["error_message"]))
+    else:
+        useful = (exit_code == 1 and "version_family" in captured.out
+                  and ("supported:" in captured.out or "quoted string" in captured.out))
+    return True, useful
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_cli_invalid_version_family_does_not_leak_to_output_or_logging(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    json_output: bool,
+) -> None:
+    secret_absent, message_is_useful = _probe_cli_version_family_output(
+        tmp_path, capsys, monkeypatch, json_output
+    )
+    if not secret_absent:
+        raise AssertionError("synthetic secret leaked through CLI validation output")
+    assert message_is_useful, "CLI error should remain actionable in text and JSON modes"
+
+
+@pytest.mark.parametrize("value", ["2022", "19c", "8.4", "26ai"])
+def test_validate_version_family_keeps_supported_values(value: str) -> None:
+    database_type = {
+        "2022": DatabaseType.SQLSERVER,
+        "19c": DatabaseType.ORACLE,
+        "8.4": DatabaseType.MYSQL,
+        "26ai": DatabaseType.ORACLE,
+    }[value]
+    assert validate_version_family(database_type, value) == value
 
 
 def test_missing_inventory_family_is_a_migration_warning(tmp_path: Path) -> None:
@@ -371,15 +486,13 @@ def test_show_exposes_declared_family_without_connecting(
     assert result["version_family"] == "2022"
 
 
-def test_version_profile_exposes_oracle_direct_detection_grant() -> None:
+def test_version_profile_preserves_oracle_version_detection_error() -> None:
     profile = build_version_profile(
         DatabaseType.ORACLE, "19c", None, error_type="CapabilityUnavailable",
         error_message="version view unavailable",
         database_error={"vendor_code": "ORA-00942"},
     )
-    assert profile["required_detection_privilege"] == "SELECT ON SYS.V_$VERSION"
     assert profile["version_detection_error"]["database_error"]["vendor_code"] == "ORA-00942"
-    assert VERSION_DETECTION_PRIVILEGES[DatabaseType.ORACLE] == ("SELECT SYS.V_$VERSION",)
 
 
 def test_oracle_detection_failure_keeps_sanitized_vendor_evidence() -> None:
@@ -401,5 +514,4 @@ def test_oracle_detection_failure_keeps_sanitized_vendor_evidence() -> None:
         database_error=detected.database_error,
     )
     assert profile["version_status"] == "UNVERIFIED"
-    assert profile["required_detection_privilege"] == "SELECT ON SYS.V_$VERSION"
     assert profile["version_detection_error"]["database_error"]["vendor_code"] == "ORA-00942"

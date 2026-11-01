@@ -19,14 +19,19 @@ from dba.database_errors import normalize_postgresql_error
 from dba.errors import ToolkitError
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
-from dba.registry import SqlScript, SqlScriptRegistry
+from dba.registry import SqlScript, SqlScriptRegistry, fetch_bounded_rows
 from dba.settings import PostgreSQLSettings
+
+POSTGRESQL_TOP_SQL_METRICS = frozenset({
+    "total_exec_time", "mean_exec_time", "calls", "shared_blks_read",
+    "shared_blks_hit", "temp_blks_written", "wal_bytes",
+})
 
 
 class Cursor(Protocol):
     description: Sequence[Any] | None
 
-    def execute(self, sql: str) -> Any: ...
+    def execute(self, sql: str, params: Sequence[Any] | None = None) -> Any: ...
     def fetchmany(self, size: int) -> Sequence[Sequence[Any]]: ...
     def close(self) -> None: ...
 
@@ -51,13 +56,20 @@ def load_driver() -> Driver:
     return cast(Driver, module)
 
 
-def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:
-    detail = normalize_postgresql_error(exc, (secret,)) if phase == "Connection" else None
+def _driver_error(exc: Exception, phase: str, secret: str = "", *, top_sql: bool = False) -> ToolkitError:
+    detail = normalize_postgresql_error(exc, (secret,))
     state = getattr(exc, "sqlstate", None)
     if isinstance(exc, TimeoutError) or state == "57014":
         return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.", database_error=detail)
     if state == "42501":
-        return ToolkitError("QueryDenied", "PostgreSQL monitoring permission is insufficient.", database_error=detail)
+        return ToolkitError(
+            "QueryDenied",
+            f"{detail.message} Review docs/DATABASE_PERMISSIONS.md for this PostgreSQL version and denied operation.",
+            database_error=detail,
+        )
+    if top_sql and state == "55000":
+        return ToolkitError("TopSQLSourceNotConfigured",
+                            "pg_stat_statements is not active; verify its reviewed module configuration manually.")
     error_type = "ConnectionFailed" if phase == "Connection" else f"{phase}Failed"
     message = (f"{phase} failed; vendor error details are available below."
                if detail is not None else
@@ -91,7 +103,6 @@ class PostgreSQLAdapter(Adapter):
         self._version = ""
         self._statement_timeout = self.settings.query_timeout
         self.preflight_checks: dict[str, bool] = {}
-        self.permission_observations: set[str] = set()
 
     def _audit(self, script: str, started: float, error: ToolkitError | None,
                details: dict[str, Any] | None = None) -> None:
@@ -156,7 +167,11 @@ class PostgreSQLAdapter(Adapter):
     def _preflight(self) -> None:
         result = self._run(self.registry.get("preflight", DatabaseType.POSTGRESQL))
         if not result.success or result.truncated or len(result.rows) != 1:
-            raise ToolkitError("PreflightFailed", "PostgreSQL monitor preflight is incomplete.")
+            raise ToolkitError(
+                result.error_type or "PreflightFailed",
+                result.error_message or "PostgreSQL monitor preflight is incomplete.",
+                database_error=result.database_error,
+            )
         row = result.rows[0]
         version_num = row.get("server_version_num")
         if type(version_num) is not int or version_num < 120000:
@@ -167,17 +182,8 @@ class PostgreSQLAdapter(Adapter):
         privileged = ("rolsuper", "rolcreatedb", "rolcreaterole", "rolreplication", "rolbypassrls")
         if any(row.get(name) is not False for name in privileged):
             raise ToolkitError("PrivilegedAccount", "Dedicated non-privileged monitoring account required.")
-        for name, capability in (("read_all_stats", "cross-session activity and SQL text"),
-                                 ("read_all_settings", "monitoring settings"),
-                                 ("locks_visible", "lock data"),
-                                 ("database_stats_visible", "database statistics"),
-                                 ("settings_visible", "settings data")):
-            if row.get(name) is not True:
-                raise ToolkitError("PreflightDenied", f"Missing {capability}; review pg_monitor membership manually.")
-            self.preflight_checks[name] = True
-        for name in ("activity_visible", "replication_visible", "slots_visible", "archiver_visible"):
-            self.preflight_checks[name] = bool(row.get(name))
-        self.permission_observations.update(("pg_monitor", "CONNECT"))
+        # Feature visibility is not preflighted here. The selected reviewed
+        # collector query reports its vendor access error when invoked.
 
     def _close(self) -> bool:
         connection, self._connection = self._connection, None
@@ -228,14 +234,29 @@ class PostgreSQLAdapter(Adapter):
     def execute_readonly(self, script: SqlScript) -> CollectorResult:
         if not self._ready:
             raise ToolkitError("PreflightRequired", "A preflight-approved PostgreSQL monitor is required.")
+        if (isinstance(script, SqlScript) and script.metadata.name == "top_sql"
+                and script.metadata.feature == "top-sql"):
+            raise ToolkitError("InvalidParameters", "Top SQL must use the validated parameter binding interface.")
         return self._run(script)
 
-    def _run(self, script: SqlScript) -> CollectorResult:
+    def execute_top_sql_readonly(self, script: SqlScript, top_n: int, metric: str) -> CollectorResult:
+        """Execute only the fixed, parameterized PostgreSQL Top SQL Registry entry."""
+        if not self._ready:
+            raise ToolkitError("PreflightRequired", "A preflight-approved PostgreSQL monitor is required.")
+        if (script.metadata.name != "top_sql" or script.metadata.feature != "top-sql"
+                or script.metadata.database_type != DatabaseType.POSTGRESQL
+                or type(top_n) is not int or not 1 <= top_n <= 100
+                or metric not in POSTGRESQL_TOP_SQL_METRICS):
+            raise ToolkitError("InvalidParameters", "Top SQL limit or ranking metric is invalid.")
+        return self._run(script, (top_n, metric))
+
+    def _run(self, script: SqlScript, parameters: tuple[Any, ...] | None = None) -> CollectorResult:
         started_at = datetime.now(timezone.utc)
         started = time.monotonic()
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
         truncated = False
+        result_bytes = 0
         error: ToolkitError | None = None
         authorized = False
         script_name = "unregistered"
@@ -246,20 +267,30 @@ class PostgreSQLAdapter(Adapter):
             if self._connection is None:
                 raise ToolkitError("NotConnected", "Connection is closed.")
             cursor = self._connection.cursor()
-            cursor.execute(script.text)
+            if parameters is None:
+                cursor.execute(script.text)
+            else:
+                if (script.metadata.name != "top_sql" or script.metadata.feature != "top-sql"
+                        or len(parameters) != 2):
+                    raise ToolkitError("InvalidParameters", "Only the reviewed Top SQL query accepts bindings.")
+                cursor.execute(script.text, parameters)
             if cursor.description is None:
                 raise ToolkitError("InvalidResult", "Read-only script returned no rowset.")
             columns = [str(column.name) for column in cursor.description]
-            values = cursor.fetchmany(script.metadata.max_rows)
-            truncated = len(values) >= script.metadata.max_rows
-            rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in values)
+            bounded = fetch_bounded_rows(
+                cursor, script.metadata.max_rows, script.metadata.max_result_bytes
+            )
+            truncated = bounded.truncated
+            result_bytes = bounded.result_bytes
+            rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in bounded.rows)
         except ToolkitError as exc:
             error = exc
         except (ValidationError, OSError, UnicodeError) as exc:
             error = (ToolkitError("RegistryRejected", "SQL is not an unchanged reviewed script from this registry.")
-                     if not authorized else _driver_error(exc, "Query"))
+                     if not authorized else _driver_error(
+                         exc, "Query", top_sql=script_name == "top_sql"))
         except Exception as exc:
-            error = _driver_error(exc, "Query")
+            error = _driver_error(exc, "Query", top_sql=script_name == "top_sql")
         except BaseException:
             self._close()
             raise
@@ -272,18 +303,32 @@ class PostgreSQLAdapter(Adapter):
             if error is not None:
                 rows = ()
                 truncated = False
+                result_bytes = 0
                 self._close()
-            details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated}
+            details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
+                                       "result_bytes": result_bytes}
             if authorized:
                 details.update({"sql_sha256": hashlib.sha256(script.text.encode()).hexdigest(),
                                 "timeout_seconds": min(script.metadata.timeout_seconds,
                                                        self._statement_timeout),
                                 "max_rows": script.metadata.max_rows})
+                details["max_result_bytes"] = script.metadata.max_result_bytes
             self._audit(script_name, started, error, details)
+        database_error_payload: dict[str, Any] | None = None
+        if error is not None and error.database_error is not None:
+            detail = error.database_error
+            if isinstance(detail, dict):
+                database_error_payload = detail
+            else:
+                to_dict = getattr(detail, "to_dict", None)
+                payload = to_dict() if callable(to_dict) else None
+                if isinstance(payload, dict):
+                    database_error_payload = payload
         return CollectorResult(self.instance.id, script_name, started_at,
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,
                                rows, len(rows), truncated, error is None,
-                               error.error_type if error else None, str(error) if error else None)
+                               error.error_type if error else None, str(error) if error else None,
+                               database_error_payload)
 
     def get_server_version(self) -> str:
         if not self._ready:

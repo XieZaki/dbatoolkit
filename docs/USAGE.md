@@ -9,16 +9,19 @@ dba status <database_id>
 dba diagnose <database_id> slow
 dba diagnose <database_id> disk-growth
 dba diagnose <database_id> replication
+dba diagnose <sqlserver_database_id> memory-grant
 dba diagnose <database_id> slow --verbose
 ```
 
-`dba check` combines the selected runtime, credential lookup, connection/preflight and Permission Registry Feature readiness. `dba status` combines the existing lightweight collectors into a current snapshot. It is not a deep analyzer and does not replace scenario diagnosis.
+`dba check` reports the selected runtime, credential lookup, connection and detected database version; it does not assess feature permissions. `dba status` combines the existing lightweight collectors into a current snapshot. It is not a deep analyzer and does not replace scenario diagnosis.
 
-`dba diagnose <database_id> replication` reports the selected instance's role, observed topology members, transport and apply/replay state, supported lag metrics, backlog, vendor errors, data completeness and reference DBA guidance. Use `--verbose` for additional bounded member and lag rows or `--json` for structured evidence. It never follows peer addresses or executes administrative actions. Check permissions with `dba permissions <database_id> --feature replication`.
+`dba diagnose <database_id> replication` reports the selected instance's role, observed topology members, transport and apply/replay state, supported lag metrics, backlog, vendor errors, data completeness and reference DBA guidance. Use `--verbose` for additional bounded member and lag rows or `--json` for structured evidence. It never follows peer addresses or executes administrative actions. Prepare monitor grants before first use using [Database Permissions](DATABASE_PERMISSIONS.md); access denials retain the database error and point to that guide.
 
-`dba check` reports **Account Security** separately from **Permission Readiness**. A `NON_PRIVILEGED` account can still be `MISSING` required permissions for a Feature; that is not a connection failure or evidence that the account is over-privileged. Optional gaps appear as `PARTIAL`, while `READY` has no generic impact warning. A slow diagnosis is stopped when required permissions are missing and returns the specific missing capability, its Registry explanation, an identity-scoped reference GRANT, and `Toolkit Executed: NO` / `DBA Approval Required: YES`. Toolkit never runs GRANT or REVOKE.
+`dba diagnose <sqlserver_database_id> memory-grant` takes one bounded SQL Server snapshot for waiting grants and a separate bounded snapshot for granted requests. Each reviewed read-only query associates `sys.dm_exec_query_memory_grants` to `sys.dm_exec_requests` by `(session_id, request_id)` within that query. Missing request context does not discard the grant row; handle conflicts and incomplete identity lower completeness. The two samples are sequential, not atomic. KB fields retain their source units. No SQL text, Showplan, cumulative Top SQL, polling, or remediation is used. A successful empty sample means only that no waiter was observed in that sample; Memory Grant-only output does not assess overall database health. Prepare the version-appropriate access before use as described in [Database Permissions](DATABASE_PERMISSIONS.md).
 
-For MySQL, the account security classifier examines structured `SHOW GRANTS` evidence, including privilege, scope, grant option, role grants and principal. Global read-only `SELECT ON *.*` is not classified as an administrator grant; it can satisfy the Performance Schema read capability, while missing `PROCESS` remains a separate readiness gap. `PROCESS` and `REPLICATION CLIENT` are monitoring capabilities. Known administrative/dangerous grants and `WITH GRANT OPTION` are rejected; active or granted roles that cannot be resolved are `UNKNOWN` and fail closed. Database permission inspection errors retain sanitized vendor evidence.
+Database authorization is deployment preparation, not a per-feature runtime check. The current grants and version notes are maintained in [Database Permissions](DATABASE_PERMISSIONS.md). Toolkit runs the selected reviewed read-only diagnostic; when the database rejects access, it preserves the vendor error and directs the operator to review the guide. It never runs GRANT or REVOKE.
+
+For MySQL, the account safety check examines structured `SHOW GRANTS` evidence for known administrative, write-capable, grant-option and unresolved role risks. It does not determine whether an individual diagnostic has its required grants. Collector queries report their own database access errors, with the deployment guide as the operator reference.
 
 ```powershell
 dba check <database_id> --json
@@ -34,25 +37,7 @@ Slow and Disk-Growth now print a Simplified Chinese emergency summary after thei
 
 The default report name is `<database_id>_<scenario>_<YYYYMMDD_HHMMSS>.html` in `reports/`; a same-second collision adds `_02`, `_03`, and so on. Human report times use the machine's local timezone. Pass `--report path/to/report.html` to choose an output file; a non-HTML suffix is replaced with `.html`. Reports contain no external assets and do not open a browser automatically. SQL Server plan diagnosis writes a paired `.sqlplan` only when ShowPlan XML is available; treat both files as sensitive report artifacts. Human report budgets default to 2 MiB soft / 8 MiB hard. At limits the report reduces low-priority evidence, names displayed/omitted counts, and preserves Summary, Recovery, Root Cause, critical blocking evidence and Collection Quality. `--json` is the structured output; it is not described as a complete raw snapshot beyond the collectors' own row limits.
 
-Advanced maintenance commands remain available: `show`, `validate`, `driver-info`, `runtime-info`, `credentials`, `test-connection`, `permissions`, and `collect`. Running `dba` or `dba help` shows common tasks.
-
-Inspect the current monitor account's implemented Feature status:
-
-```powershell
-dba permissions <database_id>
-dba permissions <database_id> --feature slow
-```
-
-Prepare permission advice for manual review:
-
-```powershell
-dba permissions <database_id> --feature slow --generate-grant
-dba permissions <database_id> --all-features --generate-grant
-dba permissions <database_id> --feature slow --generate-revoke
-dba permissions <database_id> --all-features --generate-revoke
-```
-
-Generated-only commands do not connect to the target; their permission status is `UNKNOWN`. Statements are text and are never executed. Confirm version, account host/scope, and organizational policy before manual use. A missing runtime capability is returned as structured evidence with its Feature, impact, and a suggested generated script. See [MONITOR_PERMISSIONS.md](MONITOR_PERMISSIONS.md) for permission details and supported database matrix.
+Advanced maintenance commands remain available: `show`, `validate`, `driver-info`, `runtime-info`, `credentials`, `test-connection`, and `collect`. Running `dba` or `dba help` shows common tasks.
 
 `doctor` and `runtime-info` are local-only: they never request passwords or connect to a database. Connection, permission inspection, collection, and diagnosis commands verify their database driver before invoking the Credential Provider. Structured SQL audit events are written to `logs/dba.jsonl` with bounded rotation (5 MB, three backups), not mixed into interactive output; logs are excluded from version control. See [DEPLOYMENT.md](DEPLOYMENT.md) for Windows/Linux bootstrap, offline wheelhouse, ODBC fallback, and upgrades.
 
@@ -99,7 +84,7 @@ MongoDB and Redis currently have no database Adapter, so no instance connection 
 
 Run a database command directly after configuring its Inventory `credential_alias`. If the alias is missing from available secure stores, Toolkit prompts for the username and hidden database password, then asks whether to save it securely (default Yes). No uses it for the current command only. If no persistent backend is available, Toolkit continues ephemerally and never initializes a store automatically. An existing encrypted store that fails to unlock or validate stops with an error rather than prompting for replacement credentials.
 
-For headless or offline machines, explicitly initialize the encrypted local store:
+For headless or offline machines, explicitly initialize the writable SQLite encrypted store. Legacy JSON stores remain readable but are read-only:
 
 ```powershell
 dba credentials set sqlserver-monitor-example
@@ -108,14 +93,18 @@ dba credentials show sqlserver-monitor-example
 dba credentials test sqlserver-monitor-example
 dba credentials delete sqlserver-monitor-example
 dba credentials backend
-dba credentials init --backend encrypted
-dba credentials set sqlserver-monitor-example --backend encrypted
-dba credentials rekey --backend encrypted
-dba credentials unlock --ttl 30m
+dba credentials init --backend sqlite
+dba credentials set sqlserver-monitor-example --backend sqlite
+dba credentials rekey --backend sqlite
+dba credentials unlock --backend sqlite --ttl 30m
 dba credentials status
 dba credentials lock
 ```
 
-`set` remains available for advanced bulk provisioning and rotation; updates and deletes require confirmation. `init` requires an explicit choice and hidden 12+ character master passphrase. The store uses AES-256-GCM and Argon2id in the user's AppData (Windows) or XDG config directory (Linux). Database commands resolve aliases in order: OS store, active encrypted session, existing encrypted store, then JIT enrollment. Add `--credential-backend auto|os|encrypted|interactive` to a database command to select the source explicitly. An existing encrypted store that cannot be unlocked fails closed. `credential_alias` remains the only credential reference in Inventory. See [CREDENTIAL_SECURITY.md](CREDENTIAL_SECURITY.md) for limitations and file handling.
+`set` remains available for advanced provisioning and rotation in the selected writable backend; updates and deletes require confirmation. `init` requires an explicit backend and hidden 12+ character master passphrase. The legacy JSON Store remains available only for authenticated reads and migration; writes are rejected with a migration hint. Database commands use the OS store under `auto`; SQLite must be explicitly selected with `--credential-backend sqlite` and is never automatically chosen. An existing encrypted Store that fails to unlock fails closed. `credential_alias` remains unchanged in Inventory. See [CREDENTIAL_SECURITY.md](CREDENTIAL_SECURITY.md) for provider selection, migration and limitations.
 
 For repeated encrypted-store use, `dba credentials unlock` prompts once and opens a current-user session with a 30-minute absolute TTL. Use `--ttl 5m` through `--ttl 8h` to choose a bounded lifetime; `--renew` requires the master passphrase again and replaces the session. `dba credentials status` reports `LOCKED` or the expiry; `dba credentials lock` clears the in-memory payload. Database commands still prefer a working OS credential store, then use the active encrypted session, and only prompt to unlock the encrypted file when no session is active. A JIT save through an active encrypted session writes the encrypted store and invalidates that session; the current command continues with its in-memory credential. Windows uses a current-SID Named Pipe, Linux a private Unix Socket with peer UID checks. See [CREDENTIAL_SECURITY.md](CREDENTIAL_SECURITY.md) for the threat model.
+
+## Opt-in encrypted SQLite credentials (Windows)
+
+The existing credential commands accept `--backend sqlite` and optional `--store-path <private-directory>/credentials.db`. SQLite is never selected by `auto`. Database commands select it explicitly with `--credential-backend sqlite` and optional `--credential-store-path <path>`. Explicit migration uses `dba credentials migrate --source <old-file> --destination <new-private-directory>/credentials.db`; it verifies a copy and never switches Providers or changes the source. Do not run this against real credentials without separate operational approval. See [SQLite Provider and migration](design/credential-sqlite-provider.md) for commands, quarantine/recovery, rollback after new writes, Windows-only support and security limits. Legacy JSON writes are rejected in this release.

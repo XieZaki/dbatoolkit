@@ -1,0 +1,18 @@
+name: memory_grant_granted
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 101
+reviewed: true
+description: Bounded current granted memory sample joined to its current request when visible; no SQL text or plan XML.
+feature: memory-grant
+version_families:
+  - 2008r2
+  - '2012'
+  - '2014'
+  - '2016'
+  - '2017'
+  - '2019'
+  - '2022'
+runtime_variants:
+  - default

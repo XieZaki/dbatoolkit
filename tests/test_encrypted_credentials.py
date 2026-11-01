@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from legacy_credential_fixture import write_legacy_store
 
 from dba.credentials import Credential, CredentialProvider, CredentialStore
 from dba.encrypted_credentials import (
@@ -45,9 +46,7 @@ def test_posix_permission_policy_is_platform_independent(mode: int, expected: bo
 @pytest.mark.skipif(not crypto_available(), reason="cryptography and argon2-cffi are not installed")
 def test_encrypted_store_format_randomness_roundtrip_and_secret_absence(tmp_path: Path) -> None:
     path = tmp_path / "credentials.enc"
-    store = _store(path)
-    store.initialize(MASTER)
-    store.set("monitor", Credential("dba_monitor", SECRET))
+    write_legacy_store(path, MASTER, {"monitor": Credential("dba_monitor", SECRET)})
     raw = path.read_bytes()
     header = json.loads(raw)
     assert header["format"] == "dba-toolkit-credential-store"
@@ -61,7 +60,7 @@ def test_encrypted_store_format_randomness_roundtrip_and_secret_absence(tmp_path
     assert reopened.get("monitor") == Credential("dba_monitor", SECRET)
     assert reopened.aliases() == ("monitor",)
     path_two = tmp_path / "second.enc"
-    _store(path_two).initialize(MASTER)
+    write_legacy_store(path_two, MASTER)
     assert json.loads(path_two.read_bytes())["ciphertext"] != header["ciphertext"]
 
 
@@ -69,7 +68,7 @@ def test_encrypted_store_format_randomness_roundtrip_and_secret_absence(tmp_path
 @pytest.mark.regression
 def test_wrong_password_ciphertext_and_header_tampering_fail_closed(tmp_path: Path) -> None:
     path = tmp_path / "credentials.enc"
-    _store(path).initialize(MASTER)
+    write_legacy_store(path, MASTER)
     with pytest.raises(ToolkitError, match="Unable to unlock encrypted credential store"):
         _store(path, "incorrect master password").aliases()
 
@@ -89,7 +88,10 @@ def test_wrong_password_ciphertext_and_header_tampering_fail_closed(tmp_path: Pa
 
 @pytest.mark.skipif(not crypto_available(), reason="cryptography and argon2-cffi are not installed")
 def test_encrypted_store_crud_rekey_and_corruption_preservation(tmp_path: Path) -> None:
-    path = tmp_path / "credentials.enc"
+    from dba.sqlite_credentials import SQLiteCredentialStore
+    path = tmp_path / "sqlite" / "credentials.db"
+    def _store(path: Path, password: str = MASTER) -> SQLiteCredentialStore:
+        return SQLiteCredentialStore(path, lambda _: password)
     store = _store(path)
     store.initialize(MASTER)
     store.set("monitor", Credential("dba_monitor", SECRET))
@@ -103,19 +105,22 @@ def test_encrypted_store_crud_rekey_and_corruption_preservation(tmp_path: Path) 
     assert _store(path, "new master passphrase for 2026").get("monitor") == Credential(
         "dba_monitor", SECRET + "-updated"
     )
+    store = _store(path, "new master passphrase for 2026")
     assert store.delete("monitor")
     assert store.aliases() == ()
 
     path.write_text("{corrupt", encoding="utf-8")
     corrupt = path.read_bytes()
-    with pytest.raises(ToolkitError, match="Corrupted"):
+    with pytest.raises(ToolkitError) as error:
         store.set("monitor", Credential("dba_monitor", SECRET))
+    assert error.value.error_type == "CredentialStoreCorrupted"
     assert path.read_bytes() == corrupt
 
 
 @pytest.mark.skipif(not crypto_available(), reason="cryptography and argon2-cffi are not installed")
 def test_encrypted_set_if_absent_never_overwrites_existing_alias(tmp_path: Path) -> None:
-    store = _store(tmp_path / "credentials.enc")
+    from dba.sqlite_credentials import SQLiteCredentialStore
+    store = SQLiteCredentialStore(tmp_path / "sqlite" / "credentials.db", lambda _: MASTER)
     store.initialize(MASTER)
     original = Credential("monitor", "first-secret")
     store.set("shared", original)
@@ -126,9 +131,14 @@ def test_encrypted_set_if_absent_never_overwrites_existing_alias(tmp_path: Path)
 
 @pytest.mark.skipif(not crypto_available(), reason="cryptography and argon2-cffi are not installed")
 def test_jit_save_uses_initialized_encrypted_store_and_next_resolver_reuses_it(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from dba.credential_session import CredentialSessionClient
     from dba.encrypted_credentials import CredentialResolver
+
+    # This test exercises the encrypted file fallback, not the user's IPC agent.
+    monkeypatch.setattr(CredentialSessionClient, "get", lambda self, alias, store_path=None: None)
+    monkeypatch.setattr(CredentialSessionClient, "status", lambda self: {"status": "LOCKED"})
 
     class OSStore(CredentialStore):
         @property
@@ -150,23 +160,26 @@ def test_jit_save_uses_initialized_encrypted_store_and_next_resolver_reuses_it(
         def aliases(self) -> tuple[str, ...]:
             return ()
 
-    path = tmp_path / "credentials.enc"
+    from dba.sqlite_credentials import SQLiteCredentialStore
+    path = tmp_path / "sqlite" / "credentials.db"
+    def _store(path: Path) -> SQLiteCredentialStore:
+        return SQLiteCredentialStore(path, lambda _: MASTER)
     initializer = _store(path)
     initializer.initialize(MASTER)
     initializer.lock()
     encrypted = _store(path)
     new_credential = Credential("monitor", "DBA-JIT-Password-987654321")
     first = CredentialResolver(
-        OSStore(), encrypted, CredentialProviderFallback(), database_id="db-01",
+        OSStore(), encrypted, CredentialProviderFallback(), mode="sqlite", database_id="db-01",
         credential_prompt=lambda _db, _alias: new_credential, save_prompt=lambda: True,
     )
     assert first.get_credential("new-alias") == new_credential
-    assert first.last_backend == "Encrypted Local Store"
-    assert new_credential.password not in path.read_text(encoding="utf-8")
+    assert first.last_backend == "Encrypted SQLite Store"
+    assert new_credential.password.encode() not in path.read_bytes()
     capsys.readouterr()
 
     second = CredentialResolver(
-        OSStore(), _store(path), CredentialProviderFallback(),
+        OSStore(), _store(path), CredentialProviderFallback(), mode="sqlite",
         credential_prompt=lambda *_: pytest.fail("persisted alias must bypass JIT"),
     )
     assert second.get_credential("new-alias") == new_credential
@@ -181,7 +194,7 @@ class CredentialProviderFallback(CredentialProvider):
 def test_failed_atomic_update_preserves_original_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "credentials.enc"
     store = _store(path)
-    store.initialize(MASTER)
+    write_legacy_store(path, MASTER)
     old = path.read_bytes()
 
     def fail(_: bytes) -> None:
@@ -401,10 +414,10 @@ def test_no_master_password_cli_option_exists(capsys: pytest.CaptureFixture[str]
 def test_one_kdf_unlock_is_reused_for_500_alias_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "credentials.enc"
     store = _store(path)
-    store.initialize(MASTER)
+    write_legacy_store(path, MASTER)
     credentials = {f"monitor-{index}": Credential(f"user-{index}", SECRET)
                    for index in range(500)}
-    store._atomic_write(store._encode(credentials, MASTER))
+    path.write_bytes(store._encode(credentials, MASTER))
     store.lock()
     reopened = _store(path)
     calls = 0

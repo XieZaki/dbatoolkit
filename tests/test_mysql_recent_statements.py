@@ -117,7 +117,7 @@ def test_recent_sql_target_budget_and_unknown_consumer_are_explicit() -> None:
     assert unknown.calls == []
 
 
-def test_recent_sql_no_history_thread_gone_and_permission_statuses() -> None:
+def test_recent_sql_no_history_thread_gone_and_query_failure_statuses() -> None:
     no_history = RecentFakeAdapter(({"session_id": 36, "thread_id": 78, "event_id": None},))
     result = collect_recent_statements(no_history, report())  # type: ignore[arg-type]
     assert result.rows[0]["evidence_status"] == "NO_HISTORY_ROWS"

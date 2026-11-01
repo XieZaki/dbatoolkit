@@ -20,12 +20,12 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 from dba.credentials import Credential, validate_alias
 from dba.errors import ToolkitError
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 DEFAULT_TTL_SECONDS = 30 * 60
 MIN_TTL_SECONDS = 5 * 60
 MAX_TTL_SECONDS = 8 * 60 * 60
@@ -351,6 +351,7 @@ class CredentialSessionClient:
 
     def status(self) -> dict[str, Any]:
         response = self.request("STATUS")
+        _remote_error(response)
         if response is None:
             return {"status": "LOCKED", "agent": "STOPPED"}
         if response.get("status") == "ERROR":
@@ -362,14 +363,17 @@ class CredentialSessionClient:
             session.pop("session_id", None)
         return response
 
-    def get(self, alias: str) -> Credential | None:
+    def get(self, alias: str, store_path: Path | None = None) -> Credential | None:
+        from dba.encrypted_credentials import default_store_path
+        store_path = store_path or default_store_path()
         checked = validate_alias(alias)
         status = self.request("STATUS")
         if status is None or status.get("status") == "LOCKED":
             return None
         if status.get("status") != "UNLOCKED":
             raise ToolkitError("CredentialSessionUnavailable", "Credential session status response is invalid.")
-        response = self.request("GET", alias=checked)
+        response = self.request("GET", alias=checked, store_path=str(store_path))
+        _remote_error(response)
         if response is None:
             raise ToolkitError("CredentialSessionUnavailable", "Credential session stopped during lookup.")
         if response.get("status") == "NOT_FOUND":
@@ -381,8 +385,10 @@ class CredentialSessionClient:
             raise ToolkitError("CredentialSessionUnavailable", "Credential session returned an invalid credential response.")
         return Credential(item["username"], item["password"])
 
-    def list_metadata(self) -> list[dict[str, str]] | None:
-        response = self.request("LIST_METADATA")
+    def list_metadata(self, store_path: Path | None = None) -> list[dict[str, str]] | None:
+        from dba.encrypted_credentials import default_store_path
+        response = self.request("LIST_METADATA", store_path=str(store_path or default_store_path()))
+        _remote_error(response)
         if response is None:
             return None
         rows = response.get("credentials")
@@ -420,15 +426,19 @@ class CredentialSessionClient:
         raise ToolkitError("CredentialSessionUnavailable", "Credential session agent did not become ready.")
 
     def load(self, credentials: dict[str, Credential], ttl_seconds: int, store_path: Path,
-             store_key: bytes) -> dict[str, Any]:
+             store_key: bytes, store_backend: str = "encrypted",
+             store_binding: tuple[int, int, str] | None = None) -> dict[str, Any]:
         self.ensure_agent()
         fingerprint = _file_fingerprint(store_path)
         payload = {alias: {"username": value.username, "password": value.password}
                    for alias, value in credentials.items()}
         response = self.request("LOAD", credentials=payload, ttl_seconds=ttl_seconds,
                                 store_path=str(store_path), store_fingerprint=fingerprint,
+                                store_backend=store_backend,
+                                store_binding=store_binding,
                                 store_key=base64.b64encode(store_key).decode("ascii"))
         payload.clear()
+        _remote_error(response)
         if response is None or response.get("status") != "UNLOCKED":
             raise ToolkitError("CredentialSessionUnavailable", "Credential session could not be unlocked.")
         session = response.get("session")
@@ -440,10 +450,20 @@ class CredentialSessionClient:
         response = self.request("LOCK")
         return response or {"status": "LOCKED", "agent": "STOPPED"}
 
-    def save(self, alias: str, credential: Credential) -> dict[str, Any]:
+    def delete(self, alias: str, store_path: Path) -> dict[str, Any]:
+        response = self.request("DELETE", alias=validate_alias(alias), store_path=str(store_path))
+        _remote_error(response)
+        if response is None or response.get("status") != "DELETED":
+            raise ToolkitError("CredentialStoreFailed", "Credential deletion was rejected; unlock the target again.")
+        return response
+
+    def save(self, alias: str, credential: Credential, store_path: Path | None = None) -> dict[str, Any]:
+        from dba.encrypted_credentials import default_store_path
         response = self.request("SAVE", alias=validate_alias(alias),
+                                store_path=str(store_path or default_store_path()),
                                 credential={"username": credential.username,
                                             "password": credential.password})
+        _remote_error(response)
         if response is None:
             raise ToolkitError("CredentialSessionUnavailable", "Credential session stopped during save.")
         if response.get("status") == "ERROR":
@@ -465,6 +485,19 @@ def _file_fingerprint(path: Path) -> str:
         raise ToolkitError("CredentialStoreFailed", "Encrypted credential store could not be verified.") from None
 
 
+def _remote_error(response: dict[str, Any] | None) -> None:
+    if response is not None and response.get("status") == "ERROR":
+        error_type = response.get("message")
+        if error_type == "CredentialStoreReadOnly":
+            from dba.encrypted_credentials import EncryptedFileCredentialStore
+            EncryptedFileCredentialStore._deny_write()
+        if not isinstance(error_type, str) or error_type not in {"CredentialStoreChanged", "CredentialStoreCorrupted", "CredentialStoreUnlockFailed",
+                              "CredentialStoreBusy", "CredentialStoreUnsupported", "CredentialStoreUnsafe",
+                              "CredentialAliasExists", "CredentialMigrationIncomplete"}:
+            error_type = "CredentialSessionUnavailable"
+        raise ToolkitError(str(error_type), "Credential operation rejected. Verify the selected Store and unlock it again.")
+
+
 def serve_agent() -> None:
     """Serve a single user session. Called only by the internal agent module."""
     if os.name == "nt":
@@ -474,19 +507,23 @@ def serve_agent() -> None:
 
 
 def _validate_request(request: dict[str, Any]) -> str:
+    if type(request.get("protocol_version")) is not int or request.get("protocol_version") != PROTOCOL_VERSION:
+        raise ToolkitError("CredentialSessionUnavailable", "Session protocol changed. Lock and unlock the session again.")
     if set(request) - {"protocol_version", "operation", "alias", "credentials", "credential", "ttl_seconds",
-                       "store_path", "store_fingerprint", "store_key"}:
+                       "store_path", "store_fingerprint", "store_key", "store_backend", "store_binding"}:
         raise ToolkitError("CredentialSessionUnavailable", "Credential session request schema is invalid.")
     operation = request.get("operation")
-    if operation not in {"STATUS", "GET", "LIST_METADATA", "LOAD", "SAVE", "LOCK", "SHUTDOWN"}:
+    if operation not in {"STATUS", "GET", "LIST_METADATA", "LOAD", "SAVE", "SET", "DELETE", "LOCK", "SHUTDOWN"}:
         raise ToolkitError("CredentialSessionUnavailable", "Credential session operation is unsupported.")
     expected = {
         "STATUS": {"protocol_version", "operation"},
-        "GET": {"protocol_version", "operation", "alias"},
-        "LIST_METADATA": {"protocol_version", "operation"},
+        "GET": {"protocol_version", "operation", "alias", "store_path"},
+        "LIST_METADATA": {"protocol_version", "operation", "store_path"},
         "LOAD": {"protocol_version", "operation", "credentials", "ttl_seconds",
-                 "store_path", "store_fingerprint", "store_key"},
-        "SAVE": {"protocol_version", "operation", "alias", "credential"},
+                 "store_path", "store_fingerprint", "store_key", "store_backend", "store_binding"},
+        "SAVE": {"protocol_version", "operation", "alias", "credential", "store_path"},
+        "SET": {"protocol_version", "operation", "alias", "credential", "store_path"},
+        "DELETE": {"protocol_version", "operation", "alias", "store_path"},
         "LOCK": {"protocol_version", "operation"},
         "SHUTDOWN": {"protocol_version", "operation"},
     }[operation]
@@ -505,6 +542,7 @@ def _clear_session(manager: dict[str, Any]) -> None:
     credentials = manager.get("credentials")
     if isinstance(credentials, dict):
         credentials.clear()
+    manager.clear()
     manager.update(_new_manager())
 
 
@@ -518,6 +556,19 @@ def _is_current(manager: dict[str, Any], now: float | None = None) -> bool:
     if not isinstance(path, str):
         _clear_session(manager)
         return False
+    if manager.get("store_backend") == "sqlite":
+        from dba.sqlite_credentials import SQLiteCredentialStore
+
+        try:
+            SQLiteCredentialStore(Path(path)).session_operation(manager["store_key"], manager["sqlite_binding"])
+            return True
+        except ToolkitError as exc:
+            if exc.error_type == "CredentialStoreBusy":
+                # Contention does not invalidate a time-bounded key. Content
+                # operations still authenticate under their own transaction.
+                return True
+            _clear_session(manager)
+            return False
     try:
         current = _file_fingerprint(Path(path))
     except ToolkitError:
@@ -536,12 +587,81 @@ def _status(manager: dict[str, Any]) -> dict[str, Any]:
     return {"protocol_version": PROTOCOL_VERSION, "status": "UNLOCKED", "session": {
         "session_id": manager["session_id"], "created_at": manager["created_at"],
         "expires_at": manager["expires_at"], "expires_in": remaining,
-        "backend": "Encrypted Local Store", "agent_pid": os.getpid(),
+        "backend": "Encrypted SQLite Store" if manager.get("store_backend") == "sqlite" else "Encrypted Local Store",
+        "agent_pid": os.getpid(),
     }}
+
+
+def _windows_store_snapshot(path: str) -> tuple[BinaryIO, str, tuple[int, int]]:
+    """Open and hash a store through one handle that denies concurrent replace/write."""
+    import msvcrt
+    from ctypes import WinDLL, get_last_error, wintypes
+
+    kernel = WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                   wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateFileW(path, 0x80000000, 0x00000001, None, 3, 0x80, None)
+    if handle == wintypes.HANDLE(-1).value:
+        _ = get_last_error()
+        raise ToolkitError("CredentialStoreChanged", "Credential store cannot be securely accessed.")
+
+    fd = -1
+    stream: BinaryIO | None = None
+    try:
+        fd = msvcrt.open_osfhandle(int(handle), os.O_RDONLY)
+        stream = os.fdopen(fd, "rb")
+        fd = -1
+        file_stat = os.fstat(stream.fileno())
+        digest = hashlib.sha256()
+        for block in iter(lambda: stream.read(65536), b""):
+            digest.update(block)
+        stream.seek(0)
+        return stream, digest.hexdigest(), (file_stat.st_dev, file_stat.st_ino)
+    except Exception:
+        if stream is not None:
+            stream.close()
+        elif fd >= 0:
+            os.close(fd)
+        else:
+            # open_osfhandle transfers ownership only after it succeeds.
+            kernel.CloseHandle(handle)
+        raise ToolkitError("CredentialStoreChanged", "Credential store cannot be securely verified.") from None
 
 
 def _dispatch(manager: dict[str, Any], request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     operation = _validate_request(request)
+    if ((operation == "LOAD" and request.get("store_backend") == "sqlite")
+            or (manager.get("store_backend") == "sqlite" and operation in {"GET", "SAVE", "SET", "DELETE", "LIST_METADATA"})):
+        return _dispatch_sqlite(manager, request)
+    if operation in {"SAVE", "SET", "DELETE"}:
+        from dba.encrypted_credentials import EncryptedFileCredentialStore
+        EncryptedFileCredentialStore._deny_write()
+    if operation == "LOAD" and request.get("store_backend") != "encrypted":
+        raise ToolkitError("CredentialStoreUnsupported", "Credential session backend is unsupported.")
+    if os.name != "nt" or operation not in {"LOAD", "GET", "LIST_METADATA"}:
+        return _dispatch_checked(manager, request)
+
+    path = request.get("store_path")
+    if not isinstance(path, str):
+        raise ToolkitError("CredentialSessionUnavailable", "Credential store identity is required.")
+    stream, fingerprint, file_identity = _windows_store_snapshot(path)
+    try:
+        return _dispatch_checked(manager, request, (fingerprint, file_identity))
+    finally:
+        stream.close()
+
+
+def _dispatch_checked(
+    manager: dict[str, Any], request: dict[str, Any],
+    store_snapshot: tuple[str, tuple[int, int]] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    operation = _validate_request(request)
+    if operation in {"SAVE", "SET", "DELETE"}:
+        from dba.encrypted_credentials import EncryptedFileCredentialStore
+        EncryptedFileCredentialStore._deny_write()
     if operation == "STATUS":
         return _status(manager), False
     if operation == "LOAD":
@@ -567,14 +687,17 @@ def _dispatch(manager: dict[str, Any], request: dict[str, Any]) -> tuple[dict[st
                     or not isinstance(item["username"], str) or not isinstance(item["password"], str)):
                 raise ToolkitError("CredentialSessionUnavailable", "Credential session load request is invalid.")
             checked[alias] = Credential(item["username"], item["password"])
-        if not secrets.compare_digest(_file_fingerprint(Path(path)), fingerprint):
+        observed_fingerprint = store_snapshot[0] if store_snapshot else _file_fingerprint(Path(path))
+        if not secrets.compare_digest(observed_fingerprint, fingerprint):
             raise ToolkitError("CredentialStoreChanged", "Encrypted credential store changed during unlock.")
         _clear_session(manager)
         now = datetime.now(timezone.utc)
         manager.update({"credentials": checked, "expires_monotonic": time.monotonic() + ttl,
                         "created_at": now.isoformat(), "expires_at": (now + timedelta(seconds=ttl)).isoformat(),
                         "session_id": secrets.token_urlsafe(32), "store_path": path,
-                        "store_fingerprint": fingerprint, "store_key": store_key})
+                        "store_fingerprint": fingerprint, "store_key": store_key,
+                        "store_backend": "encrypted",
+                        "store_file_identity": store_snapshot[1] if store_snapshot else None})
         return _status(manager), False
     if operation == "LOCK":
         _clear_session(manager)
@@ -584,9 +707,25 @@ def _dispatch(manager: dict[str, Any], request: dict[str, Any]) -> tuple[dict[st
         return {"protocol_version": PROTOCOL_VERSION, "status": "LOCKED"}, True
     if not _is_current(manager):
         return {"protocol_version": PROTOCOL_VERSION, "status": "LOCKED"}, True
+    target = request.get("store_path")
+    if not isinstance(target, str):
+        raise ToolkitError("CredentialSessionUnavailable", "Credential store identity is required.")
+    if store_snapshot is not None:
+        same = store_snapshot[1] == manager.get("store_file_identity")
+        current_fingerprint = store_snapshot[0]
+    else:
+        try:
+            same = os.path.samefile(target, manager["store_path"])
+        except OSError:
+            same = False
+        current_fingerprint = _file_fingerprint(Path(target))
+    if not same or not secrets.compare_digest(current_fingerprint, manager["store_fingerprint"]):
+        raise ToolkitError("CredentialStoreChanged", "Credential session does not match target store.")
     if operation == "GET":
         alias = validate_alias(request.get("alias", ""))
         credential = manager["credentials"].get(alias)
+        if not _is_current(manager):
+            raise ToolkitError("CredentialStoreChanged", "Encrypted credential store changed during lookup.")
         if credential is None:
             return {"protocol_version": PROTOCOL_VERSION, "status": "NOT_FOUND"}, False
         return {"protocol_version": PROTOCOL_VERSION, "status": "OK",
@@ -617,6 +756,77 @@ def _dispatch(manager: dict[str, Any], request: dict[str, Any]) -> tuple[dict[st
         _clear_session(manager)
         return {"protocol_version": PROTOCOL_VERSION, "status": "SAVED_INVALIDATED"}, True
     raise ToolkitError("CredentialSessionUnavailable", "Credential session operation is unsupported.")
+
+
+def _dispatch_sqlite(manager: dict[str, Any], request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    from dba.sqlite_credentials import SQLiteCredentialStore
+
+    path = request.get("store_path")
+    if not isinstance(path, str):
+        raise ToolkitError("CredentialStoreChanged", "Target Store is required.")
+    store = SQLiteCredentialStore(Path(path))
+    operation = request["operation"]
+    if operation == "LOAD":
+        ttl = request.get("ttl_seconds")
+        if type(ttl) is not int or not MIN_TTL_SECONDS <= ttl <= MAX_TTL_SECONDS:
+            raise ToolkitError("CredentialSessionUnavailable", "Credential session lifetime is invalid.")
+        try:
+            key = base64.b64decode(request["store_key"], validate=True)
+            if len(key) != 32:
+                raise ValueError
+        except (ValueError, TypeError):
+            raise ToolkitError("CredentialSessionUnavailable", "Credential session key is invalid.") from None
+        store._session_key = key
+        store._read_container()  # Authenticate on the server; never trust client-supplied rows.
+        binding = request.get("store_binding")
+        if (not isinstance(binding, (list, tuple)) or len(binding) != 3
+                or type(binding[0]) is not int or type(binding[1]) is not int
+                or not isinstance(binding[2], str) or tuple(binding) != store.binding):
+            store.lock()
+            raise ToolkitError("CredentialStoreChanged", "Store changed after unlock; unlock the target again.")
+        _clear_session(manager)
+        now = datetime.now(timezone.utc)
+        manager.update({"credentials": {}, "expires_monotonic": time.monotonic() + ttl,
+                        "created_at": now.isoformat(), "expires_at": (now + timedelta(seconds=ttl)).isoformat(),
+                        "session_id": secrets.token_urlsafe(32), "store_path": str(store.path),
+                        "store_key": key, "store_backend": "sqlite", "sqlite_binding": store.binding})
+        store.lock()
+        return _status(manager), False
+    if not isinstance(manager.get("credentials"), dict) or time.monotonic() >= manager["expires_monotonic"]:
+        _clear_session(manager)
+        raise ToolkitError("CredentialSessionUnavailable", "Credential session expired; unlock the target again.")
+    alias = validate_alias(request.get("alias", "")) if operation != "LIST_METADATA" else ""
+    change = None
+    if operation in {"SAVE", "SET"}:
+        item = request.get("credential")
+        if (not isinstance(item, dict) or set(item) != {"username", "password"}
+                or any(not isinstance(v, str) for v in item.values())):
+            raise ToolkitError("CredentialSessionUnavailable", "Credential session save schema is invalid.")
+        saved_item = dict(item)
+        def add(values: dict[str, Credential]) -> dict[str, Credential]:
+            if operation == "SAVE" and alias in values:
+                raise ToolkitError("CredentialAliasExists", "Credential alias already exists.")
+            return {**values, alias: Credential(saved_item["username"], saved_item["password"])}
+        change = add
+    elif operation == "DELETE":
+        def remove(values: dict[str, Credential]) -> dict[str, Credential]:
+            return {k: v for k, v in values.items() if k != alias}
+        change = remove
+    try:
+        values = store.session_operation(manager["store_key"], manager["sqlite_binding"], change)
+    except ToolkitError as exc:
+        if exc.error_type == "CredentialAliasExists":
+            return {"protocol_version": PROTOCOL_VERSION, "status": "ALREADY_EXISTS"}, False
+        raise
+    if operation == "GET":
+        credential = values.get(alias)
+        return ({"protocol_version": PROTOCOL_VERSION, "status": "NOT_FOUND"} if credential is None else
+                {"protocol_version": PROTOCOL_VERSION, "status": "OK",
+                 "credential": {"username": credential.username, "password": credential.password}}), False
+    if operation == "LIST_METADATA":
+        return {"protocol_version": PROTOCOL_VERSION, "status": "OK", "credentials": [
+            {"alias": k, "username": v.username} for k, v in sorted(values.items())]}, False
+    return {"protocol_version": PROTOCOL_VERSION, "status": "SAVED" if operation in {"SAVE", "SET"} else "DELETED"}, False
 
 
 def _serve_unix() -> None:

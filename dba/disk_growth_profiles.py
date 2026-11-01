@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from dba.permissions import requirements_for_profile
-
 
 @dataclass(frozen=True)
 class DiskGrowthSqlProfile:
@@ -18,7 +16,7 @@ class DiskGrowthSqlProfile:
     def emergency(self) -> tuple[str, ...]:
         """Existing minimum sources useful for an initial space/retention triage."""
         priority = {"disk_tempdb", "disk_temp_usage", "disk_transactions", "transactions",
-                    "disk_slots", "disk_slots_17_plus", "disk_archiver", "disk_binlog_config",
+                    "disk_slots", "disk_slots_17_plus", "disk_wal_settings", "disk_archiver", "disk_binlog_config",
                     "disk_binlog_config_legacy", "disk_binlogs", "disk_fra", "disk_fra_usage",
                     "disk_archive", "disk_archive_volume", "disk_redo"}
         names = self.required + tuple(name for name in self.optional if name in priority)
@@ -35,7 +33,7 @@ _MYSQL_REQUIRED = ("disk_schemas",)
 _MYSQL_OPTIONAL = ("disk_binlog_config", "disk_tables", "disk_tablespaces", "disk_binlogs", "disk_replica",
                    "disk_innodb", "disk_transactions")
 _PG_REQUIRED = ("disk_database",)
-_PG_OPTIONAL = ("disk_relations", "disk_slots", "disk_archiver", "disk_replicas",
+_PG_OPTIONAL = ("disk_relations", "disk_slots", "disk_wal_settings", "disk_archiver", "disk_replicas",
                 "disk_transactions")
 _ORACLE_REQUIRED = ("disk_tablespaces", "disk_files", "disk_temp")
 _ORACLE_OPTIONAL = ("disk_fra", "disk_fra_usage", "disk_archive", "disk_archive_volume", "disk_redo",
@@ -61,7 +59,7 @@ DISK_GROWTH_SQL_PROFILES: dict[str, DiskGrowthSqlProfile] = {
     "postgresql_disk_13_16": DiskGrowthSqlProfile("postgresql_disk_13_16", _PG_REQUIRED, _PG_OPTIONAL),
     "postgresql_disk_17_18": DiskGrowthSqlProfile(
         "postgresql_disk_17_18", _PG_REQUIRED,
-        ("disk_relations", "disk_slots_17_plus", "disk_archiver", "disk_replicas",
+        ("disk_relations", "disk_slots_17_plus", "disk_wal_settings", "disk_archiver", "disk_replicas",
          "disk_transactions")),
     "oracle_disk_11gr2": DiskGrowthSqlProfile("oracle_disk_11gr2", _ORACLE_REQUIRED, _ORACLE_OPTIONAL),
     "oracle_disk_12c_121": DiskGrowthSqlProfile("oracle_disk_12c_121", _ORACLE_REQUIRED, _ORACLE_OPTIONAL),
@@ -98,13 +96,6 @@ def validate_disk_binding(binding: Any) -> tuple[str, ...]:
     elif (binding.sql_profile_id != binding.profile_family
           or binding.parser_contract_id not in DISK_GROWTH_PARSER_CONTRACTS):
         errors.append(f"invalid disk-growth parser/profile reference: {binding.version_family}")
-    try:
-        permissions = requirements_for_profile(binding.permission_profile_id)
-    except ValueError:
-        errors.append(f"missing disk-growth permission profile: {binding.permission_profile_id}")
-    else:
-        if tuple(permissions.required) != binding.required_privileges:
-            errors.append(f"disk-growth permission contract mismatch: {binding.version_family}")
     if sql_profile is not None:
         if not sql_profile.required or set(sql_profile.required) & set(sql_profile.optional):
             errors.append(f"invalid disk-growth collector roles: {binding.sql_profile_id}")

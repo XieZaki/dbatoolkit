@@ -1,0 +1,19 @@
+name: top_sql_modern
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 15
+max_rows: 101
+reviewed: true
+description: Bounded Oracle 12c+ current-container V$SQL child-cursor cumulative statistics with bound parameters.
+feature: top-sql
+version_families:
+- 12c
+- 18c
+- 19c
+- 21c
+- 23ai
+- 26ai
+runtime_variants:
+- '12_1'
+- 12_2_plus
+- default

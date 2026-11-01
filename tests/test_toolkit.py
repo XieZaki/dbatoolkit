@@ -1,6 +1,8 @@
+import gc
 import inspect
 import io
 import logging
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,7 +23,13 @@ from dba.credentials import (
 )
 from dba.inventory import Inventory, ValidationError
 from dba.logging import SafeFormatter, redact
-from dba.registry import SqlScriptRegistry
+from dba.registry import (
+    DEFAULT_MAX_RESULT_BYTES,
+    MAX_SQL_ROWS,
+    MAX_SQL_TIMEOUT_SECONDS,
+    SqlScriptRegistry,
+    fetch_bounded_rows,
+)
 from dba.reporters import ConsoleReporter, MarkdownReporter
 from dba.security import check_sql
 
@@ -145,6 +153,77 @@ def test_sql_metadata(script: Path, tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "key,value",
     [
+        ("timeout_seconds", MAX_SQL_TIMEOUT_SECONDS + 1),
+        ("max_rows", MAX_SQL_ROWS + 1),
+        ("max_result_bytes", DEFAULT_MAX_RESULT_BYTES + 1),
+        ("max_result_bytes", 0),
+    ],
+)
+def test_registry_rejects_unbounded_metadata(
+    script: Path, tmp_path: Path, key: str, value: int,
+) -> None:
+    metadata = script.with_suffix(".yaml")
+    data = yaml.safe_load(metadata.read_text(encoding="utf-8"))
+    data[key] = value
+    metadata.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ValidationError):
+        SqlScriptRegistry(tmp_path).load(script)
+
+
+def test_registry_revalidates_metadata_digest_without_retaining_probe_scripts(
+    script: Path, tmp_path: Path,
+) -> None:
+    registry = SqlScriptRegistry(tmp_path)
+    registered = registry.load(script)
+    registry.authorize(registered, DatabaseType.SQLSERVER)
+    assert len(registry._issued) == 1
+
+    metadata = script.with_suffix(".yaml")
+    data = yaml.safe_load(metadata.read_text(encoding="utf-8"))
+    data["description"] = "changed after registration"
+    metadata.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ValidationError, match="changed after registration"):
+        registry.authorize(registered, DatabaseType.SQLSERVER)
+    assert len(registry._issued) == 1
+
+
+def test_registry_releases_issued_script_capabilities(script: Path, tmp_path: Path) -> None:
+    registry = SqlScriptRegistry(tmp_path)
+    issued = registry.load(script)
+    reference = weakref.ref(issued)
+    assert len(registry._issued) == 1
+    del issued
+    gc.collect()
+    assert reference() is None
+    assert registry._issued == {}
+
+
+def test_fetch_bounded_rows_stops_at_row_and_byte_budgets() -> None:
+    class Cursor:
+        def __init__(self, rows: list[tuple[str, ...]]) -> None:
+            self.rows = rows
+
+        def fetchmany(self, size: int) -> list[tuple[str, ...]]:
+            assert size == 1
+            if not self.rows:
+                return []
+            return [self.rows.pop(0)]
+
+    exact = fetch_bounded_rows(Cursor([("ab",), ("c",)]), 3, 3)
+    assert exact.rows == (("ab",), ("c",))
+    assert exact.result_bytes == 3 and not exact.truncated
+
+    by_bytes = fetch_bounded_rows(Cursor([("ab",), ("cd",)]), 3, 3)
+    assert by_bytes.rows == (("ab",),)
+    assert by_bytes.result_bytes == 2 and by_bytes.byte_limit_reached and by_bytes.truncated
+
+    by_rows = fetch_bounded_rows(Cursor([("a",), ("b",)]), 1, 8)
+    assert by_rows.rows == (("a",),) and by_rows.row_limit_reached and by_rows.truncated
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
         ("risk", "WRITE"),
         ("reviewed", False),
         ("reviewed", "true"),
@@ -184,6 +263,8 @@ def test_metadata_rejects(script: Path, tmp_path: Path, key: str, value: object)
         "SELECT pg_cancel_backend(12)",
         "SELECT 1 INTO x",
         "SELECT 1; EXEC x",
+        "SELECT 1; SELECT 2",
+        "SELECT 1; -- trailing comment\nSELECT 2",
         "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x",
         "SELECT nextval('seq')",
         "SELECT * FROM t FOR SHARE",
@@ -193,6 +274,12 @@ def test_metadata_rejects(script: Path, tmp_path: Path, key: str, value: object)
 def test_dangerous_sql(sql: str) -> None:
     with pytest.raises(ValidationError):
         check_sql(sql)
+
+
+def test_single_statement_check_ignores_quoted_and_trailing_comment_semicolons() -> None:
+    check_sql("SELECT 'first; second'")
+    check_sql("SELECT $$first; second$$")
+    check_sql("SELECT 1; -- a trailing comment; is not a second statement")
 
 
 def test_registry_refuses_dangerous(script: Path, tmp_path: Path) -> None:

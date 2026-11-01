@@ -7,23 +7,23 @@ class ToolkitError(RuntimeError):
     def __init__(
         self, error_type: str, message: str, *, trigger_reason: dict[str, str] | None = None,
         database_error: object | None = None,
-        permission_readiness: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.error_type = error_type
         self.trigger_reason = trigger_reason
         self.database_error = database_error
-        self.permission_readiness = permission_readiness
 
 
-def driver_error(exc: Exception, phase: str) -> ToolkitError:
+def driver_error(exc: Exception, phase: str, *, secret: str = "", driver: str = "pyodbc") -> ToolkitError:
     state = exc.args[0] if exc.args else None
     if isinstance(exc, TimeoutError) or state in ("HYT00", "HYT01"):
         return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.")
-    if state == "42000":
+    detail = normalize_sqlserver_error(exc, (secret,), driver)
+    if detail.classification == "ACCESS_DENIED":
         return ToolkitError(
             "QueryDenied",
-            "Query denied or unsupported; check monitoring permissions and SQL Server version.",
+            f"{detail.message} Review docs/DATABASE_PERMISSIONS.md for this SQL Server version and denied operation.",
+            database_error=detail,
         )
     return ToolkitError(
         f"{phase}Failed",

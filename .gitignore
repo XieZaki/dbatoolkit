@@ -54,6 +54,14 @@ logs/**
 credentials.enc
 *.credentials.enc
 credentials.enc.lock
+credentials.db
+credentials.db-journal
+credentials.db-wal
+credentials.db-shm
+*.credentials.db
+*.credentials.db-journal
+*.credentials.db-wal
+*.credentials.db-shm
 *.credentials.enc.lock
 master.key
 unlock.key

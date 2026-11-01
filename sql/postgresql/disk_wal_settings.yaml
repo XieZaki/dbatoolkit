@@ -1,0 +1,11 @@
+name: disk_wal_settings
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2
+reviewed: true
+description: Node role, WAL position and retention settings
+feature: disk-growth
+profile_role: optional
+version_families: ['13', '14', '15', '16', '17', '18']
+runtime_variants: ['default']

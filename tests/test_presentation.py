@@ -10,13 +10,13 @@ def test_check_human_and_json_share_one_domain_result() -> None:
         {"alias": "monitor", "backend": "OS Store", "status": "READY"},
         {"target": "localhost:1433", "database": "master", "status": "READY",
          "encrypt": False, "trust_server_certificate": True},
-        ({"feature": "slow", "status": "READY"},),
         "READY_WITH_WARNING", ("Driver 18 unavailable; using Driver 17.",),
+        {"classification": "NON_PRIVILEGED"},
     )
     human = render_human("check", result)
     machine = json.loads(render_json(result))
     assert "DBA Toolkit Check" in human and "READY_WITH_WARNING" in human
-    assert machine["permissions"][0]["feature"] == "slow"
+    assert "permissions" not in machine
     assert machine["status"] == "READY_WITH_WARNING"
 
 
@@ -30,17 +30,17 @@ def test_status_human_handles_no_active_requests() -> None:
     assert "dba diagnose sql slow" in rendered
 
 
-def test_human_permission_error_includes_safe_grant_and_safety_notice() -> None:
+def test_human_database_access_error_preserves_vendor_error_and_guide() -> None:
     rendered = render_human("collect", {
-        "error_type": "MissingPermission", "database_id": "mysql-prod", "feature": "disk-growth",
-        "permission_missing": {
-            "missing_privileges": ["REPLICATION CLIENT"],
-            "impact": "Binary log collection unavailable.",
-            "suggested_grant": "GRANT REPLICATION CLIENT ON *.* TO 'monitor'@'host';",
-        },
+        "error_type": "QueryDenied", "database_id": "mysql-lab",
+        "error_message": "Database rejected the reviewed query.",
+        "error": {"vendor_code": 1142, "message": "SELECT command denied",
+                  "guidance": "Review docs/DATABASE_PERMISSIONS.md."},
     })
-    assert "REPLICATION CLIENT" in rendered
-    assert "Toolkit did NOT execute" in rendered
+    assert "1142" in rendered
+    assert "SELECT command denied" in rendered
+    assert "docs/DATABASE_PERMISSIONS.md" in rendered
+    assert "GRANT" not in rendered
     assert "password" not in rendered.lower()
 
 

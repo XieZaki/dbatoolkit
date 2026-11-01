@@ -22,12 +22,12 @@ All test files must use only declared markers (`--strict-markers` is enabled). D
 | Credential providers, session, JIT | Yes | Partial | Partial | Yes | `test_connection_credentials.py`, `test_credential_session.py`, `test_jit_credentials.py`; system tests use existing OS/secure-store credentials and never pass passwords through environment variables. |
 | Encrypted credential store | Yes | Partial | Partial | Yes | `test_encrypted_credentials.py`; corruption, tamper, wrong password, rekey, atomic update, and fail-closed paths. |
 | Runtime and deployment | Yes | Partial | Yes | Partial | `test_runtime.py`; platform behavior is simulated on the current host, not claimed as real Linux validation. |
-| Permissions and account safety | Yes | Yes | Yes | Yes | `test_permissions.py`, `test_mysql_privileges.py`, vendor adapter tests; GRANT output remains text-only. |
+| Deployment grants and account safety | Yes | Yes | Yes | Yes | `test_permissions.py` checks the single guide and removed CLI; `test_mysql_privileges.py` and adapter tests cover dangerous-account rejection. No GRANT generator is exposed. |
 | SQL Registry and adapter lifecycle | Yes | Yes | Yes | Yes | Per-database adapter tests include reviewed SQL, timeouts, bounded fetch and cleanup; MySQL streaming cursor lifecycle is a named regression. |
 | Slow diagnosis | Yes | Yes | Yes | Partial | `test_slow.py`, per-database fake CLI/diagnose coverage; no database is contacted by default. |
 | Disk growth | Yes | Yes | Yes | Partial | `test_disk_growth.py` and database adapter tests. |
 | Replication | Yes | Yes | Yes | Yes | `test_replication.py` and MySQL CLI tests cover configured/unconfigured state, version/capability behavior, lag uncertainty, and bounded reports. |
-| Execution plan | Yes | Partial | SQL Server only | Partial | `test_execution_plan.py` covers version/profile permission routing, mismatch fail-closed, SQL applicability metadata, bounded parser and ambiguity; live plan collection requires a safe SQL Server asset and suitable session. Only SQL Server 2022 has recorded real plan E2E; older families remain unverified. |
+| Execution plan | Yes | Partial | SQL Server only | Partial | `test_execution_plan.py` covers version/profile SQL routing, mismatch fail-closed, SQL applicability metadata, bounded parser and ambiguity; live plan collection requires a safe SQL Server asset and suitable session. Only SQL Server 2022 has recorded real plan E2E; older families remain unverified. |
 | Database errors and redaction | Yes | Yes | Yes | Yes | `test_database_errors.py` and adapter tests; vendor evidence is retained in sanitized form. |
 | Human, JSON, HTML reports | Yes | Yes | Yes | Yes | `test_presentation.py`, `test_html_reports.py`, `test_incident.py`; static and generated reports are checked for escaping and bounds. |
 | Secret scanner / repository safety | Yes | Partial | N/A | Yes | `test_repository_safety.py` and `scripts/check_repository_secrets.py`; scanner evaluates tracked files only. |
@@ -38,7 +38,7 @@ All test files must use only declared markers (`--strict-markers` is enabled). D
 
 System tests skip unless `DBA_TOOLKIT_SYSTEM_TESTS=1`. They also require a non-empty, explicit comma-separated `DBA_TOOLKIT_SYSTEM_DATABASES` selection. Every selected instance must be enabled and have `group: local-test` or a `test`, `docker`, or `local-test` tag in Inventory; otherwise the run is skipped before launching the CLI. Never label a production asset for convenience. No Inventory-wide connection scan or target guessing is performed.
 
-The system suite invokes only the CLI's read-only commands: version/list/show/validate/doctor/runtime-info, check/test-connection, permissions, collectors implemented for the selected database type, and slow/disk-growth/replication diagnoses. It uses the installed Credential Provider, closes stdin to prevent a hidden prompt, applies a command timeout, rejects traceback-style failures, and writes only command names, exit codes, duration, and output byte counts under ignored `.tmp/system-test/`. It does not save command output, reports, credentials, or database rows there. A diagnosis may return a non-zero status when it produces a valid HTML report and explicitly marks data completeness PARTIAL or INCOMPLETE; that is recorded as a diagnostic gap, not promoted to a healthy result. A structured Oracle `ORA-01045` / missing `CREATE SESSION` response is recorded as an expected permission blocker, and later commands for that unreachable instance are skipped. Other non-zero command exits fail the system test.
+The system suite invokes only the CLI's read-only commands: version/list/show/validate/doctor/runtime-info, check/test-connection, collectors implemented for the selected database type, and supported diagnoses. It uses the installed Credential Provider, closes stdin to prevent a hidden prompt, applies a command timeout, rejects traceback-style failures, and writes only command names, exit codes, duration, and output byte counts under ignored `.tmp/system-test/`. It does not save command output, reports, credentials, or database rows there. A diagnosis may return a non-zero status when it produces a valid HTML report and explicitly marks data completeness PARTIAL or INCOMPLETE; that is recorded as a diagnostic gap, not promoted to a healthy result. A structured Oracle `ORA-01045` / missing `CREATE SESSION` response is recorded as an expected connection blocker, and later commands for that unreachable instance are skipped. Other non-zero command exits fail the system test.
 
 Run one approved test asset at a time. Example (PowerShell):
 
@@ -87,8 +87,8 @@ Concurrency and performance coverage is limited to deterministic session reuse /
 
 V0.9.1 Phase B adds profile-routing regression and Fake Adapter integration
 coverage for MySQL 5.7 and the 8.0.21/8.0.22 boundary, PostgreSQL 13–18,
-SQL Server 2008 R2 unsupported and 2022 permission routing, and Oracle 11.2,
-12.1, 12.2+ Data Guard SQL/grant/parser selection. These are not live version
+SQL Server 2008 R2 unsupported and 2022 SQL routing, and Oracle 11.2,
+12.1, 12.2+ Data Guard SQL/parser selection. These are not live version
 compatibility claims. Oracle 11gR2 is explicitly NOT E2E VERIFIED. Replication
 tests assert a PostgreSQL standalone primary is healthy/not configured when
 all required evidence is available, and that MySQL zero-channel results remain
@@ -97,7 +97,7 @@ unverified, unknown, or mismatched routes.
 
 V0.9.1 Phase C adds slow profile coverage for SQL Server 2008 R2 through 2022
 (2025 remains UNKNOWN), MySQL 5.7/8.0/8.4, PostgreSQL 13–18, and Oracle 11gR2,
-12c variants and 18c–26ai. Tests verify SQL/permission/parser alignment,
+12c variants and 18c–26ai. Tests verify SQL/profile/parser alignment,
 MySQL 5.7 legacy lock views, normalized evidence aliases, required versus
 optional collector failures and fail-closed version gating. These tests use
 Fake Adapters and do not replace live E2E verification.
@@ -110,14 +110,15 @@ failures remain failures.
 The initial Oracle 26ai system run recorded four missing required disk-growth
 object grants before those core grants were provided. That result is historical,
 not a statement of current readiness. Re-run `dba check oraclefree`,
-`dba diagnose oraclefree disk-growth`, and
-`dba permissions oraclefree --feature disk-growth` to assess current live
-permissions; the system runner never changes database permissions.
+`dba diagnose oraclefree disk-growth` to observe current access. For deployment
+grants, compare any sanitized vendor denial with the target-version section in
+`docs/DATABASE_PERMISSIONS.md`; the system runner never changes database
+permissions.
 
-V0.9.1 Phase D adds version-bound disk-growth SQL, permission and parser
-contracts for SQL Server 2008 R2–2022, MySQL 5.7/8.0/8.4, PostgreSQL 13–18,
-and Oracle 11gR2–26ai. On 2026-10-18 the opt-in system test passed against the
-four local Docker assets. Disk-growth collection completed with FULL visibility
+V0.9.1 Phase D adds version-bound disk-growth SQL and parser contracts for
+SQL Server 2008 R2–2022, MySQL 5.7/8.0/8.4, PostgreSQL 13–18, and Oracle
+11gR2–26ai. The following is a historical, pre-simplification system run from
+2026-10-18 against the four local Docker assets. Disk-growth collection completed with FULL visibility
 for `sqlserver2022` (SQL Server 16.0.4305.5), `pg16` (PostgreSQL 16.15), and
 `mysql84` (MySQL 8.4.11). Oracle 26ai connection, principal, version and
 permission checks passed; collection was correctly blocked before feature SQL

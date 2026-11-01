@@ -1,0 +1,19 @@
+name: top_sql_container
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: Read-only Oracle multitenant current-container identity for bounded Top SQL scope.
+feature: top-sql
+version_families:
+- 12c
+- 18c
+- 19c
+- 21c
+- 23ai
+- 26ai
+runtime_variants:
+- '12_1'
+- 12_2_plus
+- default

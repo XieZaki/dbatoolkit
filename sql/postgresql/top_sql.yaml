@@ -1,0 +1,16 @@
+name: top_sql
+database_type: postgresql
+risk: READ_ONLY
+timeout_seconds: 15
+max_rows: 101
+reviewed: true
+description: Bounded PostgreSQL cumulative pg_stat_statements ranking; returns native statement identity and selected metric only, never query text.
+feature: top-sql
+version_families:
+  - '14'
+  - '15'
+  - '16'
+  - '17'
+  - '18'
+runtime_variants:
+  - default

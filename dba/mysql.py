@@ -22,15 +22,20 @@ from dba.errors import ToolkitError
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
 from dba.mysql_privileges import classify_mysql_grants
-from dba.permissions import assess_permissions, privilege_reasons, render_sql, requirements_for
-from dba.registry import SqlScript, SqlScriptRegistry
+from dba.registry import SqlScript, SqlScriptRegistry, fetch_bounded_rows
 from dba.settings import MySQLSettings
+from dba.top_sql import TOP_LIMIT
+
+MYSQL_TOP_SQL_METRICS = frozenset({
+    "sum_timer_wait", "avg_timer_wait", "count_star", "sum_rows_examined",
+    "sum_rows_sent", "sum_created_tmp_disk_tables", "sum_no_index_used",
+})
 
 
 class Cursor(Protocol):
     description: Sequence[Sequence[Any]] | None
 
-    def execute(self, sql: str, parameters: tuple[int, ...] | None = None) -> Any: ...
+    def execute(self, sql: str, parameters: tuple[Any, ...] | None = None) -> Any: ...
     def fetchmany(self, size: int) -> Sequence[Sequence[Any]]: ...
     def close(self) -> None: ...
 
@@ -59,7 +64,11 @@ def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:
     if isinstance(exc, (TimeoutError, socket.timeout)) or code in {1205, 3024}:
         return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.", database_error=detail)
     if code in {1044, 1045, 1142, 1227}:
-        return ToolkitError(f"{phase}Denied", f"{phase} denied; monitoring permission is insufficient.", database_error=detail)
+        return ToolkitError(
+            f"{phase}Denied",
+            f"{detail.message} Review docs/DATABASE_PERMISSIONS.md for this MySQL version and denied operation.",
+            database_error=detail,
+        )
     if code in {1054, 1146}:
         return ToolkitError("CapabilityUnavailable", "Required MySQL monitoring view or column is unavailable.", database_error=detail)
     error_type = "ConnectionFailed" if phase == "Connection" else f"{phase}Failed"
@@ -80,6 +89,7 @@ class MySQLAdapter(Adapter):
         "active_requests_basic", "transactions", "blocking", "database_status",
         "disk_binlogs", "disk_schemas", "disk_replica",
     })
+    TOP_SQL_METRICS = MYSQL_TOP_SQL_METRICS
 
     def __init__(self, instance: DatabaseInstance, provider: CredentialProvider,
                  registry: SqlScriptRegistry, settings: MySQLSettings | None = None,
@@ -104,7 +114,6 @@ class MySQLAdapter(Adapter):
         self._streaming_cursor: Any | None = None
         self.preflight_checks: dict[str, bool] = {}
         self.statement_history_consumer: bool | None = None
-        self.permission_observations: set[str] = set()
         self.privilege_classification: dict[str, Any] = {"classification": "UNKNOWN"}
         self.current_user: str | None = None
         self._last_database_error: object | None = None
@@ -181,7 +190,13 @@ class MySQLAdapter(Adapter):
     def _preflight(self) -> None:
         result = self._run(self.registry.get("preflight", DatabaseType.MYSQL))
         if not result.success or result.truncated or len(result.rows) != 1:
-            raise ToolkitError("PreflightFailed", "MySQL monitor preflight is incomplete.")
+            raise ToolkitError(
+                result.error_type or "PreflightFailed",
+                "MySQL monitor preflight is incomplete. "
+                f"{result.error_message}" if result.error_message else
+                "MySQL monitor preflight is incomplete.",
+                database_error=result.database_error,
+            )
         row = result.rows[0]
         version = row.get("server_version")
         if not isinstance(version, str):
@@ -195,7 +210,13 @@ class MySQLAdapter(Adapter):
         if tuple(int(part) for part in match.groups()) >= (8, 0):
             role_result = self._run(self.registry.get("preflight_roles", DatabaseType.MYSQL))
             if not role_result.success or role_result.truncated or len(role_result.rows) != 1:
-                raise ToolkitError("PreflightFailed", "MySQL active role state could not be inspected safely.")
+                raise ToolkitError(
+                    role_result.error_type or "PreflightFailed",
+                    "MySQL active role state could not be inspected safely. "
+                    f"{role_result.error_message}" if role_result.error_message else
+                    "MySQL active role state could not be inspected safely.",
+                    database_error=role_result.database_error,
+                )
             role_value = role_result.rows[0].get("active_roles")
             if not isinstance(role_value, str):
                 raise ToolkitError("PreflightFailed", "MySQL active role state is unavailable.")
@@ -214,9 +235,7 @@ class MySQLAdapter(Adapter):
                                "MySQL account grants could not be inspected safely.",
                                database_error=self._last_database_error)
         grants = [str(next(iter(grant.values()))) for grant in grants_result.rows if grant]
-        self.privilege_classification, observed = classify_mysql_grants(
-            grants, current_user, active_roles
-        )
+        self.privilege_classification = classify_mysql_grants(grants, current_user, active_roles)
         if self.privilege_classification["classification"] == "PRIVILEGED":
             high_risk = self.privilege_classification["high_risk_privileges"]
             first = high_risk[0] if isinstance(high_risk, list) and high_risk else {}
@@ -246,21 +265,7 @@ class MySQLAdapter(Adapter):
                     ("privilege", "scope", "source", "principal")}},
             )
         self.preflight_checks["performance_schema"] = True
-        self.permission_observations = set(observed)
         self.preflight_checks["privilege_classification"] = True
-        for feature in ("slow", "disk-growth"):
-            readiness = assess_permissions(
-                requirements_for(DatabaseType.MYSQL, feature, self._version),
-                self.permission_observations,
-            )
-            self.preflight_checks[f"permission_{feature}"] = readiness["status"].value == "READY"
-        replication_readiness = assess_permissions(
-            requirements_for(DatabaseType.MYSQL, "replication", self._version),
-            self.permission_observations,
-        )
-        self.preflight_checks["permission_replication"] = (
-            replication_readiness["status"].value == "READY"
-        )
         if row.get("statements_consumer") != 1:
             self._statement_script = "active_requests_basic"
         elif row.get("waits_consumer") != 1:
@@ -272,10 +277,9 @@ class MySQLAdapter(Adapter):
         history_consumer = row.get("history_consumer")
         self.statement_history_consumer = history_consumer == 1 if type(history_consumer) is int else None
         self.preflight_checks["statement_history_consumer"] = self.statement_history_consumer is True
-        for name in ("server_info", "database_status", "active_sessions",
-                     self._statement_script, "transactions", "blocking"):
-            probe = self._run(self.registry.get(name, DatabaseType.MYSQL))
-            self.preflight_checks[name] = probe.success
+        # Do not probe every diagnostic at connection time.  The selected
+        # reviewed query reports its own vendor access error when the operator
+        # invokes that feature; deployment grants live in the shared guide.
 
     def _close(self) -> bool:
         connection, self._connection = self._connection, None
@@ -327,41 +331,33 @@ class MySQLAdapter(Adapter):
     def execute_readonly(self, script: SqlScript,
                          parameters: tuple[int, ...] | None = None) -> CollectorResult:
         if not self._ready:
-            readiness = self._known_replication_readiness()
-            if readiness is not None and readiness["status"] == "MISSING":
-                raise ToolkitError(
-                    "MissingPermission",
-                    "MySQL replication metadata requires a missing monitoring privilege.",
-                    permission_readiness=readiness,
-                )
             raise ToolkitError("PreflightRequired", "MySQL connection preflight did not complete.")
+        if (isinstance(script, SqlScript) and script.metadata.name == "top_sql"
+                and script.metadata.feature == "top-sql"):
+            raise ToolkitError("InvalidParameters", "Top SQL requires the validated metric and limit binding interface.")
         return self._run(script, parameters)
 
-    def _known_replication_readiness(self) -> dict[str, Any] | None:
-        if not self._version or not self.current_user:
-            return None
-        requirements = requirements_for(DatabaseType.MYSQL, "replication", self._version)
-        assessment = assess_permissions(requirements, self.permission_observations)
-        missing = assessment["missing_required"]
-        return {
-            "feature": "replication",
-            **assessment,
-            "missing_reasons": privilege_reasons(requirements, missing),
-            "impact": requirements.impact,
-            "account_security": self.privilege_classification,
-            "suggested_grant": render_sql(DatabaseType.MYSQL, ("replication",),
-                                           self.current_user) if missing else None,
-            "toolkit_executed": False,
-            "dba_approval_required": bool(missing),
-        }
+    def execute_top_sql_readonly(self, script: SqlScript, top_n: int, metric: str) -> CollectorResult:
+        """Execute only the reviewed, parameterized MySQL Top SQL Registry entry."""
+        if not self._ready:
+            raise ToolkitError("PreflightRequired", "A preflight-approved MySQL monitor is required.")
+        if (script.metadata.name != "top_sql" or script.metadata.feature != "top-sql"
+                or script.metadata.database_type != DatabaseType.MYSQL
+                or type(top_n) is not int or not 1 <= top_n <= TOP_LIMIT
+                or top_n >= script.metadata.max_rows
+                or not isinstance(metric, str) or metric not in self.TOP_SQL_METRICS):
+            raise ToolkitError("InvalidParameters", "Top SQL limit or ranking metric is invalid.")
+        return self._run(script, (metric, top_n), parameter_kind="top_sql")
 
-    def _run(self, script: SqlScript, parameters: tuple[int, ...] | None = None) -> CollectorResult:
+    def _run(self, script: SqlScript, parameters: tuple[Any, ...] | None = None,
+             *, parameter_kind: str | None = None) -> CollectorResult:
         started_at = datetime.now(timezone.utc)
         started = time.monotonic()
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
         database_error_payload: dict[str, Any] | None = None
         truncated = False
+        result_bytes = 0
         error: ToolkitError | None = None
         authorized = False
         script_name = "unregistered"
@@ -369,14 +365,22 @@ class MySQLAdapter(Adapter):
             self.registry.authorize(script, DatabaseType.MYSQL)
             authorized = True
             script_name = script.metadata.name
-            if parameters is not None and (
-                script_name != "recent_statements" or len(parameters) != 3
-                or any(type(value) is not int or value <= 0 for value in parameters)
-                or parameters[0] != parameters[2]
-            ):
-                raise ToolkitError("RegistryRejected", "Bound parameters are not valid for this reviewed query.")
-            if script_name == "recent_statements" and parameters is None:
-                raise ToolkitError("RegistryRejected", "Recent statement query requires verified bound identities.")
+            if parameters is not None:
+                if parameter_kind == "top_sql":
+                    if (script_name != "top_sql" or script.metadata.feature != "top-sql"
+                            or script.metadata.database_type != DatabaseType.MYSQL or len(parameters) != 2
+                            or not isinstance(parameters[0], str)
+                            or parameters[0] not in self.TOP_SQL_METRICS
+                            or type(parameters[1]) is not int
+                            or not 1 <= parameters[1] <= TOP_LIMIT
+                            or parameters[1] >= script.metadata.max_rows):
+                        raise ToolkitError("RegistryRejected", "Top SQL bindings are invalid for this reviewed query.")
+                elif (script_name != "recent_statements" or parameter_kind is not None or len(parameters) != 3
+                      or any(type(value) is not int or value <= 0 for value in parameters)
+                      or parameters[0] != parameters[2]):
+                    raise ToolkitError("RegistryRejected", "Bound parameters are not valid for this reviewed query.")
+            elif parameter_kind is not None or script_name in {"recent_statements", "top_sql"}:
+                raise ToolkitError("RegistryRejected", "This reviewed query requires validated bound parameters.")
             if self._connection is None:
                 raise ToolkitError("NotConnected", "Connection is closed.")
             streaming = script.metadata.name in self.STREAMING_SCRIPTS
@@ -391,13 +395,16 @@ class MySQLAdapter(Adapter):
             if cursor.description is None:
                 raise ToolkitError("InvalidResult", "Read-only script returned no rowset.")
             columns = [str(column[0]) for column in cursor.description]
-            values = cursor.fetchmany(script.metadata.max_rows)
+            bounded = fetch_bounded_rows(
+                cursor, script.metadata.max_rows, script.metadata.max_result_bytes
+            )
             # The recent-statement Registry SQL uses an explicit LIMIT 5.
             # Exactly five rows means the sample limit was reached, but does
             # not establish that a sixth row exists.
-            truncated = (len(values) >= script.metadata.max_rows
-                         and script.metadata.name != "recent_statements")
-            rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in values)
+            truncated = (bounded.byte_limit_reached
+                         or (bounded.row_limit_reached and script.metadata.name != "recent_statements"))
+            result_bytes = bounded.result_bytes
+            rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in bounded.rows)
         except ToolkitError as exc:
             error = exc
         except (ValidationError, OSError, UnicodeError) as exc:
@@ -428,15 +435,18 @@ class MySQLAdapter(Adapter):
             if error is not None:
                 rows = ()
                 truncated = False
+                result_bytes = 0
                 self._close()
             elif truncated and script.metadata.name in self.STREAMING_SCRIPTS:
                 self._close()
-            details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated}
+            details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
+                                       "result_bytes": result_bytes}
             if authorized:
                 details.update({"sql_sha256": hashlib.sha256(script.text.encode()).hexdigest(),
                                 "timeout_seconds": min(script.metadata.timeout_seconds,
                                                        self._read_timeout),
                                 "max_rows": script.metadata.max_rows})
+                details["max_result_bytes"] = script.metadata.max_result_bytes
             self._audit(script_name, started, error, details)
         return CollectorResult(self.instance.id, script_name, started_at,
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,

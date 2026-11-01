@@ -8,7 +8,6 @@ from typing import Any
 from dba.collectors import CollectorResult
 from dba.core import DatabaseType
 from dba.errors import ToolkitError
-from dba.permissions import requirements_for_profile
 from dba.versioning import ResolvedDiagnosticProfile, SupportState, VersionStatus
 
 
@@ -127,13 +126,6 @@ def validate_replication_profiles(registry: Any, bindings: tuple[Any, ...]) -> t
             not dict(contract.aliases).get(field) for field in contract.required_fields
         ):
             errors.append(f"{binding.db_type.value}/{binding.version_family}: invalid parser contract")
-        try:
-            permission = requirements_for_profile(binding.permission_profile_id)
-        except ValueError:
-            errors.append(f"{binding.db_type.value}/{binding.version_family}: missing permission profile")
-        else:
-            if tuple(permission.required) != binding.required_privileges:
-                errors.append(f"{binding.db_type.value}/{binding.version_family}: permission contract mismatch")
         for name in names:
             try:
                 script = registry.get(name, binding.db_type)

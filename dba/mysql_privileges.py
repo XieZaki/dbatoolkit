@@ -96,57 +96,16 @@ def parse_mysql_grant(statement: str) -> MySQLGrant:
                       scope_type, database, object_name)
 
 
-def _identifier_equal(left: str, right: str) -> bool:
-    system_schemas = {"performance_schema", "information_schema", "mysql", "sys"}
-    if left.casefold() in system_schemas and right.casefold() in system_schemas:
-        return left.casefold() == right.casefold()
-    return left == right
-
-
-def scope_covers(granted_scope: str, required_scope: str) -> bool:
-    """Whether a MySQL privilege scope covers a narrower requirement scope."""
-    grant_type, grant_database, grant_object = _scope_parts(granted_scope)
-    required_type, required_database, required_object = _scope_parts(required_scope)
-    if "UNKNOWN" in {grant_type, required_type}:
-        return False
-    if grant_type == "GLOBAL":
-        return True
-    if required_type == "GLOBAL":
-        return False
-    if grant_database is None or required_database is None:
-        return False
-    if not _identifier_equal(grant_database, required_database):
-        return False
-    if grant_type == "DATABASE":
-        return True
-    return (required_type == "TABLE" and grant_object is not None
-            and required_object is not None and _identifier_equal(grant_object, required_object))
-
-
-def grant_satisfies_requirement(
-    grant_statement: str, privilege: str, required_scope: str,
-) -> bool:
-    grant = parse_mysql_grant(grant_statement)
-    if grant.role_grant or not any(
-        granted == privilege or granted == "ALL PRIVILEGES" for granted in grant.privileges
-    ):
-        return False
-    return scope_covers(grant.scope, required_scope)
-
-
 def classify_mysql_grants(
     statements: Iterable[str], current_user: str, active_roles: str | None,
-) -> tuple[dict[str, object], frozenset[str]]:
-    """Return security evidence and Registry capability labels from explicit grants."""
+) -> dict[str, object]:
+    """Classify account safety; this does not assess diagnostic feature readiness."""
     high_risk: list[dict[str, str]] = []
     write_grants: list[dict[str, str]] = []
-    grant_evidence: set[str] = set()
     has_role = False
     unknown_dynamic: list[str] = []
     for statement in statements:
         grant = parse_mysql_grant(statement)
-        if not grant.role_grant and grant.privileges:
-            grant_evidence.add(statement)
         if grant.role_grant:
             has_role = True
             continue
@@ -170,13 +129,13 @@ def classify_mysql_grants(
     unknown_roles = has_role or active not in {"", "NONE"}
     classification = ("PRIVILEGED" if high_risk else "UNKNOWN"
                       if unknown_roles or unknown_dynamic else "NON_PRIVILEGED")
-    return ({"classification": classification,
-             "high_risk_privileges": high_risk,
-             "write_privileges": write_grants,
-             "active_roles": active_roles or "NONE",
-             "role_grants_present": has_role,
-             "unclassified_dynamic_privileges": unknown_dynamic,
-             "current_user": current_user}, frozenset(grant_evidence))
+    return {"classification": classification,
+            "high_risk_privileges": high_risk,
+            "write_privileges": write_grants,
+            "active_roles": active_roles or "NONE",
+            "role_grants_present": has_role,
+            "unclassified_dynamic_privileges": unknown_dynamic,
+            "current_user": current_user}
 
 
 def mysql_grant_risk(grant: MySQLGrant) -> str | None:

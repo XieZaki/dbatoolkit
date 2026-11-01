@@ -85,6 +85,18 @@ def test_oracle_error_extracts_ora_code_and_message() -> None:
     assert "invalid username/password" in detail.message
 
 
+def test_oracle_missing_create_session_keeps_vendor_error_and_points_to_guide() -> None:
+    error_obj = SimpleNamespace(
+        code=1045,
+        message="ORA-01045: user lacks CREATE SESSION privilege; logon denied",
+    )
+    detail = normalize_oracle_error(Exception(error_obj))
+    assert detail.vendor_code == "ORA-01045"
+    assert detail.classification == "ACCESS_DENIED"
+    assert "CREATE SESSION" in detail.message
+    assert "docs/DATABASE_PERMISSIONS.md" in (detail.guidance or "")
+
+
 @pytest.mark.integration
 @pytest.mark.regression
 def test_human_and_json_output_preserve_vendor_message_and_redact_secret() -> None:

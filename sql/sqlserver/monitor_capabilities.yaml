@@ -4,4 +4,4 @@ risk: READ_ONLY
 timeout_seconds: 5
 max_rows: 2
 reviewed: true
-description: Reviewed membership and effective visibility checks; no permission changes.
+description: Reviewed monitoring account role and session-column capability checks; no permission changes.

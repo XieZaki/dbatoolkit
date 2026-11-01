@@ -6,6 +6,7 @@ import pytest
 import yaml
 from test_sqlserver import ROOT, FakeDriver, MemoryCredentialProvider
 
+import dba.inventory as inventory_module
 from dba.cli import main
 from dba.inventory import Inventory, ValidationError
 
@@ -127,6 +128,83 @@ def test_legacy_file_and_populated_directory_priority(tmp_path: Path) -> None:
     assert inventory.source_file("current") == current
     with pytest.raises(ValidationError):
         inventory.get("legacy")
+
+
+def test_directory_scan_skips_symlink_entries_but_explicit_file_still_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "inventory"
+    inside = write_inventory(directory / "inside.yaml", [item("inside")], DEFAULTS)
+    file_link = write_inventory(directory / "linked.yaml", [item("linked-file")], DEFAULTS)
+    linked_directory = directory / "linked-directory"
+    write_inventory(linked_directory / "hidden.yaml", [item("linked-directory-file")], DEFAULTS)
+
+    real_is_symlink = Path.is_symlink
+    simulated_links = {file_link, linked_directory}
+    monkeypatch.setattr(
+        Path, "is_symlink",
+        lambda candidate: candidate in simulated_links or real_is_symlink(candidate),
+    )
+    real_walk = inventory_module.os.walk
+    walk_options: list[bool] = []
+
+    def recorded_walk(*args: Any, **kwargs: Any) -> Any:
+        walk_options.append(kwargs.get("followlinks", False))
+        yield from real_walk(*args, **kwargs)
+
+    monkeypatch.setattr(inventory_module.os, "walk", recorded_walk)
+    real_load_yaml = inventory_module.load_yaml
+    loaded_paths: list[Path] = []
+
+    def recorded_load_yaml(path: Path) -> Any:
+        loaded_paths.append(path)
+        return real_load_yaml(path)
+
+    monkeypatch.setattr(inventory_module, "load_yaml", recorded_load_yaml)
+    with pytest.warns(UserWarning, match="symbolic-link Inventory YAML") as caught:
+        inventory = Inventory.load(directory)
+
+    assert [instance.id for instance in inventory.instances] == ["inside"]
+    assert len(caught) == 1
+    assert walk_options and all(option is False for option in walk_options)
+    assert file_link not in loaded_paths
+    assert linked_directory / "hidden.yaml" not in loaded_paths
+    assert inside in loaded_paths
+
+    explicit = Inventory.load(file_link)
+    assert [instance.id for instance in explicit.instances] == ["linked-file"]
+    assert loaded_paths[-1] == file_link
+
+
+def test_real_symlink_yaml_is_skipped_when_windows_allows_creation(tmp_path: Path) -> None:
+    directory = tmp_path / "inventory"
+    write_inventory(directory / "inside.yaml", [item("inside")], DEFAULTS)
+    target = write_inventory(tmp_path / "outside.yaml", [item("outside")], DEFAULTS)
+    link = directory / "external.yaml"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) in {5, 1314}:
+            pytest.skip("Windows symlink creation is unavailable to this process token")
+        raise
+
+    with pytest.warns(UserWarning, match="symbolic-link Inventory YAML"):
+        inventory = Inventory.load(directory)
+    assert [instance.id for instance in inventory.instances] == ["inside"]
+
+
+@pytest.mark.parametrize("field", ["password", "secret", "token"])
+@pytest.mark.parametrize("location", ["defaults", "entry"])
+def test_inventory_rejects_sensitive_top_level_fields(
+    tmp_path: Path, field: str, location: str,
+) -> None:
+    path = tmp_path / "inventory.yaml"
+    forbidden = {field: "synthetic-only"}
+    defaults = {**DEFAULTS, **forbidden} if location == "defaults" else DEFAULTS
+    entry = item("one", **forbidden) if location == "entry" else item("one")
+    write_inventory(path, [entry], defaults)
+    with pytest.raises(ValidationError):
+        Inventory.load(path)
 
 
 def test_cli_group_tag_and_combined_filters(tmp_path: Path,

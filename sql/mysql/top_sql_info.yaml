@@ -1,0 +1,16 @@
+name: top_sql_info
+database_type: mysql
+risk: READ_ONLY
+timeout_seconds: 5
+max_rows: 2
+reviewed: true
+description: Read only MySQL digest loss counter and aggregate digest bucket presence; does not reset or modify statistics.
+feature: top-sql
+version_families:
+  - '5.7'
+  - '8.0'
+  - '8.4'
+runtime_variants:
+  - default
+  - pre_8022
+  - 8022_plus

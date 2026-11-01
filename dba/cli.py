@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, cast
 
 from dba import __version__
+from dba.active_sql_collectors import SQLServerActiveSQLCollector
+from dba.active_sql_profiles import validate_active_sql_profiles
+from dba.active_sql_report import ActiveSQLDiagnosticReport, render_active_sql_human
 from dba.collectors import CollectorResult
 from dba.connection import public_connection_settings, resolve_connection_settings
 from dba.core import DatabaseType, DiagnosticReport
@@ -46,6 +49,12 @@ from dba.incident import (
 )
 from dba.inventory import Inventory, ValidationError
 from dba.logging import configure_logging, redact
+from dba.memory_grant import (
+    MemoryGrantDiagnosticReport,
+    SQLServerMemoryGrantCollector,
+)
+from dba.memory_grant_profiles import validate_memory_grant_profiles
+from dba.memory_grant_report import render_memory_grant_human
 from dba.mysql import MySQLAdapter
 from dba.mysql_collectors import COLLECTORS as MYSQL_COLLECTORS
 from dba.mysql_collectors import collect_recent_statements as collect_mysql_recent_statements
@@ -54,34 +63,22 @@ from dba.mysql_slow import collect_slow_phase as collect_mysql_slow_phase
 from dba.mysql_slow_reporter import render_recent_statements as render_mysql_recent_statements
 from dba.oracle import OracleAdapter
 from dba.oracle_collectors import COLLECTORS as ORACLE_COLLECTORS
+from dba.oracle_plan import diagnose_oracle_plan
+from dba.oracle_plan_profiles import validate_oracle_plan_profiles
 from dba.oracle_slow import build_slow_phase_report as build_oracle_slow_phase_report
 from dba.oracle_slow import collect_slow_phase as collect_oracle_slow_phase
-from dba.permissions import (
-    ALL_FEATURES,
-    OraclePrincipal,
-    PermissionStatus,
-    assess_permissions,
-    feature_supported,
-    privilege_reasons,
-    render_privileges_sql,
-    render_profile_sql,
-    render_sql,
-    requirements_for,
-    requirements_for_profile,
-)
-from dba.permissions import REGISTRY as PERMISSION_REGISTRY
 from dba.postgresql import PostgreSQLAdapter
 from dba.postgresql_collectors import COLLECTORS as PG_COLLECTORS
 from dba.postgresql_slow import build_slow_phase_report as build_pg_slow_phase_report
 from dba.postgresql_slow import collect_slow_phase as collect_pg_slow_phase
 from dba.presentation import (
-    CheckResult,
     OutputMode,
     StatusResult,
     render_emergency_triage,
     render_human,
     render_incident_summary,
     render_json,
+    render_oracle_plan_human,
 )
 from dba.registry import SqlScriptRegistry
 from dba.replication import diagnose_replication
@@ -106,16 +103,44 @@ from dba.slow_profiles import (
 )
 from dba.sqlserver import SQLServerAdapter
 from dba.sqlserver_collectors import COLLECTORS
+from dba.top_sql import TOP_LIMIT
+from dba.top_sql_collectors import METRICS as SQLSERVER_TOP_SQL_METRICS
+from dba.top_sql_collectors import MYSQL_METRICS as MYSQL_TOP_SQL_METRICS
+from dba.top_sql_collectors import ORACLE_METRICS as ORACLE_TOP_SQL_METRICS
+from dba.top_sql_collectors import POSTGRESQL_METRICS as POSTGRESQL_TOP_SQL_METRICS
+from dba.top_sql_collectors import (
+    MySQLTopSQLCollector,
+    OracleTopSQLCollector,
+    PostgreSQLTopSQLCollector,
+    SQLServerTopSQLCollector,
+)
+from dba.top_sql_profiles import validate_top_sql_profiles
+from dba.top_sql_report import TopSQLDiagnosticReport
 from dba.versioning import (
     DEFAULT_VERSION_DETECTOR,
     PROFILE_RESOLVER,
-    ProfileResolutionError,
+    ResolvedDiagnosticProfile,
     SupportState,
     VersionStatus,
     build_version_profile,
     resolve_profile_for_adapter,
-    version_status,
 )
+
+TOP_SQL_METRIC_CHOICES = tuple(dict.fromkeys((*SQLSERVER_TOP_SQL_METRICS,
+                                             *POSTGRESQL_TOP_SQL_METRICS,
+                                             *MYSQL_TOP_SQL_METRICS,
+                                             *ORACLE_TOP_SQL_METRICS)))
+
+
+def _triage_summary_fingerprint(
+    candidates: Sequence[dict[str, Any]], triage: dict[str, Any]
+) -> tuple[Any, ...]:
+    assessments = tuple(sorted(
+        (str(item.get("session_key") or item.get("session_id") or ""),
+         tuple(item.get("classification_labels", ())), item.get("classification_status"))
+        for item in candidates
+    ))
+    return triage.get("status"), tuple(triage.get("unknown_reasons", ())), assessments
 
 
 class _CachedCredentialProvider(CredentialProvider):
@@ -134,17 +159,6 @@ def _account_security(adapter: Any) -> dict[str, Any]:
     # A successful connection means the database-specific, fail-closed
     # monitoring-account preflight completed for adapters with legacy output.
     return {"classification": "NON_PRIVILEGED", "evidence_source": "monitor_preflight"}
-
-
-def _disk_growth_permission_impact(status: object) -> str:
-    value = getattr(status, "value", status)
-    if value == PermissionStatus.MISSING.value:
-        return "Required disk-growth permissions are missing; core storage evidence cannot be collected."
-    if value == PermissionStatus.PARTIAL.value:
-        return "Required disk-growth permissions are ready; optional FRA, archive, or redo context may be unavailable."
-    if value == PermissionStatus.READY.value:
-        return "Required and configured optional disk-growth permissions are available."
-    return "Disk-growth permission impact could not be determined from the current assessment."
 
 
 def _database_error_payload(error: object) -> dict[str, Any] | None:
@@ -178,8 +192,10 @@ def _add_output_options(command: argparse.ArgumentParser) -> None:
 
 
 def _add_credential_backend(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--credential-store-path", type=Path, default=None,
+                         help="Explicit Store path for the selected encrypted backend")
     command.add_argument(
-        "--credential-backend", choices=("auto", "os", "encrypted", "interactive"),
+        "--credential-backend", choices=("auto", "os", "encrypted", "sqlite", "interactive"),
         default="auto", help="Select credential source; encrypted sessions may avoid repeated unlock prompts",
     )
 
@@ -195,6 +211,20 @@ def _emit(args: Any, command: str, result: Any) -> None:
         print(f"{status}  {result.get('database_id', result.get('database', {}).get('id', ''))}".rstrip())
     else:
         print(render_human(command, result))
+
+
+def _redact_diagnostic_json(result: Any) -> Any:
+    """Redact credential aliases from an exported diagnostic payload copy."""
+    payload = redact(result)
+    if not isinstance(payload, dict):
+        return payload
+    report = payload.get("report")
+    if not isinstance(report, dict):
+        return payload
+    instance = report.get("instance")
+    if isinstance(instance, dict) and "credential_alias" in instance:
+        instance["credential_alias"] = "[REDACTED]"
+    return payload
 
 
 def _runtime_defaults(database_type: DatabaseType, path: Path | None) -> object:
@@ -217,16 +247,6 @@ def _effective_settings(instance: Any, path: Path | None) -> object:
     )
 
 
-def _feature_for_command(args: Any) -> str | None:
-    if args.command == "diagnose":
-        return args.scenario if args.scenario in ALL_FEATURES else "slow"
-    if args.command == "collect":
-        if args.collector in {"disk_growth", "disk-growth", "log_growth"}:
-            return "disk-growth"
-        return "slow"
-    return None
-
-
 def _diagnostic_report_path(database_id: str, scenario: str, requested: Path | None) -> Path:
     if requested is not None:
         return requested if requested.suffix.lower() == ".html" else requested.with_suffix(".html")
@@ -240,36 +260,6 @@ def _diagnostic_report_path(database_id: str, scenario: str, requested: Path | N
         candidate = directory / f"{base}_{suffix:02d}.html"
         suffix += 1
     return candidate
-
-
-def _permission_matches_evidence(permission: str, evidence: str) -> bool:
-    candidate = permission.upper()
-    if candidate in evidence:
-        return True
-    if candidate == "VIEW SERVER STATE":
-        return "VIEW SERVER PERFORMANCE STATE" in evidence
-    return False
-
-
-def _grant_account(instance: Any, adapter: Any, credential: Credential | None) -> str | OraclePrincipal:
-    if instance.db_type == DatabaseType.ORACLE:
-        principal = getattr(adapter, "principal", None)
-        if isinstance(principal, OraclePrincipal) and principal.verified:
-            return principal
-        return OraclePrincipal.unverified(credential.username if credential else None)
-    current_user = getattr(adapter, "current_user", None)
-    if isinstance(current_user, str) and current_user:
-        return current_user
-    return credential.username if credential else "monitor"
-
-
-def _oracle_principal_output(adapter: Any, credential: Credential | None) -> dict[str, Any]:
-    principal = getattr(adapter, "principal", None)
-    if not isinstance(principal, OraclePrincipal) or not principal.verified:
-        principal = OraclePrincipal.unverified(credential.username if credential else None)
-    result = principal.to_dict()
-    result["credential_username"] = credential.username if credential else None
-    return result
 
 
 def _configure_windows_pipe_encoding() -> None:
@@ -341,33 +331,33 @@ def main(
         "set", help="Advanced: store or update one credential explicitly"
     )
     credential_set.add_argument("credential_alias")
-    credential_set.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    credential_set.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
     _add_output_options(credential_set)
     credential_list = credential_commands.add_parser("list", help="List stored credential aliases")
-    credential_list.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    credential_list.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
     credential_show = credential_commands.add_parser("show", help="Show credential metadata only")
     credential_show.add_argument("credential_alias")
-    credential_show.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    credential_show.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
     _add_output_options(credential_show)
     credential_delete = credential_commands.add_parser("delete", help="Delete one stored credential")
     credential_delete.add_argument("credential_alias")
-    credential_delete.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    credential_delete.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
     _add_output_options(credential_delete)
     credential_test = credential_commands.add_parser("test", help="Test credential retrieval only")
     credential_test.add_argument("credential_alias")
-    credential_test.add_argument("--backend", choices=("auto", "os", "encrypted"), default="auto")
+    credential_test.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
     _add_output_options(credential_test)
     _add_output_options(credential_commands.choices["list"])
     credential_init = credential_commands.add_parser("init", help="Initialize encrypted local credential storage")
-    credential_init.add_argument("--backend", choices=("encrypted",), required=True)
+    credential_init.add_argument("--backend", choices=("encrypted", "sqlite"), required=True)
     _add_output_options(credential_init)
     credential_backend = credential_commands.add_parser("backend", help="Show credential backend availability")
     _add_output_options(credential_backend)
     credential_rekey = credential_commands.add_parser("rekey", help="Change encrypted store master password")
-    credential_rekey.add_argument("--backend", choices=("encrypted",), required=True)
+    credential_rekey.add_argument("--backend", choices=("encrypted", "sqlite"), required=True)
     _add_output_options(credential_rekey)
     credential_unlock = credential_commands.add_parser("unlock", help="Unlock encrypted credentials for a short session")
-    credential_unlock.add_argument("--backend", choices=("encrypted",), default="encrypted")
+    credential_unlock.add_argument("--backend", choices=("encrypted", "sqlite"), default="encrypted")
     credential_unlock.add_argument("--ttl", default=None, help="Absolute session lifetime, 5m to 8h (default 30m)")
     credential_unlock.add_argument("--renew", action="store_true", help="Re-authenticate and replace an active session")
     _add_output_options(credential_unlock)
@@ -375,7 +365,7 @@ def main(
     _add_output_options(credential_status)
     credential_lock = credential_commands.add_parser("lock", help="Lock and clear the active credential session")
     _add_output_options(credential_lock)
-    check = commands.add_parser("check", help="Check runtime, credentials, connection and feature readiness")
+    check = commands.add_parser("check", help="Check runtime, connection and detected database version")
     check.add_argument("database_id")
     _add_credential_backend(check)
     _add_output_options(check)
@@ -384,7 +374,7 @@ def main(
     _add_credential_backend(status_command)
     _add_output_options(status_command)
     connection = commands.add_parser(
-        "test-connection", help="Connect, verify monitoring permissions and close"
+        "test-connection", help="Connect, verify basic server identity and close"
     )
     connection.add_argument("database_id")
     _add_credential_backend(connection)
@@ -396,29 +386,40 @@ def main(
                                                                     *MYSQL_COLLECTORS,
                                                                     *ORACLE_COLLECTORS))))
     _add_output_options(collect)
-    diagnose = commands.add_parser("diagnose", help="Read-only slow, disk-growth, replication or SQL Server plan")
+    diagnose = commands.add_parser("diagnose", help="Read-only slow, active SQL, Top SQL, Memory Grant, disk-growth, replication or cached execution-plan diagnosis")
     diagnose.add_argument("database_id")
     _add_credential_backend(diagnose)
-    diagnose.add_argument("scenario", choices=("slow", "plan", "disk-growth", "replication"))
+    diagnose.add_argument("scenario", choices=("slow", "plan", "active-sql", "top-sql", "memory-grant", "disk-growth", "replication"))
     diagnose.add_argument("--session", type=int, help="Positive session ID for plan diagnosis")
+    diagnose.add_argument("--sql-id", help="Oracle cached-plan SQL_ID (requires --child-number)")
+    diagnose.add_argument("--child-number", type=int, help="Oracle cached-plan child cursor number")
+    diagnose.add_argument("--inst-id", type=int, help="Oracle current RAC instance ID")
+    diagnose.add_argument("--con-id", type=int, help="Oracle current container ID (12c+)")
+    diagnose.add_argument("--plan-hash", type=int, help="Expected Oracle PLAN_HASH_VALUE")
+    diagnose.add_argument("--metric", choices=TOP_SQL_METRIC_CHOICES, default=None,
+                          help="Top SQL cumulative metric (default: SQL Server/Oracle cpu_time; PostgreSQL total_exec_time; MySQL sum_timer_wait)")
+    diagnose.add_argument("--top", type=int, default=10, help="Top SQL row limit (1-100)")
+    diagnose.add_argument("--sort", choices=("cpu", "logical-reads", "elapsed"), default="cpu",
+                          help="Active SQL primary CLI ranking (HTML always includes all three rankings)")
     diagnose.add_argument("--report", type=Path, help="Output HTML report file")
     diagnose.add_argument("--format", choices=("console", "json"), default="console",
                           help=argparse.SUPPRESS)
     diagnose.add_argument("--verbose", action="store_true",
                           help="Include secondary signals and collector quality in the incident summary")
     _add_output_options(diagnose)
-    permissions = commands.add_parser("permissions", help="Inspect monitor permissions or generate review scripts")
-    permissions.add_argument("database_id")
-    _add_credential_backend(permissions)
-    _add_output_options(permissions)
-    permission_scope = permissions.add_mutually_exclusive_group()
-    permission_scope.add_argument("--feature", choices=ALL_FEATURES)
-    permission_scope.add_argument("--all-features", action="store_true")
-    permission_action = permissions.add_mutually_exclusive_group()
-    permission_action.add_argument("--generate-grant", action="store_true")
-    permission_action.add_argument("--generate-revoke", action="store_true")
+    credential_migrate = credential_commands.add_parser("migrate", help="Copy and verify a legacy Store into a new SQLite Store")
+    credential_migrate.add_argument("--source", type=Path, required=True)
+    credential_migrate.add_argument("--destination", type=Path, required=True)
+    _add_output_options(credential_migrate)
+    for credential_parser in credential_commands.choices.values():
+        credential_parser.add_argument("--store-path", type=Path, default=None,
+                                       help="Explicit encrypted Store path; never inferred from another Store")
     args = parser.parse_args(argv)
-    encrypted_store = EncryptedFileCredentialStore()
+    from dba.sqlite_credentials import SQLiteCredentialStore
+    backend = getattr(args, "backend", getattr(args, "credential_backend", "auto"))
+    store_path = getattr(args, "store_path", None) or getattr(args, "credential_store_path", None)
+    encrypted_store = (SQLiteCredentialStore(store_path) if backend == "sqlite" else
+                       EncryptedFileCredentialStore(store_path) if store_path else EncryptedFileCredentialStore())
     if args.command is None or args.command == "help":
         parser.print_help()
         return 0
@@ -450,6 +451,15 @@ def main(
             session_credential: Credential | None = None
             selected = "injected" if injected_store else getattr(args, "backend", "auto")
             session_client = CredentialSessionClient()
+            if selected == "encrypted" and args.credential_command in {"init", "set", "delete", "rekey"}:
+                encrypted_store._deny_write()
+            if args.credential_command == "migrate":
+                from dba.sqlite_credentials import migrate_store
+                count = migrate_store(EncryptedFileCredentialStore(args.source),
+                                      SQLiteCredentialStore(args.destination), prompt_new_master_password())
+                _emit(args, "credentials migrate", {"status": "VERIFIED_COPY", "records": count,
+                                                     "provider_switched": False})
+                return 0
             if args.credential_command == "status":
                 credential_output = session_client.status()
                 _emit(args, "credentials status", credential_output)
@@ -468,6 +478,7 @@ def main(
                 ttl_seconds = parse_ttl(args.ttl)
                 existing = session_client.status()
                 if existing.get("status") == "UNLOCKED" and not args.renew:
+                    session_client.list_metadata(encrypted_store.path)
                     credential_output = {**existing, "status": "ALREADY_UNLOCKED"}
                     _emit(args, "credentials unlock", credential_output)
                     return 0
@@ -478,9 +489,13 @@ def main(
                 _, decrypted_credentials = encrypted_store._read_container()
                 store_key = encrypted_store.session_key()
                 try:
-                    credential_output = session_client.load(
-                        decrypted_credentials, ttl_seconds, encrypted_store.path, store_key
-                    )
+                    if isinstance(encrypted_store, SQLiteCredentialStore):
+                        credential_output = session_client.load(
+                            decrypted_credentials, ttl_seconds, encrypted_store.path, store_key,
+                            store_backend="sqlite", store_binding=encrypted_store.binding)
+                    else:
+                        credential_output = session_client.load(
+                            decrypted_credentials, ttl_seconds, encrypted_store.path, store_key)
                 finally:
                     encrypted_store.lock()
                     decrypted_credentials.clear()
@@ -541,11 +556,15 @@ def main(
 
             if injected_store:
                 store = os_store
-            elif selected == "encrypted":
+            elif selected in {"encrypted", "sqlite"}:
                 store = encrypted_store
                 encrypted_store._require_crypto()
+                if selected == "sqlite" and session_client.status().get("status") == "UNLOCKED":
+                    from dba.sqlite_credentials import SQLiteSessionStore
+                    session_client.list_metadata(encrypted_store.path)
+                    store = SQLiteSessionStore(encrypted_store.path, session_client)
                 if args.credential_command in {"show", "test"}:
-                    session_credential = session_client.get(alias)
+                    session_credential = session_client.get(alias, encrypted_store.path)
                 if args.credential_command == "set" and not encrypted_store.exists:
                     raise ToolkitError("CredentialStoreNotInitialized",
                                        "Initialize encrypted credential storage before storing credentials.")
@@ -563,7 +582,7 @@ def main(
                                                  "backend": os_store.backend_name}
                 session_status = session_client.status()
                 if session_status.get("status") == "UNLOCKED":
-                    metadata_rows = session_client.list_metadata()
+                    metadata_rows = session_client.list_metadata(encrypted_store.path)
                     if metadata_rows is None:
                         raise ToolkitError("CredentialSessionUnavailable", "Credential session metadata is unavailable.")
                     for metadata_row in metadata_rows:
@@ -583,7 +602,7 @@ def main(
                 if os_credential is not None:
                     store = os_store
                 elif args.credential_command != "set" and selected in {"auto", "encrypted"}:
-                    session_credential = session_client.get(alias)
+                    session_credential = session_client.get(alias, encrypted_store.path)
                     if session_credential is not None:
                         store = encrypted_store
                     elif encrypted_store.exists:
@@ -605,7 +624,7 @@ def main(
                 elif args.credential_command == "set":
                     raise ToolkitError(
                         "CredentialStoreUnavailable",
-                        "No persistent secure backend is available. Initialize with `dba credentials init --backend encrypted`.",
+                        "No writable secure backend is available. The legacy JSON Store is read-only; explicitly initialize and select SQLite with `dba credentials init --backend sqlite`.",
                     )
                 else:
                     raise ToolkitError("CredentialNotFound", "Credential alias was not found in secure stores.")
@@ -618,10 +637,10 @@ def main(
                          "backend": store.backend_name}
                         for item in store.aliases()
                     ]}
-                elif selected == "encrypted":
+                elif selected in {"encrypted", "sqlite"}:
                     session_status = session_client.status()
                     if session_status.get("status") == "UNLOCKED":
-                        metadata_rows = session_client.list_metadata()
+                        metadata_rows = session_client.list_metadata(encrypted_store.path)
                         if metadata_rows is None:
                             raise ToolkitError("CredentialSessionUnavailable", "Credential session metadata is unavailable.")
                         credential_output = {"credentials": [
@@ -664,7 +683,7 @@ def main(
                 if not confirm_action(f"Delete credential {alias}? [y/N] "):
                     raise ToolkitError("Cancelled", "Credential deletion cancelled.")
                 store.delete(alias)
-                if store is encrypted_store:
+                if store is encrypted_store and selected != "sqlite":
                     session_client.lock()
                 credential_output = {"alias": alias, "backend": store.backend_name, "deleted": True}
             else:
@@ -672,7 +691,7 @@ def main(
                 if exists and not confirm_action("Credential already exists. Update credential? [y/N] "):
                     raise ToolkitError("Cancelled", "Credential update cancelled.")
                 store.set(alias, prompt_credential_for_storage())
-                if store is encrypted_store:
+                if store is encrypted_store and selected != "sqlite":
                     session_client.lock()
                 credential_output = {
                     "alias": alias,
@@ -692,9 +711,10 @@ def main(
     logger = configure_logging()
     started = time.monotonic()
     replication_log_fields: dict[str, Any] = {}
-    permission_credential: Credential | None = None
+    account_security_credential: Credential | None = None
     instance_for_hint = None
     adapter_instance: Any | None = None
+    version_profile_for_hint: ResolvedDiagnosticProfile | None = None
     diagnostic_timing: dict[str, Any] | None = None
     triage_completed_at: str | None = None
     capture_started_at: str | None = None
@@ -720,9 +740,7 @@ def main(
                     "postgres" if shown.db_type == DatabaseType.POSTGRESQL else None
                 )
             if shown.db_type == DatabaseType.SQLSERVER:
-                effective["selected_driver"] = database_runtime_status(
-                    DatabaseType.SQLSERVER
-                ).get("selected_native_driver")
+                effective["selected_driver"] = runtime_info()["sqlserver_odbc"]["selected"]
             _emit(args, "show", redact({**asdict(shown), "effective_connection": effective}))
         elif args.command == "validate":
             validate_diagnostic_settings(args.settings)
@@ -742,8 +760,18 @@ def main(
             if disk_errors:
                 raise ValidationError("Disk-growth profile registry invalid: " + "; ".join(disk_errors))
             plan_errors = validate_plan_profiles(registry, PROFILE_RESOLVER.bindings)
+            plan_errors += validate_oracle_plan_profiles(registry, PROFILE_RESOLVER.bindings)
             if plan_errors:
                 raise ValidationError("Execution-plan profile registry invalid: " + "; ".join(plan_errors))
+            top_sql_errors = validate_top_sql_profiles(registry, PROFILE_RESOLVER.bindings)
+            if top_sql_errors:
+                raise ValidationError("Top SQL profile registry invalid: " + "; ".join(top_sql_errors))
+            active_sql_errors = validate_active_sql_profiles(registry, PROFILE_RESOLVER.bindings)
+            if active_sql_errors:
+                raise ValidationError("Active SQL profile registry invalid: " + "; ".join(active_sql_errors))
+            memory_grant_errors = validate_memory_grant_profiles(registry, PROFILE_RESOLVER.bindings)
+            if memory_grant_errors:
+                raise ValidationError("Memory Grant profile registry invalid: " + "; ".join(memory_grant_errors))
             warnings = inventory.version_family_warnings()
             validation_result = {"success": True, "instance_count": len(inventory.instances),
                                 "sql_script_count": len(scripts), "warnings": warnings}
@@ -753,9 +781,11 @@ def main(
                 print(f"Validation OK: {len(inventory.instances)} instances, {len(scripts)} SQL scripts")
                 for warning in warnings:
                     print(f"WARNING: {warning}")
-        elif args.command in {"test-connection", "collect", "diagnose", "permissions", "check", "status"}:
+        elif args.command in {"test-connection", "collect", "diagnose", "check", "status"}:
             instance = inventory.get(args.database_id)
             instance_for_hint = instance
+            if not instance.enabled:
+                raise ToolkitError("InstanceDisabled", "Inventory instance is disabled.")
             if instance.db_type not in {DatabaseType.SQLSERVER, DatabaseType.POSTGRESQL,
                                         DatabaseType.MYSQL, DatabaseType.ORACLE}:
                 raise ToolkitError("NotImplemented", "Not implemented for this database type.")
@@ -767,41 +797,40 @@ def main(
                     database_id=instance.id,
                 )
             )
-            if (args.command == "permissions" and (args.generate_grant or args.generate_revoke)
-                    and args.feature is not None and args.feature != "replication"):
-                permission_credential = active_provider.get_credential(instance.credential_alias)
-                definitions = PERMISSION_REGISTRY.get(instance.db_type, {})
-                requested = [args.feature] if args.feature else list(ALL_FEATURES)
-                supported = [feature for feature in requested if feature in definitions]
-                rows = [{"feature": feature,
-                         "status": PermissionStatus.UNKNOWN.value if feature in definitions else PermissionStatus.UNSUPPORTED.value,
-                         "missing_required": (),
-                         "impact": definitions[feature].impact if feature in definitions else
-                                  "Feature is not implemented for this database type."}
-                         for feature in requested]
-                generated_sql = render_sql(instance.db_type, supported, permission_credential.username,
-                                           instance.database, revoke=args.generate_revoke)
-                offline_permission_output = {"database_id": instance.id,
-                                             "account": permission_credential.username,
-                                             "features": rows, "generated_sql": generated_sql,
-                                             "toolkit_executes_grants": False}
-                if instance.db_type == DatabaseType.ORACLE:
-                    offline_permission_output["monitoring_principal"] = OraclePrincipal.unverified(
-                        permission_credential.username
-                    ).to_dict()
-                    offline_permission_output["guidance"] = (
-                        "Oracle session identity was not verified for this offline grant. "
-                        "Replace <ORACLE_MONITOR_USER> with the exact database principal before execution."
-                    )
-                _emit(args, "permissions", offline_permission_output)
-                return 0
             if args.command == "diagnose":
-                if args.scenario == "plan" and (type(args.session) is not int or not 1 <= args.session <= 32767):
-                    raise ToolkitError("InvalidSession", "Plan diagnosis requires --session with a positive session ID.")
-                if args.scenario != "plan" and args.session is not None:
-                    raise ToolkitError("InvalidSession", "--session is only supported for plan diagnosis.")
-                if args.scenario == "plan" and instance.db_type != DatabaseType.SQLSERVER:
+                oracle_plan_args = (args.sql_id, args.child_number, args.inst_id,
+                                    args.con_id, args.plan_hash)
+                if args.scenario == "plan" and instance.db_type == DatabaseType.SQLSERVER:
+                    if type(args.session) is not int or not 1 <= args.session <= 32767:
+                        raise ToolkitError("InvalidSession", "SQL Server Plan diagnosis requires --session with a positive session ID.")
+                    if any(value is not None for value in oracle_plan_args):
+                        raise ToolkitError("InvalidPlanIdentity", "Oracle Plan identity options cannot be used with SQL Server.")
+                elif args.scenario == "plan" and instance.db_type == DatabaseType.ORACLE:
+                    if args.session is not None:
+                        raise ToolkitError("InvalidSession", "Oracle Plan uses --sql-id and --child-number, not --session.")
+                    if (not isinstance(args.sql_id, str) or not re.fullmatch(r"[A-Za-z0-9]{13}", args.sql_id)
+                            or type(args.child_number) is not int or args.child_number < 0):
+                        raise ToolkitError("InvalidPlanIdentity", "Oracle Plan diagnosis requires a valid --sql-id and non-negative --child-number.")
+                    for name, value, minimum in (("--inst-id", args.inst_id, 1),
+                                                 ("--con-id", args.con_id, 0),
+                                                 ("--plan-hash", args.plan_hash, 1)):
+                        if value is not None and (type(value) is not int or value < minimum):
+                            raise ToolkitError("InvalidPlanIdentity", f"{name} is outside the accepted range.")
+                elif args.scenario == "plan":
                     raise ToolkitError("NotImplemented", "Plan diagnosis is not implemented for this database type.")
+                elif args.session is not None or any(value is not None for value in oracle_plan_args):
+                    raise ToolkitError("InvalidPlanIdentity", "Plan identity options are only supported for plan diagnosis.")
+                if args.scenario == "top-sql" and instance.db_type not in {
+                    DatabaseType.SQLSERVER, DatabaseType.POSTGRESQL, DatabaseType.MYSQL, DatabaseType.ORACLE,
+                }:
+                    raise ToolkitError("NotImplemented", "Top SQL collection is not implemented for this database type.")
+                if args.scenario == "active-sql" and instance.db_type != DatabaseType.SQLSERVER:
+                    raise ToolkitError("NotImplemented", "Active SQL collection is not implemented for this database type.")
+                if args.scenario == "memory-grant" and instance.db_type != DatabaseType.SQLSERVER:
+                    raise ToolkitError("NotImplemented", "Memory Grant diagnosis is not implemented for this database type.")
+                if args.scenario in {"top-sql", "active-sql"} and (
+                        type(args.top) is not int or not 1 <= args.top <= TOP_LIMIT):
+                    raise ToolkitError("InvalidTopN", f"Top SQL row limit must be between 1 and {TOP_LIMIT}.")
             if driver is None:
                 runtime = database_runtime_status(instance.db_type)
                 if runtime.get("status") not in {
@@ -859,445 +888,43 @@ def main(
                     instance, active_provider, SqlScriptRegistry(args.sql_root),
                     sql_settings, driver=driver)
             assert adapter_instance is not None
-            if args.command in {"permissions", "collect", "diagnose", "test-connection", "check", "status"}:
-                permission_credential = active_provider.get_credential(instance.credential_alias)
-                adapter_instance.provider = _CachedCredentialProvider(permission_credential)
+            if args.command in {"collect", "diagnose", "test-connection", "check", "status"}:
+                account_security_credential = active_provider.get_credential(instance.credential_alias)
+                adapter_instance.provider = _CachedCredentialProvider(account_security_credential)
             output: dict[str, Any] = {}
             with adapter_instance as adapter:
-                if args.command == "permissions":
-                    definitions = PERMISSION_REGISTRY.get(instance.db_type, {})
-                    requested = ([args.feature] if args.feature else list(ALL_FEATURES))
-                    server_version = adapter.get_server_version()
-                    replication_profile = None
-                    replication_detection = None
-                    if "replication" in requested:
-                        try:
-                            replication_profile, replication_detection = resolve_profile_for_adapter(
-                                adapter, "replication"
-                            )
-                        except ProfileResolutionError:
-                            replication_profile = None
-                    slow_profile = None
-                    slow_detection = None
-                    if "slow" in requested:
-                        try:
-                            slow_profile, slow_detection = resolve_profile_for_adapter(adapter, "slow")
-                        except ProfileResolutionError:
-                            slow_profile = None
-                    disk_profile = None
-                    disk_detection = None
-                    if "disk-growth" in requested:
-                        try:
-                            disk_profile, disk_detection = resolve_profile_for_adapter(adapter, "disk-growth")
-                        except ProfileResolutionError:
-                            disk_profile = None
-                    plan_profile = None
-                    plan_detection = None
-                    if "plan" in requested:
-                        try:
-                            plan_profile, plan_detection = resolve_profile_for_adapter(adapter, "plan")
-                        except ProfileResolutionError:
-                            plan_profile = None
-                    supported = [feature for feature in requested if feature in definitions
-                                 and feature_supported(instance.db_type, feature, server_version)]
-                    if not requested:
-                        raise ToolkitError("NotImplemented", "No permission features are implemented for this database type.")
-                    observed = set(getattr(adapter, "permission_observations", set()))
-                    rows = []
-                    for feature in requested:
-                        if feature in {"replication", "slow", "disk-growth", "plan"} \
-                                and feature in definitions:
-                            profile = (replication_profile if feature == "replication" else
-                                       slow_profile if feature == "slow" else disk_profile)
-                            detection = (replication_detection if feature == "replication" else
-                                         slow_detection if feature == "slow" else
-                                         disk_detection if feature == "disk-growth" else plan_detection)
-                            if feature == "plan":
-                                profile = plan_profile
-                            if profile is None or profile.version_status == VersionStatus.MISMATCH:
-                                unknown_row: dict[str, Any] = {
-                                    "feature": feature, "status": PermissionStatus.UNKNOWN.value,
-                                    "support_state": SupportState.UNKNOWN.value,
-                                    "impact": f"No unambiguous verified {feature} permission profile is available.",
-                                }
-                                if detection and detection.error_type:
-                                    unknown_row["version_detection_error"] = {
-                                        "error_type": detection.error_type,
-                                        "message": detection.error_message,
-                                        "database_error": detection.database_error,
-                                    }
-                                rows.append(unknown_row)
-                                continue
-                            if profile.support_state == SupportState.UNSUPPORTED:
-                                rows.append({"feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
-                                             "support_state": profile.support_state.value,
-                                             "version_profile": asdict(profile)})
-                                continue
-                            if profile.support_state != SupportState.SUPPORTED or not profile.permission_profile_id:
-                                rows.append({"feature": feature, "status": PermissionStatus.UNKNOWN.value,
-                                             "support_state": profile.support_state.value,
-                                             "version_profile": asdict(profile),
-                                             "impact": "No reviewed permission profile is available for this route."})
-                                continue
-                            requirement = requirements_for_profile(profile.permission_profile_id)
-                            if profile.version_status in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN,
-                                                          VersionStatus.AUTO_DETECTED, VersionStatus.MISMATCH}:
-                                replication_assessment: Any = {
-                                    "status": PermissionStatus.UNKNOWN,
-                                    "missing_required": (), "missing_optional": (),
-                                    "available": (),
-                                }
-                            else:
-                                replication_assessment = assess_permissions(requirement, observed)
-                            row = {"feature": feature, **replication_assessment,
-                                   "support_state": profile.support_state.value,
-                                   "version_profile": asdict(profile),
-                                   "required_privileges": requirement.required,
-                                   "missing_reasons": privilege_reasons(
-                                       requirement, replication_assessment["missing_required"]
-                                   )}
-                            if (profile.version_status in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN}
-                                    and detection and detection.error_type):
-                                row["version_detection_error"] = {
-                                    "error_type": detection.error_type,
-                                    "message": detection.error_message,
-                                    "database_error": detection.database_error,
-                                }
-                            if (replication_assessment["status"] != PermissionStatus.READY
-                                    and profile.version_status in {VersionStatus.VERIFIED,
-                                                                   VersionStatus.UNVERIFIED}):
-                                row["impact"] = (_disk_growth_permission_impact(
-                                    replication_assessment["status"]
-                                ) if feature == "disk-growth" else requirement.impact)
-                                row["reference_grant"] = render_profile_sql(
-                                    profile.permission_profile_id, instance.db_type,
-                                    _grant_account(instance, adapter, permission_credential),
-                                    instance.database, server_version,
-                                )
-                            rows.append(row)
-                            continue
-                        if feature not in supported:
-                            rows.append({"feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
-                                         "missing_required": (), "impact": "Feature is not implemented for this database type."})
-                            continue
-                        evidence = observed
-                        requirement = requirements_for(instance.db_type, feature, server_version)
-                        assessment = assess_permissions(requirement, evidence)
-                        rows.append({"feature": feature, **assessment,
-                                     "missing_reasons": privilege_reasons(
-                                         requirement, assessment["missing_required"]
-                                     ),
-                                     **({"impact": _disk_growth_permission_impact(assessment["status"])
-                                         if feature == "disk-growth" else definitions[feature].impact}
-                                        if assessment["status"] != PermissionStatus.READY else {})})
-                    generated: str | None = None
-                    if args.generate_grant or args.generate_revoke:
-                        assert permission_credential is not None
-                        selected_profile = (replication_profile if args.feature == "replication"
-                                            else slow_profile if args.feature == "slow"
-                                            else disk_profile if args.feature == "disk-growth"
-                                            else plan_profile if args.feature == "plan" else None)
-                        if args.feature in {"replication", "slow", "disk-growth", "plan"} and selected_profile is not None \
-                                and selected_profile.version_status in {VersionStatus.VERIFIED,
-                                                                        VersionStatus.UNVERIFIED} \
-                                and selected_profile.permission_profile_id:
-                            generated = render_profile_sql(
-                                selected_profile.permission_profile_id, instance.db_type,
-                                _grant_account(instance, adapter, permission_credential),
-                                instance.database, server_version,
-                                revoke=args.generate_revoke,
-                            )
-                        elif args.feature is None:
-                            if (replication_profile is None
-                                    or replication_profile.version_status not in {VersionStatus.VERIFIED,
-                                                                                 VersionStatus.UNVERIFIED}
-                                    or not replication_profile.permission_profile_id
-                                    or slow_profile is None
-                                    or slow_profile.version_status not in {VersionStatus.VERIFIED,
-                                                                           VersionStatus.UNVERIFIED}
-                                    or not slow_profile.permission_profile_id
-                                    or disk_profile is None
-                                    or disk_profile.version_status not in {VersionStatus.VERIFIED,
-                                                                           VersionStatus.UNVERIFIED}
-                                    or not disk_profile.permission_profile_id
-                                    or ("plan" in supported and (
-                                        plan_profile is None
-                                        or plan_profile.version_status not in {VersionStatus.VERIFIED,
-                                                                               VersionStatus.UNVERIFIED}
-                                        or not plan_profile.permission_profile_id))):
-                                generated = None
-                            else:
-                                privileges: list[str] = []
-                                for feature in supported:
-                                    requirement = (
-                                        requirements_for_profile(replication_profile.permission_profile_id)
-                                        if feature == "replication" else
-                                        requirements_for_profile(slow_profile.permission_profile_id)
-                                        if feature == "slow" and slow_profile is not None
-                                        and slow_profile.permission_profile_id else
-                                        requirements_for_profile(disk_profile.permission_profile_id)
-                                        if feature == "disk-growth" and disk_profile is not None
-                                        and disk_profile.permission_profile_id else
-                                        requirements_for_profile(plan_profile.permission_profile_id)
-                                        if feature == "plan" and plan_profile is not None
-                                        and plan_profile.permission_profile_id else
-                                        requirements_for(instance.db_type, feature, server_version)
-                                    )
-                                    for privilege in requirement.required:
-                                        if privilege not in privileges:
-                                            privileges.append(privilege)
-                                generated = render_privileges_sql(
-                                    instance.db_type, privileges,
-                                    _grant_account(instance, adapter, permission_credential),
-                                    instance.database, server_version, revoke=args.generate_revoke,
-                                )
-                        else:
-                            generated = render_sql(instance.db_type, supported,
-                                                   _grant_account(instance, adapter, permission_credential),
-                                                   instance.database, server_version,
-                                                   revoke=args.generate_revoke)
-                    output = {"database_id": instance.id,
-                              "success": True,
-                              "account": getattr(adapter, "current_user", None)
-                              or (permission_credential.username if permission_credential else None),
-                              "features": rows, "generated_sql": generated,
-                              "toolkit_executes_grants": False}
-                    if instance.db_type == DatabaseType.ORACLE:
-                        output["monitoring_principal"] = _oracle_principal_output(
-                            adapter, permission_credential
-                        )
-                elif args.command == "check":
+                if args.command == "check":
                     detection = DEFAULT_VERSION_DETECTOR.detect(
                         instance.db_type, adapter.registry, adapter
                     )
-                    detected = detection.detected
-                    version_verification = version_status(instance.version_family, detected)
-                    slow_profile = PROFILE_RESOLVER.resolve(
-                        instance.db_type, instance.version_family, detected, "slow"
-                    ) if instance.db_type in {
-                        DatabaseType.SQLSERVER, DatabaseType.MYSQL,
-                        DatabaseType.POSTGRESQL, DatabaseType.ORACLE,
-                    } else None
-                    disk_profile = PROFILE_RESOLVER.resolve(
-                        instance.db_type, instance.version_family, detected, "disk-growth"
-                    ) if instance.db_type in {
-                        DatabaseType.SQLSERVER, DatabaseType.MYSQL,
-                        DatabaseType.POSTGRESQL, DatabaseType.ORACLE,
-                    } else None
-                    try:
-                        plan_profile = PROFILE_RESOLVER.resolve(
-                            instance.db_type, instance.version_family, detected, "plan"
-                        )
-                    except ProfileResolutionError:
-                        plan_profile = None
                     version_profile = build_version_profile(
-                        instance.db_type, instance.version_family, detected,
+                        instance.db_type, instance.version_family, detection.detected,
                         error_type=detection.error_type,
                         error_message=detection.error_message,
                         database_error=detection.database_error,
                     )
-                    version_warnings: list[str] = []
-                    if instance.version_family is None and detected and detected.normalized_family:
-                        version_warnings.append(
-                            f"Version family not declared for {instance.id}; add "
-                            f'version_family: "{detected.normalized_family}" to Inventory.'
-                        )
-                    if version_verification == VersionStatus.MISMATCH:
-                        version_warnings.append(
-                            "Declared and detected database version families differ. "
-                            "Permission readiness is UNKNOWN; correct Inventory before diagnosis."
-                        )
-                    elif version_verification in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN}:
-                        version_warnings.append(
-                            "Database version could not be verified; permission readiness is UNKNOWN."
-                        )
                     runtime = database_runtime_status(instance.db_type)
-                    runtime_packages = runtime_info()
-                    python_component = runtime_packages["python"]
-                    driver_component = runtime_packages["drivers"].get(instance.db_type.value, {})
-                    observed = set(getattr(adapter, "permission_observations", set()))
-                    definitions = PERMISSION_REGISTRY.get(instance.db_type, {})
-                    permission_rows: list[dict[str, Any]] = []
-                    for feature in ALL_FEATURES:
-                        if feature not in definitions:
-                            permission_rows.append({"feature": feature, "status": "UNSUPPORTED"})
-                            continue
-                        if feature == "slow" and slow_profile is not None \
-                                and slow_profile.version_status != VersionStatus.VERIFIED:
-                            permission_rows.append({
-                                "feature": feature, "status": PermissionStatus.UNKNOWN.value,
-                                "support_state": slow_profile.support_state.value,
-                                "version_profile": asdict(slow_profile),
-                                "missing_required": (), "missing_optional": (),
-                                "impact": "Version verification is required before assessing slow permissions.",
-                            })
-                            continue
-                        if feature == "disk-growth" and disk_profile is not None \
-                                and disk_profile.version_status != VersionStatus.VERIFIED:
-                            permission_rows.append({
-                                "feature": feature, "status": PermissionStatus.UNKNOWN.value,
-                                "support_state": disk_profile.support_state.value,
-                                "version_profile": asdict(disk_profile),
-                                "missing_required": (), "missing_optional": (),
-                                "impact": "Version verification is required before assessing disk-growth permissions.",
-                            })
-                            continue
-                        if feature == "plan" and plan_profile is not None \
-                                and plan_profile.version_status != VersionStatus.VERIFIED:
-                            permission_rows.append({
-                                "feature": feature, "status": PermissionStatus.UNKNOWN.value,
-                                "support_state": plan_profile.support_state.value,
-                                "version_profile": asdict(plan_profile),
-                                "missing_required": (), "missing_optional": (),
-                                "impact": "Version verification is required before assessing Plan permissions.",
-                            })
-                            continue
-                        if version_verification in {VersionStatus.MISMATCH, VersionStatus.UNVERIFIED,
-                                                    VersionStatus.UNKNOWN}:
-                            permission_rows.append({
-                                "feature": feature, "status": "UNKNOWN",
-                                "missing_required": (), "missing_optional": (),
-                                "impact": "Version verification is required before assessing permissions.",
-                            })
-                            continue
-                        if feature == "slow" and slow_profile is not None:
-                            if slow_profile.support_state != SupportState.SUPPORTED \
-                                    or not slow_profile.permission_profile_id:
-                                permission_rows.append({
-                                    "feature": "slow", "status": PermissionStatus.UNKNOWN.value,
-                                    "support_state": slow_profile.support_state.value,
-                                    "version_profile": asdict(slow_profile),
-                                    "missing_required": (), "missing_optional": (),
-                                    "impact": "No reviewed slow permission contract is available for this route.",
-                                })
-                                continue
-                            requirement = requirements_for_profile(slow_profile.permission_profile_id)
-                            assessment = assess_permissions(requirement, observed)
-                            permission_rows.append({"feature": feature, **assessment,
-                                                    "support_state": slow_profile.support_state.value,
-                                                    "version_profile": asdict(slow_profile),
-                                                    "required_privileges": requirement.required,
-                                                    "missing_reasons": privilege_reasons(
-                                                        requirement, assessment["missing_required"]
-                                                    ),
-                                                    **({"impact": requirement.impact}
-                                                       if assessment["status"] != PermissionStatus.READY else {})})
-                            continue
-                        if feature == "disk-growth" and disk_profile is not None:
-                            if disk_profile.support_state != SupportState.SUPPORTED \
-                                    or not disk_profile.permission_profile_id:
-                                permission_rows.append({
-                                    "feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
-                                    "support_state": disk_profile.support_state.value,
-                                    "version_profile": asdict(disk_profile),
-                                    "missing_required": (), "missing_optional": (),
-                                    "impact": "No reviewed disk-growth permission contract is available for this route.",
-                                })
-                                continue
-                            requirement = requirements_for_profile(disk_profile.permission_profile_id)
-                            assessment = assess_permissions(requirement, observed)
-                            permission_rows.append({"feature": feature, **assessment,
-                                                    "support_state": disk_profile.support_state.value,
-                                                    "version_profile": asdict(disk_profile),
-                                                    "required_privileges": requirement.required,
-                                                    "missing_reasons": privilege_reasons(
-                                                        requirement, assessment["missing_required"]
-                                                    ),
-                                                    **({"impact": _disk_growth_permission_impact(assessment["status"])}
-                                                       if assessment["status"] != PermissionStatus.READY else {})})
-                            continue
-                        if feature == "plan" and plan_profile is not None:
-                            if plan_profile.support_state != SupportState.SUPPORTED \
-                                    or not plan_profile.permission_profile_id:
-                                permission_rows.append({
-                                    "feature": "plan",
-                                    "status": (PermissionStatus.UNSUPPORTED.value
-                                               if plan_profile.support_state == SupportState.UNSUPPORTED
-                                               else PermissionStatus.UNKNOWN.value),
-                                    "support_state": plan_profile.support_state.value,
-                                    "version_profile": asdict(plan_profile),
-                                    "missing_required": (), "missing_optional": (),
-                                    "impact": "No reviewed Plan permission contract is available for this route.",
-                                })
-                                continue
-                            requirement = requirements_for_profile(plan_profile.permission_profile_id)
-                            assessment = assess_permissions(requirement, observed)
-                            plan_permission_row: dict[str, Any] = {
-                                "feature": feature, **assessment,
-                                "support_state": plan_profile.support_state.value,
-                                "version_profile": asdict(plan_profile),
-                                "required_privileges": requirement.required,
-                                "missing_reasons": privilege_reasons(
-                                    requirement, assessment["missing_required"]
-                                ),
-                            }
-                            if assessment["status"] != PermissionStatus.READY:
-                                plan_permission_row["impact"] = requirement.impact
-                                plan_permission_row["reference_grant"] = render_profile_sql(
-                                    plan_profile.permission_profile_id, instance.db_type,
-                                    _grant_account(instance, adapter, permission_credential),
-                                    instance.database, adapter.get_server_version(),
-                                )
-                            permission_rows.append(plan_permission_row)
-                            continue
-                        requirement = requirements_for(
-                            instance.db_type, feature, adapter.get_server_version()
-                        )
-                        assessment = assess_permissions(requirement, observed)
-                        permission_rows.append({"feature": feature, **assessment,
-                                                "missing_reasons": privilege_reasons(
-                                                    requirement, assessment["missing_required"]
-                                                ),
-                                                **({"impact": definitions[feature].impact}
-                                                   if assessment["status"] != PermissionStatus.READY else {})})
                     effective = public_connection_settings(instance.db_type, adapter.settings)
-                    effective.update({"host": instance.host, "port": instance.port,
-                                      "database": instance.database or (
-                                          "master" if instance.db_type == DatabaseType.SQLSERVER else None
-                                      ), "target": f"{instance.host}:{instance.port}",
-                                      "status": "READY"})
-                    if isinstance(adapter, SQLServerAdapter):
-                        effective["driver"] = adapter.odbc_driver
-                        effective["tls"] = (
-                            f"Encrypt={'yes' if effective.get('encrypt') else 'no'}; "
-                            f"TrustServerCertificate={'yes' if effective.get('trust_server_certificate') else 'no'}"
-                        )
-                    states = {row["status"] for row in permission_rows
-                              if row["status"] != "UNSUPPORTED"}
-                    if version_verification == VersionStatus.MISMATCH:
-                        overall = "VERSION_MISMATCH"
-                    elif version_verification in {VersionStatus.UNVERIFIED, VersionStatus.UNKNOWN}:
-                        overall = "VERSION_UNVERIFIED"
-                    elif "UNKNOWN" in states:
-                        overall = "PARTIAL"
-                    elif "MISSING" in states:
-                        overall = "PARTIAL" if "READY" in states else "MISSING"
-                    elif "PARTIAL" in states:
-                        overall = "PARTIAL"
-                    elif runtime.get("status") == RuntimeStatus.READY_WITH_WARNING.value:
-                        overall = RuntimeStatus.READY_WITH_WARNING.value
-                    else:
-                        overall = RuntimeStatus.READY.value
-                    warnings = tuple(
-                        ([str(runtime["warning"])] if runtime.get("warning") else [])
-                        + version_warnings
-                    )
-                    check_result = CheckResult(
-                        {"id": instance.id, "db_type": instance.db_type.value,
-                         "environment": instance.environment},
-                        {"status": runtime.get("status"),
-                         "python": python_component.get("version"),
-                         "driver": runtime.get("selected_native_driver") or driver_component.get("package"),
-                         "driver_version": driver_component.get("version")},
-                        {"alias": instance.credential_alias,
-                         "backend": getattr(active_provider, "last_backend", None)
-                         or "Provided Credential Provider", "status": "READY"},
-                        effective, tuple(permission_rows), overall, warnings,
-                        _account_security(adapter), version_profile,
-                    )
-                    output = asdict(check_result) | {"success": overall in {
-                        "READY", "READY_WITH_WARNING", "PARTIAL"
-                    }}
+                    effective.update({
+                        "host": instance.host,
+                        "port": instance.port,
+                        "database": instance.database,
+                        "status": "CONNECTED",
+                    })
+                    version_status = version_profile.get("version_status", "UNKNOWN")
+                    check_status = ("VERSION_MISMATCH" if version_status == VersionStatus.MISMATCH.value
+                                    else "VERSION_UNAVAILABLE" if detection.error_type else "READY")
+                    output = {
+                        "success": check_status == "READY",
+                        "status": check_status,
+                        "database_id": instance.id,
+                        "connection": {"status": "CONNECTED"},
+                        "runtime": runtime,
+                        "effective_connection": effective,
+                        "version_profile": version_profile,
+                        "account_security": _account_security(adapter),
+                        "permissions_guide": "docs/DATABASE_PERMISSIONS.md",
+                    }
                 elif args.command == "status":
                     collectors = (ORACLE_COLLECTORS if isinstance(adapter, OracleAdapter)
                                   else MYSQL_COLLECTORS if isinstance(adapter, MySQLAdapter)
@@ -1367,49 +994,18 @@ def main(
                     output["connection"] = effective
                 elif args.command == "diagnose":
                     report: DiagnosticReport
+                    plan_xml: str | None = None
                     if args.scenario == "disk-growth":
                         profile, detection = resolve_profile_for_adapter(adapter, "disk-growth")
                         if profile.version_status != VersionStatus.VERIFIED:
                             raise ToolkitError(
                                 "VersionVerificationRequired",
                                 "Disk-growth diagnosis requires a declared version_family matching the detected server version.",
-                                permission_readiness={
-                                    "feature": "disk-growth", "status": PermissionStatus.UNKNOWN.value,
-                                    "version_detection": asdict(detection),
-                                    "version_profile": asdict(profile),
-                                },
                             )
-                        if profile.support_state != SupportState.SUPPORTED \
-                                or not profile.permission_profile_id:
+                        if profile.support_state != SupportState.SUPPORTED:
                             raise ToolkitError(
                                 "FeatureUnsupported",
                                 "No verified disk-growth diagnostic profile is available for this database version.",
-                                permission_readiness={
-                                    "feature": "disk-growth", "status": PermissionStatus.UNSUPPORTED.value,
-                                    "version_profile": asdict(profile),
-                                },
-                            )
-                        requirement = requirements_for_profile(profile.permission_profile_id)
-                        assessment = assess_permissions(requirement, adapter.permission_observations)
-                        if assessment["status"] == PermissionStatus.MISSING:
-                            missing = assessment["missing_required"]
-                            grant = render_profile_sql(
-                                profile.permission_profile_id, instance.db_type,
-                                _grant_account(instance, adapter, permission_credential),
-                                instance.database, adapter.get_server_version(),
-                            )
-                            raise ToolkitError(
-                                "MissingPermission",
-                                "Required monitoring permissions are missing for disk-growth diagnosis.",
-                                permission_readiness={
-                                    "feature": "disk-growth", **assessment,
-                                    "version_profile": asdict(profile),
-                                    "missing_reasons": privilege_reasons(requirement, missing),
-                                    "impact": _disk_growth_permission_impact(assessment["status"]),
-                                    "suggested_grant": grant,
-                                    "toolkit_executed": False,
-                                    "dba_approval_required": True,
-                                },
                             )
                         cast(Any, adapter).disk_growth_profile = profile
                         stage_started = time.monotonic()
@@ -1453,57 +1049,19 @@ def main(
                         }
                         output = {"success": not report.details["incomplete"], "report": asdict(report)}
                         output["version_profile"] = asdict(profile)
-                        output["permission_readiness"] = {
-                            "status": assessment["status"].value,
-                            "missing_optional": assessment["missing_optional"],
-                            "data_visibility": cast(Any, report).details.get("data_visibility", "UNKNOWN"),
-                        }
                     elif args.scenario == "slow":
                         profile, detection = resolve_profile_for_adapter(adapter, "slow")
                         if profile.version_status != VersionStatus.VERIFIED:
                             raise ToolkitError(
                                 "VersionVerificationRequired",
                                 "Slow diagnosis requires a declared version_family matching the detected server version.",
-                                permission_readiness={
-                                    "feature": "slow", "status": PermissionStatus.UNKNOWN.value,
-                                    "version_detection": asdict(detection),
-                                    "version_profile": asdict(profile),
-                                },
                             )
-                        if profile.support_state != SupportState.SUPPORTED \
-                                or not profile.permission_profile_id:
+                        if profile.support_state != SupportState.SUPPORTED:
                             raise ToolkitError(
                                 "FeatureUnsupported",
                                 "No verified slow diagnostic profile is available for this database version.",
-                                permission_readiness={
-                                    "feature": "slow", "status": PermissionStatus.UNSUPPORTED.value,
-                                    "version_profile": asdict(profile),
-                                },
                             )
                         cast(Any, adapter).slow_profile = profile
-                        requirement = requirements_for_profile(profile.permission_profile_id)
-                        assessment = assess_permissions(requirement, adapter.permission_observations)
-                        if assessment["status"] == PermissionStatus.MISSING:
-                            missing = assessment["missing_required"]
-                            grant = render_privileges_sql(
-                                instance.db_type, missing,
-                                _grant_account(instance, adapter, permission_credential),
-                                instance.database, adapter.get_server_version(),
-                            )
-                            raise ToolkitError(
-                                "MissingPermission",
-                                "Required monitoring permissions are missing for slow diagnosis.",
-                                permission_readiness={
-                                    "feature": "slow", **assessment,
-                                    "version_profile": asdict(profile),
-                                    "missing_reasons": privilege_reasons(requirement, missing),
-                                    "impact": requirement.impact,
-                                    "account_security": getattr(adapter, "privilege_classification", None),
-                                    "suggested_grant": grant,
-                                    "toolkit_executed": False,
-                                    "dba_approval_required": True,
-                                },
-                            )
                         stage_started = time.monotonic()
                         capture_started_at = datetime.now(timezone.utc).isoformat()
                         emergency_names = emergency_collectors_for_adapter(adapter)
@@ -1538,22 +1096,19 @@ def main(
                                                           "supplemental_pending": supplemental_expected,
                                                           "diagnostic_profile": {
                                                               "sql_profile_id": profile.sql_profile_id,
-                                                              "permission_profile_id": profile.permission_profile_id,
                                                               "parser_contract_id": profile.parser_contract_id,
                                                               "runtime_variant": profile.runtime_variant,
-                                                          },
-                                                          "permission_readiness": {
-                                                              "status": assessment["status"].value,
-                                                              "missing_required": assessment["missing_required"],
-                                                              "missing_optional": assessment["missing_optional"],
                                                           }})
                         emergency_candidates = build_priority_candidates(
                             report, include_blocking_victims=True)
+                        emergency_triage = build_performance_triage(report)
                         cast(Any, report).details.update({
                             "priority_candidates": emergency_candidates,
-                            "performance_triage": build_performance_triage(report),
+                            "performance_triage": emergency_triage,
                             "manual_action_decisions": manual_action_decisions(report),
                         })
+                        emergency_triage_fingerprint = _triage_summary_fingerprint(
+                            emergency_candidates, emergency_triage)
                         triage_completed_at = datetime.now(timezone.utc).isoformat()
                         first_summary_monotonic = None
                         if args.format == "console" and not args.json and not args.quiet:
@@ -1589,18 +1144,12 @@ def main(
                                     "reason": "Required emergency evidence was incomplete; recent SQL was not queried.",
                                     "statements": [],
                                 }]
-                        cast(Any, report).details.update({"priority_candidates": build_priority_candidates(
-                                               report, include_blocking_victims=True),
+                        final_candidates = build_priority_candidates(report, include_blocking_victims=True)
+                        cast(Any, report).details.update({"priority_candidates": final_candidates,
                                                "diagnostic_profile": {
                                                    "sql_profile_id": profile.sql_profile_id,
-                                                   "permission_profile_id": profile.permission_profile_id,
                                                    "parser_contract_id": profile.parser_contract_id,
                                                    "runtime_variant": profile.runtime_variant,
-                                               },
-                                               "permission_readiness": {
-                                                   "status": assessment["status"].value,
-                                                   "missing_required": assessment["missing_required"],
-                                                   "missing_optional": assessment["missing_optional"],
                                                },
                                                "manual_action_decisions": manual_action_decisions(report),
                                                "capture_started_at": capture_started_at,
@@ -1608,7 +1157,16 @@ def main(
                                                "capture_finished_at": datetime.now(timezone.utc).isoformat(),
                                                "snapshot_consistency": "BEST_EFFORT",
                                                "supplemental_pending": False})
-                        cast(Any, report).details["performance_triage"] = build_performance_triage(report)
+                        final_triage = build_performance_triage(report)
+                        cast(Any, report).details["performance_triage"] = final_triage
+                        if (args.format == "console" and not args.json and not args.quiet
+                                and _triage_summary_fingerprint(final_candidates, final_triage)
+                                != emergency_triage_fingerprint):
+                            threshold = getattr(adapter.settings, "long_running_seconds", 10)
+                            print("【补充证据后的分诊更新】", flush=True)
+                            print(render_emergency_triage(
+                                report, final_candidates, capture_started_at=capture_started_at,
+                                slow_threshold=threshold), flush=True)
                         if args.format == "console" and not args.json and not args.quiet:
                             completion = ("补充证据：已完成" if cast(Any, report).details.get(
                                 "full_profile_evidence_status") == "COMPLETE" else
@@ -1625,11 +1183,6 @@ def main(
                         }
                         output = {"success": not cast(Any, report).details["incomplete"], "report": asdict(report)}
                         output["version_profile"] = asdict(profile)
-                        output["permission_readiness"] = {
-                            "status": assessment["status"].value,
-                            "missing_optional": assessment["missing_optional"],
-                            "data_visibility": cast(Any, report).details.get("data_visibility", "UNKNOWN"),
-                        }
                     elif args.scenario == "replication":
                         report = diagnose_replication(adapter)
                         severities = {"INFO": 0, "WARNING": 1, "HIGH": 2, "CRITICAL": 3}
@@ -1645,67 +1198,165 @@ def main(
                         }
                         output = {"success": report.summary.overall != "UNKNOWN",
                                   "report": asdict(report)}
-                    else:
+                    elif args.scenario == "active-sql":
+                        assert isinstance(adapter, SQLServerAdapter)
+                        active_profile, _ = resolve_profile_for_adapter(adapter, "active-sql")
+                        if active_profile.version_status != VersionStatus.VERIFIED:
+                            raise ToolkitError("VersionVerificationRequired",
+                                "Active SQL diagnosis requires a declared version family matching the detected server version.")
+                        if active_profile.support_state != SupportState.SUPPORTED:
+                            raise ToolkitError("FeatureSupportUnknown",
+                                "No verified SQL Server Active SQL profile is available for this version.")
+                        active_result = SQLServerActiveSQLCollector(adapter, active_profile).collect(
+                            instance, args.sort, args.top)
+                        active_data = active_result.to_dict()
+                        report = ActiveSQLDiagnosticReport(instance, active_result.collection_timestamp,
+                            "active-sql", (), {"version": active_profile.detected_raw_version,
+                                "active_sql": active_data,
+                                "samples": [{"collector": "sqlserver_active_sql",
+                                    "success": active_result.collection_status == "COLLECTED",
+                                    "truncated": active_result.truncated,
+                                    "row_count": active_result.candidate_count,
+                                    "finished_at": active_result.collection_timestamp.isoformat()}],
+                                "incomplete": active_result.completeness != "COMPLETE"})
+                        report_json = asdict(report)
+                        report_json["details"].pop("active_sql", None)
+                        output = {"success": active_result.collection_status == "COLLECTED",
+                                  "report": report_json, "active_sql": active_data,
+                                  "version_profile": asdict(active_profile)}
+                    elif args.scenario == "memory-grant":
+                        assert isinstance(adapter, SQLServerAdapter)
+                        memory_profile, _ = resolve_profile_for_adapter(adapter, "memory-grant")
+                        if (memory_profile.version_status != VersionStatus.VERIFIED
+                                or memory_profile.support_state != SupportState.SUPPORTED):
+                            raise ToolkitError("VersionVerificationRequired",
+                                "A verified supported SQL Server Memory Grant profile is required.")
+                        memory_result = SQLServerMemoryGrantCollector(
+                            adapter, memory_profile).collect(instance)
+                        memory_data = memory_result.to_dict()
+                        report = MemoryGrantDiagnosticReport(
+                            instance, datetime.now(timezone.utc), "memory-grant", (),
+                            {"version": memory_result.database_version,
+                             "memory_grant": memory_data,
+                             "samples": [
+                                 {"collector": "sqlserver_memory_grant_waiting",
+                                  "success": memory_result.waiting.success,
+                                  "truncated": memory_result.waiting.truncated,
+                                  "row_count": memory_result.waiting.row_count,
+                                  "error_type": memory_result.waiting.error_type,
+                                  "finished_at": memory_result.waiting.finished_at},
+                                 {"collector": "sqlserver_memory_grant_granted",
+                                  "success": memory_result.granted.success,
+                                  "truncated": memory_result.granted.truncated,
+                                  "row_count": memory_result.granted.row_count,
+                                  "error_type": memory_result.granted.error_type,
+                                  "finished_at": memory_result.granted.finished_at},
+                             ],
+                             "incomplete": memory_result.completeness != "COMPLETE",
+                             "snapshot_consistency": "SEQUENTIAL_BEST_EFFORT_NOT_ATOMIC",
+                             "health_assessment": "NOT_ASSESSED"})
+                        report_json = asdict(report)
+                        report_json["details"].pop("memory_grant", None)
+                        output = {
+                            "success": memory_result.success and memory_result.completeness == "COMPLETE",
+                            "report": report_json,
+                            "memory_grant": memory_data,
+                            "version_profile": asdict(memory_profile),
+                        }
+                        if not memory_result.success:
+                            output["error_type"] = (memory_result.waiting.error_type
+                                                     or memory_result.granted.error_type or "CollectionFailed")
+                            output["error_message"] = (memory_result.waiting.error_message
+                                                        or memory_result.granted.error_message or "Collection failed.")
+                    elif args.scenario == "top-sql":
+                        assert isinstance(adapter, (SQLServerAdapter, PostgreSQLAdapter, MySQLAdapter, OracleAdapter))
+                        top_profile, detection = resolve_profile_for_adapter(adapter, "top-sql")
+                        if top_profile.version_status != VersionStatus.VERIFIED:
+                            raise ToolkitError("VersionVerificationRequired",
+                                "Top SQL diagnosis requires a declared version family matching the detected server version.")
+                        if top_profile.support_state != SupportState.SUPPORTED:
+                            raise ToolkitError("FeatureSupportUnknown",
+                                "No verified Top SQL profile is available for this database version.")
+                        if (instance.db_type == DatabaseType.SQLSERVER
+                                and isinstance(adapter, SQLServerAdapter)):
+                            metric = args.metric or "cpu_time"
+                            top_result = SQLServerTopSQLCollector(adapter, top_profile).collect(
+                                instance, metric, args.top)
+                        elif (instance.db_type == DatabaseType.POSTGRESQL
+                              and isinstance(adapter, PostgreSQLAdapter)):
+                            metric = args.metric or "total_exec_time"
+                            top_result = PostgreSQLTopSQLCollector(adapter, top_profile).collect(
+                                instance, metric, args.top)
+                        elif instance.db_type == DatabaseType.MYSQL and isinstance(adapter, MySQLAdapter):
+                            metric = args.metric or "sum_timer_wait"
+                            top_result = MySQLTopSQLCollector(adapter, top_profile).collect(
+                                instance, metric, args.top)
+                        elif instance.db_type == DatabaseType.ORACLE and isinstance(adapter, OracleAdapter):
+                            metric = args.metric or "cpu_time"
+                            top_result = OracleTopSQLCollector(adapter, top_profile).collect(
+                                instance, metric, args.top)
+                        else:
+                            raise ToolkitError("UnsupportedTopSQLAdapter",
+                                               "Top SQL is available only for SQL Server, PostgreSQL, MySQL, and Oracle.")
+                        collector_name = {
+                            DatabaseType.SQLSERVER: "sqlserver_top_sql",
+                            DatabaseType.POSTGRESQL: "postgresql_top_sql",
+                            DatabaseType.MYSQL: "mysql_top_sql",
+                            DatabaseType.ORACLE: "oracle_top_sql",
+                        }[instance.db_type]
+                        capture_started_at = top_result.collection_timestamp.isoformat()
+                        capture_finished_at = capture_started_at
+                        report = TopSQLDiagnosticReport(instance, top_result.collection_timestamp, "top-sql", (), {
+                            "version": top_profile.detected_raw_version,
+                            "top_sql": top_result.to_dict(),
+                            "samples": [{"collector": collector_name, "success":
+                                top_result.collection_status.value == "COLLECTED", "truncated":
+                                "TRUNCATED" in {item.value for item in top_result.limitations},
+                                "row_count": len(top_result.items),
+                                "finished_at": top_result.collection_timestamp.isoformat()}],
+                            "incomplete": top_result.completeness.value != "COMPLETE",
+                        })
+                        output = {"success": top_result.collection_status.value == "COLLECTED",
+                                  "report": asdict(report), "top_sql": top_result.to_dict(),
+                                  "version_profile": asdict(top_profile)}
+                    elif isinstance(adapter, SQLServerAdapter):
                         assert isinstance(adapter, SQLServerAdapter)
                         if args.session is None:
                             raise ToolkitError("InvalidSession", "Plan diagnosis requires --session <session_id>.")
                         plan_profile, detection = resolve_profile_for_adapter(adapter, "plan")
+                        version_profile_for_hint = plan_profile
                         if plan_profile.version_status != VersionStatus.VERIFIED:
                             raise ToolkitError(
                                 "VersionVerificationRequired",
                                 "Plan diagnosis requires a declared version_family matching the detected server version.",
-                                permission_readiness={
-                                    "feature": "plan", "status": PermissionStatus.UNKNOWN.value,
-                                    "version_detection": asdict(detection),
-                                    "version_profile": asdict(plan_profile),
-                                    "toolkit_executed_grant": False,
-                                },
                             )
-                        if plan_profile.support_state != SupportState.SUPPORTED \
-                                or not plan_profile.permission_profile_id:
+                        if plan_profile.support_state != SupportState.SUPPORTED:
                             raise ToolkitError(
                                 "FeatureSupportUnknown",
                                 "No reviewed SQL Server Plan profile is available for this version.",
-                                permission_readiness={
-                                    "feature": "plan", "status": (
-                                        PermissionStatus.UNSUPPORTED.value
-                                        if plan_profile.support_state == SupportState.UNSUPPORTED
-                                        else PermissionStatus.UNKNOWN.value
-                                    ),
-                                    "version_profile": asdict(plan_profile),
-                                    "toolkit_executed_grant": False,
-                                },
-                            )
-                        plan_requirements = requirements_for_profile(plan_profile.permission_profile_id)
-                        plan_assessment = assess_permissions(
-                            plan_requirements, getattr(adapter, "permission_observations", set())
-                        )
-                        if plan_assessment["status"] == PermissionStatus.MISSING:
-                            missing = plan_assessment["missing_required"]
-                            raise ToolkitError(
-                                "MissingPermission",
-                                "Required monitoring permissions are missing for Plan diagnosis.",
-                                permission_readiness={
-                                    "feature": "plan", **plan_assessment,
-                                    "required_privileges": plan_requirements.required,
-                                    "missing_reasons": privilege_reasons(plan_requirements, missing),
-                                    "impact": plan_requirements.impact,
-                                    "version_profile": asdict(plan_profile),
-                                    "suggested_grant": render_profile_sql(
-                                        plan_profile.permission_profile_id, instance.db_type,
-                                        _grant_account(instance, adapter, permission_credential),
-                                        instance.database, adapter.get_server_version(),
-                                    ),
-                                    "toolkit_executed_grant": False,
-                                    "dba_approval_required": True,
-                                },
                             )
                         plan_report, plan_xml = diagnose_plan(adapter, args.session, plan_profile)
-                        report = plan_report
+                        report = cast(DiagnosticReport, plan_report)
                         # A valid probe with no reusable plan is an ordinary diagnostic
                         # outcome, not a database/CLI failure. Availability is explicit
                         # in plan_status and plan_available.
                         output = {"success": True, "report": asdict(plan_report)}
+                    elif isinstance(adapter, OracleAdapter):
+                        plan_profile, detection = resolve_profile_for_adapter(adapter, "plan")
+                        version_profile_for_hint = plan_profile
+                        if (plan_profile.version_status != VersionStatus.VERIFIED
+                                or plan_profile.support_state != SupportState.SUPPORTED):
+                            raise ToolkitError("FeatureSupportUnknown",
+                                "No verified Oracle cached-plan profile is available for this server version.")
+                        assert args.sql_id is not None and args.child_number is not None
+                        oracle_plan_report = diagnose_oracle_plan(
+                            adapter, plan_profile, args.sql_id, args.child_number,
+                            inst_id=args.inst_id, con_id=args.con_id,
+                            plan_hash_value=args.plan_hash)
+                        report = cast(DiagnosticReport, oracle_plan_report)
+                        output = {"success": True, "report": asdict(oracle_plan_report)}
+                    else:
+                        raise ToolkitError("NotImplemented", "Plan diagnosis is not implemented for this adapter.")
                 else:
                     result = (ORACLE_COLLECTORS[args.collector](adapter).collect(instance)
                               if isinstance(adapter, OracleAdapter)
@@ -1715,31 +1366,6 @@ def main(
                               if isinstance(adapter, PostgreSQLAdapter)
                               else COLLECTORS[args.collector](adapter).collect(instance))
                     output = asdict(result)
-            if (not output.get("success", True)
-                    and output.get("error_type") in {"MissingPermission", "PreflightDenied",
-                                                       "QueryDenied", "CapabilityUnavailable"}):
-                feature = _feature_for_command(args)
-                if feature and instance.db_type in PERMISSION_REGISTRY:
-                    definition = PERMISSION_REGISTRY[instance.db_type].get(feature)
-                    if definition:
-                        evidence_text = str(output.get("error_message", ""))
-                        evidence_upper = evidence_text.upper()
-                        missing = tuple(item for item in definition.required
-                                        if item.upper() in evidence_upper
-                                        or (item.upper().startswith("SELECT ")
-                                            and item.upper()[7:] in evidence_upper))
-                        output["permission_missing"] = {
-                            "feature": feature,
-                            "missing_privileges": missing,
-                            "required_privileges": definition.required,
-                            "impact": definition.impact,
-                            "suggested_grant": render_sql(instance.db_type, (feature,),
-                                                           _grant_account(instance, adapter,
-                                                                          permission_credential),
-                                                           instance.database) if permission_credential else None,
-                            "toolkit_executed_grant": False,
-                            "evidence": output.get("error_message"),
-                        }
             if args.command == "diagnose":
                 report_path = _diagnostic_report_path(instance.id, args.scenario, args.report)
                 report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1785,11 +1411,19 @@ def main(
                         report_path.unlink(missing_ok=True)
                         raise
                 if args.format == "console" and not args.json:
-                    if args.scenario == "replication":
+                    if args.scenario == "active-sql":
+                        print(render_active_sql_human(output["active_sql"], str(report_path)))
+                    elif args.scenario == "memory-grant":
+                        print(render_memory_grant_human(output["memory_grant"], str(report_path)))
+                    elif args.scenario == "top-sql":
+                        print(render_human("top-sql", output["top_sql"]))
+                    elif args.scenario == "replication":
                         from dba.presentation import render_replication_summary
 
                         print(render_replication_summary(report, report_path=str(report_path),
                                                          verbose=args.verbose))
+                    elif args.scenario == "plan" and instance.db_type == DatabaseType.ORACLE:
+                        print(render_oracle_plan_human(report, str(report_path)))
                     elif args.scenario in {"slow", "disk-growth"}:
                         if args.quiet:
                             print(f"{'READY' if output.get('success') else 'PARTIAL'}  {report_path}", flush=True)
@@ -1798,7 +1432,7 @@ def main(
                     else:
                         print(render_incident_summary(incident_summary, verbose=args.verbose))
                 else:
-                    _emit(args, "diagnose", redact(output))
+                    _emit(args, "diagnose", _redact_diagnostic_json(output))
             else:
                 _emit(args, args.command, redact(output))
             if not output["success"]:
@@ -1826,136 +1460,6 @@ def main(
         return 130
     except (OSError, ValidationError, UnicodeError, ToolkitError) as exc:
         # YAML/OS exceptions may contain supplied content: emit only safe categories.
-        if (args.command == "permissions" and args.feature == "replication"
-                and instance_for_hint is not None
-                and instance_for_hint.db_type == DatabaseType.ORACLE
-                and isinstance(exc, ToolkitError)
-                and exc.error_type in {"DriverUnavailable", "PreflightFailed", "PreflightDenied", "ConnectionFailed",
-                                      "ConnectionTimeout", "QueryFailed", "QueryTimeout",
-                                      "CapabilityUnavailable"}):
-            profile = PROFILE_RESOLVER.resolve(
-                DatabaseType.ORACLE, instance_for_hint.version_family, None, "replication"
-            )
-            error_payload = _database_error_payload(exc.database_error)
-            feature_row: dict[str, Any] = {
-                "feature": "replication",
-                "status": PermissionStatus.UNKNOWN.value,
-                "support_state": profile.support_state.value,
-                "version_profile": asdict(profile),
-                "missing_required": (),
-                "missing_optional": (),
-                "runtime_verification": "FAILED",
-            }
-            if profile.support_state == SupportState.SUPPORTED and profile.permission_profile_id:
-                requirement = requirements_for_profile(profile.permission_profile_id)
-                feature_row.update({
-                    "required_privileges": requirement.required,
-                    "impact": requirement.impact,
-                    "reference_grant": render_profile_sql(
-                        profile.permission_profile_id, DatabaseType.ORACLE,
-                        _grant_account(instance_for_hint, adapter_instance,
-                                       permission_credential),
-                        instance_for_hint.database,
-                    ),
-                })
-                principal = _oracle_principal_output(adapter_instance, permission_credential)
-                feature_row["monitoring_principal"] = principal
-                if principal["verified"]:
-                    guidance = (
-                        "Runtime version verification failed; permissions are UNKNOWN. "
-                        "Review this declared-family reference grant for the verified database principal."
-                    )
-                else:
-                    guidance = (
-                        "Oracle session identity could not be verified. Replace "
-                        "<ORACLE_MONITOR_USER> with the exact database principal before execution."
-                    )
-            else:
-                feature_row["impact"] = (
-                    "Permission guidance is unavailable without a declared canonical Oracle version_family."
-                )
-                guidance = "Add a canonical version_family to Inventory or restore Oracle connectivity; no profile was guessed."
-            offline_output: dict[str, Any] = {
-                "success": True,
-                "database_id": instance_for_hint.id,
-                "account": permission_credential.username if permission_credential else None,
-                "monitoring_principal": _oracle_principal_output(
-                    adapter_instance, permission_credential
-                ),
-                "features": [feature_row],
-                "version_profile": asdict(profile),
-                "runtime_verification": {
-                    "status": "FAILED",
-                    "classification": "VERSION_OR_IDENTITY_UNVERIFIED",
-                    "error_type": exc.error_type,
-                    "message": str(exc),
-                    "vendor_error": error_payload,
-                },
-                "guidance": guidance,
-                "toolkit_executes_grants": False,
-            }
-            _emit(args, "permissions", redact(offline_output))
-            logger.warning("Oracle permission profile rendered without verified runtime identity/version.",
-                           extra={"event": {"module": "permissions", "database_id": instance_for_hint.id,
-                                            "version_status": profile.version_status.value,
-                                            "error_type": exc.error_type,
-                                            "vendor_code": error_payload.get("vendor_code")
-                                            if error_payload else None}})
-            return 0
-        if (args.command == "permissions" and args.feature == "plan"
-                and instance_for_hint is not None
-                and instance_for_hint.db_type == DatabaseType.SQLSERVER
-                and isinstance(exc, ToolkitError)
-                and exc.error_type in {"DriverUnavailable", "PreflightFailed", "PreflightDenied",
-                                       "ConnectionFailed", "ConnectionTimeout", "QueryFailed",
-                                       "QueryTimeout", "CapabilityUnavailable", "MissingPermission"}):
-            profile = PROFILE_RESOLVER.resolve(
-                DatabaseType.SQLSERVER, instance_for_hint.version_family, None, "plan"
-            )
-            plan_feature_row: dict[str, Any] = {
-                "feature": "plan", "status": PermissionStatus.UNKNOWN.value,
-                "support_state": profile.support_state.value,
-                "version_profile": asdict(profile), "missing_required": (),
-                "missing_optional": (), "runtime_verification": "FAILED",
-                "evidence": str(exc),
-            }
-            if profile.support_state == SupportState.SUPPORTED and profile.permission_profile_id:
-                requirement = requirements_for_profile(profile.permission_profile_id)
-                observed = set(getattr(adapter_instance, "permission_observations", set()))
-                assessment = assess_permissions(requirement, observed)
-                missing = tuple(assessment["missing_required"])
-                if not missing:
-                    detail_upper = str(exc).upper()
-                    missing = tuple(item for item in requirement.required if item.upper() in detail_upper)
-                status = (PermissionStatus.MISSING if missing else PermissionStatus.UNKNOWN)
-                plan_feature_row.update({
-                    "status": status.value,
-                    "required_privileges": requirement.required,
-                    "missing_required": missing,
-                    "impact": requirement.impact,
-                    "reference_grant": render_profile_sql(
-                        profile.permission_profile_id, instance_for_hint.db_type,
-                        _grant_account(instance_for_hint, adapter_instance, permission_credential),
-                        instance_for_hint.database,
-                    ),
-                    "toolkit_executed_grant": False,
-                    "dba_approval_required": True,
-                })
-            else:
-                plan_feature_row["impact"] = "No reviewed Plan permission contract is available for the declared SQL Server family."
-            offline_output = {
-                "success": True, "database_id": instance_for_hint.id,
-                "features": [plan_feature_row],
-                "runtime_verification": {"status": "FAILED", "error_type": exc.error_type,
-                                          "message": str(exc)},
-                "toolkit_executes_grants": False,
-            }
-            _emit(args, "permissions", redact(offline_output))
-            logger.warning("SQL Server Plan permission profile rendered without runtime version verification.",
-                           extra={"event": {"module": "permissions", "database_id": instance_for_hint.id,
-                                            "version_status": profile.version_status.value,
-                                            "error_type": exc.error_type}})
-            return 0
         detail = (
             str(exc)
             if isinstance(exc, (ValidationError, ToolkitError))
@@ -1968,12 +1472,10 @@ def main(
                     else type(exc).__name__,
                     "error_message": detail,
                 }
-        detail_upper = detail.upper()
+        if version_profile_for_hint is not None:
+            failure["version_profile"] = asdict(version_profile_for_hint)
         if isinstance(exc, ToolkitError) and exc.trigger_reason is not None:
             failure["trigger_reason"] = exc.trigger_reason
-        if isinstance(exc, ToolkitError) and exc.permission_readiness is not None:
-            failure["permission_readiness"] = exc.permission_readiness
-            failure["privilege_classification"] = exc.permission_readiness.get("account_security")
         database_error = getattr(exc, "database_error", None)
         if database_error is not None:
             vendor_payload = _database_error_payload(database_error)
@@ -2017,7 +1519,9 @@ def main(
             except (ToolkitError, ValueError):
                 pass
             if isinstance(exc, ToolkitError) and exc.error_type == "PrivilegedAccount":
-                failure["account"] = permission_credential.username if permission_credential else None
+                failure["account"] = (
+                    account_security_credential.username if account_security_credential else None
+                )
                 failure["privilege_classification"] = {
                     "classification": "PRIVILEGED",
                     "trigger_reason": exc.trigger_reason,
@@ -2031,72 +1535,6 @@ def main(
                     "classification": "NON_PRIVILEGED",
                     "write_capability_detected": exc.trigger_reason,
                 }
-        if args.command == "permissions" and instance_for_hint is not None:
-            definitions = PERMISSION_REGISTRY.get(instance_for_hint.db_type, {})
-            requested = [args.feature] if args.feature else list(ALL_FEATURES)
-            rows = []
-            for feature in requested:
-                definition = definitions.get(feature)
-                if definition is None:
-                    rows.append({"feature": feature, "status": PermissionStatus.UNSUPPORTED.value,
-                                 "missing_required": ()})
-                    continue
-                missing = tuple(item for item in definition.required
-                                if item.upper() in detail_upper
-                                or (item.upper().startswith("SELECT ")
-                                    and item.upper()[7:] in detail_upper))
-                status = PermissionStatus.MISSING if missing else PermissionStatus.UNKNOWN
-                rows.append({"feature": feature, "status": status.value,
-                             "missing_required": missing, "impact": definition.impact})
-            failure["features"] = rows
-            failure["toolkit_executes_grants"] = False
-        if isinstance(exc, ToolkitError) and exc.error_type in {
-            "MissingPermission", "PreflightDenied", "QueryDenied", "CapabilityUnavailable"
-        }:
-            feature = _feature_for_command(args)
-            if args.command == "check" and instance_for_hint is not None:
-                definitions = PERMISSION_REGISTRY.get(instance_for_hint.db_type, {})
-                detail_upper = detail.upper()
-                affected = [name for name, definition in definitions.items()
-                            if any(_permission_matches_evidence(item, detail_upper)
-                                   or (item.upper().startswith("SELECT ")
-                                       and _permission_matches_evidence(item[7:], detail_upper))
-                                   for item in definition.required)]
-                if affected and permission_credential is not None:
-                    missing_items = sorted({item for name in affected
-                                            for item in requirements_for(
-                                                instance_for_hint.db_type, name
-                                            ).required
-                                            if _permission_matches_evidence(item, detail_upper)
-                                            or (item.upper().startswith("SELECT ")
-                                                and _permission_matches_evidence(item[7:], detail_upper))})
-                    failure["features"] = [
-                        {"feature": name, "status": "MISSING",
-                         "missing_required": [item for item in requirements_for(
-                             instance_for_hint.db_type, name
-                         ).required if item in missing_items],
-                         "impact": definitions[name].impact}
-                        for name in affected
-                    ]
-                    failure["permission_missing"] = {
-                        "feature": ", ".join(affected),
-                        "missing_privileges": missing_items,
-                        "required_privileges": missing_items,
-                        "impact": "; ".join(definitions[name].impact for name in affected),
-                        "suggested_grant": render_sql(
-                            instance_for_hint.db_type, affected,
-                            _grant_account(instance_for_hint, adapter_instance, permission_credential),
-                            instance_for_hint.database,
-                        ),
-                        "toolkit_executed_grant": False,
-                        "evidence": detail,
-                    }
-        if (isinstance(exc, ToolkitError) and exc.database_error is not None
-                and exc.error_type == "PermissionInspectionFailed"):
-            vendor_detail = getattr(exc.database_error, "to_dict", None)
-            if callable(vendor_detail):
-                failure["error"] = vendor_detail()
-            failure["privilege_classification"] = {"classification": "UNKNOWN"}
         _emit(args, args.command or "help", failure)
         logger.error(
             "event",

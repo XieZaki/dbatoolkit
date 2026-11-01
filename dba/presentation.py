@@ -24,7 +24,6 @@ class CheckResult:
     runtime: dict[str, Any]
     credential: dict[str, Any]
     connection: dict[str, Any]
-    permissions: tuple[dict[str, Any], ...]
     status: str
     warnings: tuple[str, ...] = ()
     account_security: dict[str, Any] | None = None
@@ -63,52 +62,58 @@ def render_human(command: str, value: Any) -> str:
     data = asdict(value) if hasattr(value, "__dataclass_fields__") else value
     if isinstance(data, dict) and data.get("error_type"):
         return _render_error(data)
+    if command == "top-sql":
+        return render_top_sql_human(data)
     if command == "check":
-        database = data["database"]
+        database = data.get("database", {})
+        connection = data.get("connection", {})
+        effective = data.get("effective_connection", {})
+        if not isinstance(database, dict):
+            database = {}
+        if not isinstance(connection, dict):
+            connection = {}
+        if not isinstance(effective, dict):
+            effective = {}
+        version_profile = data.get("version_profile") or {}
+        if not isinstance(version_profile, dict):
+            version_profile = {}
+        database_id = database.get("id", data.get("database_id"))
+        database_type = database.get("db_type", data.get("db_type"))
+        target = connection.get("target")
+        if target is None and effective.get("host") is not None:
+            port = effective.get("port")
+            target = f"{effective['host']}:{port}" if port is not None else effective["host"]
+        database_name = effective.get("database", connection.get("database"))
         lines = ["DBA Toolkit Check", "-" * 42, "", "Database",
-                 _line("ID", database.get("id")), _line("Type", database.get("db_type")),
-                 _line("Target", data["connection"].get("target")),
-                 _line("Database", data["connection"].get("database")), "", "Runtime",
+                 _line("ID", database_id), _line("Type", database_type),
+                 _line("Target", target), _line("Database", database_name), "", "Runtime",
                  _line("Python", data["runtime"].get("python")),
                  _line("Status", data["runtime"].get("status")),
                  _line("Driver", data["runtime"].get("driver")),
-                 _line("Driver Version", data["runtime"].get("driver_version")), "", "Credential",
-                 _line("Alias", data["credential"].get("alias")),
-                 _line("Backend", data["credential"].get("backend")),
-                 _line("Status", data["credential"].get("status")), "", "Connection",
-                 _line("Status", data["connection"].get("status")),
-                 _line("TLS", data["connection"].get("tls")), "", "Account Security",
+                 _line("Driver Version", data["runtime"].get("driver_version"))]
+        credential = data.get("credential")
+        if isinstance(credential, dict):
+            lines.extend(["", "Credential", _line("Alias", credential.get("alias")),
+                          _line("Backend", credential.get("backend")),
+                          _line("Status", credential.get("status"))])
+        lines.extend(["", "Connection", _line("Status", connection.get("status")),
+                      _line("TLS", connection.get("tls", effective.get("encrypt"))),
+                      "", "Account Security",
                  _line("Classification", (data.get("account_security") or {}).get("classification")),
                  "", "Version",
-                 _line("Declared Family", (data.get("version_profile") or {}).get(
-                     "declared_version_family")),
-                 _line("Detected Version", (data.get("version_profile") or {}).get(
-                     "detected_version")),
-                 _line("Detected Family", (data.get("version_profile") or {}).get(
-                     "detected_version_family")),
-                 _line("Version Status", (data.get("version_profile") or {}).get(
-                     "version_status")),
-                 "", "Permission Readiness",
-                 "  Feature             Status", "  " + "-" * 25]
-        lines.extend(f"  {row['feature']:<20}{row['status']}" for row in data["permissions"])
-        for row in data["permissions"]:
-            if row.get("missing_required"):
-                lines.append(_line(f"{row['feature']} missing", ", ".join(row["missing_required"])))
-            if row.get("missing_optional"):
-                lines.append(_line(f"{row['feature']} optional", ", ".join(row["missing_optional"])))
-            if row.get("impact"):
-                lines.append(_line(f"{row['feature']} impact", row["impact"]))
+                 _line("Declared Family", version_profile.get("declared_version_family")
+                       or "AUTO_DETECTED"),
+                 _line("Detected Version", version_profile.get("detected_version")),
+                 _line("Detected Family", version_profile.get("detected_version_family")),
+                 _line("Version Status", version_profile.get("version_status"))])
         lines.extend(["", "Overall", _line("Status", data["status"])])
         if data.get("warnings"):
             lines.extend(["", "Warnings"])
             lines.extend(f"  {i}. {warning}" for i, warning in enumerate(data["warnings"], 1))
-        detection_error = (data.get("version_profile") or {}).get("version_detection_error")
+        detection_error = version_profile.get("version_detection_error")
         if detection_error:
             lines.extend(["", "Version Detection", _line("Error", detection_error.get("error_type")),
                           _line("Detail", detection_error.get("message"))])
-            if detection_error.get("required_detection_privilege"):
-                lines.append(_line("Required Privilege",
-                                   detection_error["required_detection_privilege"]))
         return "\n".join(lines)
     if command == "status":
         database = data["database"]
@@ -130,69 +135,6 @@ def render_human(command: str, value: Any) -> str:
                       "  Disk/log growth:", f"    dba diagnose {database.get('id')} disk-growth"])
         if data.get("warnings"):
             lines.extend(["", "Warnings", *[f"  - {item}" for item in data["warnings"]]])
-        return "\n".join(lines)
-    if command == "permissions":
-        lines = ["Permission Check", "-" * 42, "", "Database",
-                 _line("ID", data.get("database_id")), "", "Monitoring Account"]
-        principal = data.get("monitoring_principal")
-        if isinstance(principal, dict):
-            lines.extend([_line("Credential Username", principal.get("credential_username")
-                                or data.get("account")),
-                          _line("Database Principal", principal.get("database_principal") or "UNKNOWN"),
-                          _line("Principal Verification", principal.get("verification", "UNVERIFIED"))])
-        else:
-            lines.append(_line("Account", data.get("account")))
-        lines.extend(["", "Feature          Status", "-" * 30])
-        lines.extend(f"{row['feature']:<17}{row['status']}" for row in data.get("features", []))
-        for row in data.get("features", []):
-            if row.get("missing_required"):
-                lines.append(_line(f"{row['feature']} missing", ", ".join(row["missing_required"])))
-            if row.get("required_privileges"):
-                lines.extend([f"  {row['feature']} required permissions",
-                              *[f"  {item}" for item in row["required_privileges"]]])
-            if row.get("missing_optional"):
-                lines.append(_line(f"{row['feature']} optional", ", ".join(row["missing_optional"])))
-            if row.get("impact") and row.get("status") in {"PARTIAL", "MISSING", "UNKNOWN"}:
-                lines.append(_line(f"{row['feature']} impact", row["impact"]))
-            if row.get("reference_grant"):
-                lines.extend([f"  {row['feature']} reference grants",
-                              row["reference_grant"], "Toolkit did NOT execute this script."])
-        runtime = data.get("runtime_verification")
-        version = data.get("version_profile")
-        if runtime:
-            lines.extend(["", "Version",
-                          _line("Declared Family", (version or {}).get("declared_version_family")),
-                          _line("Detected Version", (version or {}).get("detected_version") or "UNKNOWN"),
-                          _line("Detected Family", (version or {}).get("detected_version_family") or "UNKNOWN"),
-                          _line("Version Status", (version or {}).get("version_status")),
-                          "", "Runtime Verification", _line("Status", runtime.get("status")),
-                          _line("Classification", runtime.get("classification")),
-                          _line("Reason", runtime.get("message"))])
-            vendor = runtime.get("vendor_error")
-            if isinstance(vendor, dict):
-                lines.append(_line("Vendor Error", vendor.get("message") or vendor.get("vendor_code")))
-                lines.append(_line("Toolkit Classification", vendor.get("classification", "UNKNOWN")))
-                if vendor.get("guidance"):
-                    lines.append(_line("Vendor Guidance", vendor["guidance"]))
-            if data.get("guidance"):
-                lines.extend(["", "Guidance", f"  {data['guidance']}"])
-            row = next((item for item in data.get("features", [])
-                        if item.get("feature") == "replication"), {})
-            if row.get("required_privileges"):
-                lines.extend(["", "Required Permissions",
-                              *[f"  {item}" for item in row["required_privileges"]]])
-            if row.get("reference_grant"):
-                lines.extend(["", "Reference Grants", row["reference_grant"],
-                              "Toolkit did NOT execute this script."])
-        if data.get("generated_sql"):
-            lines.extend(["", "Generated SQL", data["generated_sql"],
-                          "Toolkit did NOT execute this script."])
-        elif all(row.get("status") in {"READY", "UNSUPPORTED"} for row in data.get("features", [])):
-            lines.extend(["", "Result", "  Monitoring permissions are ready."])
-        else:
-            lines.extend(["", "Result", "  Some monitoring permissions need DBA review."])
-        if not runtime and data.get("guidance"):
-            lines.extend(["", "Guidance", f"  {data['guidance']}"])
         return "\n".join(lines)
     if command == "doctor":
         lines = ["DBA Toolkit Doctor", "-" * 42, "", "Core Runtime",
@@ -459,6 +401,113 @@ def render_incident_summary(value: IncidentSummary | dict[str, Any], verbose: bo
     return "\n".join(lines)
 
 
+def render_oracle_plan_human(report: Any, report_path: str) -> str:
+    """Render bounded Oracle cached-plan evidence for an interactive terminal."""
+    details = getattr(report, "details", {})
+    request = details.get("request", {}) if isinstance(details, dict) else {}
+    if not isinstance(request, dict):
+        request = {}
+    lines = ["Oracle Cached Execution Plan", "=" * 72,
+             f"Database: {report.instance.id}",
+             f"Version: {_line_value(details.get('version'))}",
+             f"Source: {_line_value(details.get('source'))}",
+             f"Status: {_line_value(details.get('plan_status'))}",
+             (f"Identity: SQL_ID={_line_value(request.get('sql_id'))} "
+              f"CHILD_NUMBER={_line_value(request.get('child_number'))} "
+              f"INST_ID={_line_value(request.get('inst_id'))} "
+              f"CON_ID={_line_value(request.get('con_id'))} "
+              f"PLAN_HASH_VALUE={_line_value(request.get('current_plan_hash_value'))}"),
+             f"Identity validation: {_line_value(details.get('identity_validation'))}",
+             f"Completeness: {_line_value(details.get('completeness'))}",
+             f"Limitations: {_line_value(details.get('limitations'))}"]
+    if details.get("note"):
+        lines.extend(("", f"Note: {redact(details['note'])}"))
+    nodes = details.get("top_operators", [])
+    if isinstance(nodes, list) and nodes:
+        lines.extend(("", "Plan Tree (optimizer estimates; no actual row-source statistics):"))
+        lines.append(f"{'ID':>4} {'PARENT':>6} {'CARDINALITY':>13} {'COST':>10} OPERATION")
+        for node in nodes[:500]:
+            if not isinstance(node, dict):
+                continue
+            object_name = ".".join(str(node[key]) for key in ("object_owner", "object_name")
+                                   if node.get(key) is not None)
+            operation = " ".join(str(value) for value in (node.get("operation"), node.get("options"),
+                                                              object_name) if value)
+            depth = node.get("depth", 0)
+            indent = " " * min(depth * 2, 40) if type(depth) is int else ""
+            lines.append(f"{node.get('id'):>4} {_line_value(node.get('parent_id')):>6} "
+                         f"{_line_value(node.get('estimated_rows')):>13} "
+                         f"{_line_value(node.get('estimated_cost')):>10} {indent}{redact(operation)}")
+    else:
+        lines.extend(("", "No complete cached plan tree is available."))
+    lines.extend(("", f"HTML report: {report_path}",
+                  "Plan is read from the current shared pool; cursor load generation is not captured.",
+                  "Adaptive plan candidate/final branches are not classified."))
+    return "\n".join(lines)
+
+
+def _line_value(value: Any) -> str:
+    safe = redact(value)
+    return "—" if safe in (None, "") else str(safe)
+
+
+def render_top_sql_human(data: Any) -> str:
+    """Render only ranked native identities and contract status, never SQL text."""
+    if hasattr(data, "to_dict"):
+        data = data.to_dict()
+    if not isinstance(data, dict):
+        return "Top SQL\n" + "-" * 42 + "\n  Status                 UNKNOWN"
+    lines = ["Top SQL", "-" * 42]
+    for label, key in (("Database", "database_engine"), ("Version", "database_version"),
+                       ("Profile", "profile_id"), ("Collection", "collection_status"),
+                       ("Completeness", "completeness"),
+                       ("Visibility", "data_visibility"), ("Metric", "metric_name"),
+                       ("Unit", "metric_unit"), ("Semantics", "metric_semantics"),
+                       ("Item Scope", "metric_scope"), ("Collection Scope", "collection_scope"),
+                       ("Direction", "ranking_direction"),
+                       ("Evidence Source", "evidence_source"), ("Collected At", "collection_timestamp")):
+        display_value = data.get(key)
+        if isinstance(display_value, str):
+            display_value = display_value[:256]
+        lines.append(_line(label, display_value))
+    items: list[Any] = data.get("items", [])
+    if not isinstance(items, list):
+        items = []
+    ranked = [item for item in items if isinstance(item, dict) and item.get("rank") is not None]
+    lines.extend(["", "Ranked SQL", "  Rank  Native identity                                      Metric"])
+    for item in ranked[:10]:
+        identity = item.get("sql_identity") or {}
+        fields = identity.get("fields", {}) if isinstance(identity, dict) else {}
+        allowed = {"sql_handle", "plan_handle", "query_hash", "query_plan_hash", "statement_start_offset",
+                   "statement_end_offset", "database_id", "queryid", "dbid", "userid", "pid",
+                   "backend_start", "digest", "schema_name", "processlist_id", "thread_id", "sql_id",
+                   "child_number", "inst_id", "plan_hash_value", "plan_generation_num", "toplevel"}
+        identity_text = ", ".join(f"{key}={redact(value)}" for key, value in fields.items() if key in allowed)
+        safe = (redact(identity_text) or "identity unavailable")[:240]
+        metric_value = redact(item.get("metric_value"))
+        lines.append(f"  {item['rank']:<5} {safe:<50} {metric_value if metric_value is not None else '—'}")
+    if len(ranked) > 10:
+        lines.append(f"  Showing 10 of {len(ranked)} ranked rows; {len(ranked) - 10} omitted. JSON contains the full requested Top N.")
+    if data.get("collection_status") == "COLLECTED" and not items:
+        lines.append("  Collection succeeded; no matching rows. No ranking is available.")
+    elif not ranked:
+        lines.append("  No ranked observations; unavailable values are not treated as zero.")
+    limitations = data.get("limitations")
+    if not isinstance(limitations, (list, tuple)):
+        limitations = []
+    if limitations:
+        lines.extend(["", "Limitations", "  " + ", ".join(str(redact(item)) for item in limitations)])
+    source_metadata = data.get("source_metadata")
+    if isinstance(source_metadata, dict) and source_metadata:
+        allowed_metadata = {"stats_reset", "dealloc", "extension_version", "compute_query_id", "tracking_mode",
+                            "planning_time_included", "identity_unavailable_rows", "queryid_stability"}
+        summary = ", ".join(f"{key}={redact(value)}" for key, value in source_metadata.items()
+                             if key in allowed_metadata)
+        if summary:
+            lines.extend(["", "Source Metadata", "  " + summary[:512]])
+    return "\n".join(lines)
+
+
 def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str, Any], ...] = (),
                            *, capture_started_at: str, slow_threshold: int = 10) -> str:
     """Render the bounded Chinese first-pass response from current evidence."""
@@ -520,6 +569,16 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
             lines.append("观测到与未结束事务关联的会话，请核对事务归属和持续时间。")
         else:
             lines.append("本次应急采样未观察到阻塞根或已确认的空闲事务；结论仅适用于当前快照。")
+        performance_triage = details.get("performance_triage")
+        if isinstance(performance_triage, dict):
+            lines.extend((
+                "【性能分诊证据状态】",
+                f"总体状态：{performance_triage.get('status', 'UNKNOWN')}；"
+                f"数据可见性：{details.get('data_visibility', 'UNKNOWN')}；"
+                f"根因状态：{performance_triage.get('root_cause_status', 'NOT_ESTABLISHED')}",
+            ))
+            for reason in performance_triage.get("unknown_reasons", [])[:5]:
+                lines.append(f"证据限制：{reason}")
         lines.extend(("", "【优先核查对象】"))
         if not candidates:
             lines.append("当前证据没有可列出的会话候选。")
@@ -857,19 +916,6 @@ def render_replication_summary(report: Any, report_path: str, verbose: bool = Fa
         lines.append("  No additional action is indicated by this snapshot.")
     lines.extend(["", "Toolkit Executed  NO", "Reference Commands  None",
                   f"HTML Report  {report_path}"])
-    permission = data.get("details", {}).get("permission_readiness", {})
-    if permission:
-        lines.extend(["", "Permission Readiness",
-                      _line("Account Security", (permission.get("account_security") or {}).get("classification")),
-                      _line("Feature", "replication"),
-                      _line("Status", permission.get("status"))])
-        if permission.get("missing_required"):
-            lines.append(_line("Missing Required", ", ".join(permission["missing_required"])))
-        if permission.get("missing_optional"):
-            lines.append(_line("Missing Optional", ", ".join(permission["missing_optional"])))
-        if permission.get("suggested_grant"):
-            lines.extend(["Reference Grant Commands", permission["suggested_grant"],
-                          "Toolkit Executed  NO", "DBA Approval Required  YES"])
     if verbose:
         lines.extend(["", "Topology Members"])
         for member in members[:15]:
@@ -886,7 +932,7 @@ def _render_error(data: dict[str, Any]) -> str:
         "CredentialStoreFailed": "Credential Store Error",
         "DriverUnavailable": "Database Runtime Missing",
         "PrivilegedAccount": "Monitoring Account Rejected",
-        "MissingPermission": "Permission Missing",
+        "QueryDenied": "Database Rejected Query",
         "ConnectionFailed": "Database Connection Failed",
     }.get(kind, kind.replace("Error", " Failed"))
     lines = [title, "-" * 42]
@@ -918,36 +964,9 @@ def _render_error(data: dict[str, Any]) -> str:
         lines.extend(_line(label, effective.get(key)) for key, label in (
             ("host", "Host"), ("port", "Port"), ("database", "Database"),
             ("ssl", "SSL"), ("connect_timeout", "Connect Timeout")))
-    missing = data.get("permission_missing")
-    readiness = data.get("permission_readiness")
-    if isinstance(readiness, dict):
-        security = readiness.get("account_security", {})
-        lines.extend(["", "Account Security",
-                      _line("Classification", security.get("classification")),
-                      "", "Permission Readiness",
-                      _line("Feature", readiness.get("feature")),
-                      _line("Status", getattr(readiness.get("status"), "value", readiness.get("status")))])
-        for key, label in (("missing_required", "Missing Required"),
-                           ("missing_optional", "Missing Optional"),
-                           ("available", "Available Capabilities")):
-            values = readiness.get(key, ())
-            if values:
-                lines.extend(["", label, "  " + ", ".join(str(item) for item in values)])
-        if readiness.get("impact"):
-            lines.extend(["", "Impact", f"  {readiness['impact']}"])
-        for item in readiness.get("missing_reasons", ()):
-            lines.extend(["", str(item.get("privilege", "Privilege")),
-                          f"  Required: {item.get('reason', '')}"])
-        if readiness.get("suggested_grant"):
-            lines.extend(["", "Reference Grant Commands", readiness["suggested_grant"],
-                          "Toolkit Executed  NO", "DBA Approval Required  YES"])
-    if isinstance(missing, dict):
-        lines.extend(["", "Missing Permission", f"  {', '.join(missing.get('missing_privileges', [])) or 'See evidence'}",
-                      "", "Impact", f"  {missing.get('impact', '')}"])
-        grant = missing.get("suggested_grant")
-        if grant:
-            lines.extend(["", "Suggested Grant", f"  {grant}",
-                          "  DBA Toolkit did NOT execute this statement."])
+    guidance = data.get("permission_guidance")
+    if guidance:
+        lines.extend(["", "Database Permission Guidance", f"  {guidance}"])
     reason = data.get("trigger_reason")
     if isinstance(reason, dict):
         lines.extend(["", "Privilege Trigger"])

@@ -327,7 +327,8 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
                 "samples": [{"collector": r.collector_name, "started_at": r.started_at,
                              "finished_at": r.finished_at, "row_count": r.row_count,
                              "truncated": r.truncated, "success": r.success,
-                             "error_type": r.error_type} for r in results]}))
+                             "error_type": r.error_type, "error_message": r.error_message,
+                             "database_error": r.database_error} for r in results]}))
 
 
 def diagnose_slow(adapter: MySQLAdapter) -> MySQLSlowReport:
@@ -344,7 +345,8 @@ def diagnose_slow(adapter: MySQLAdapter) -> MySQLSlowReport:
         results.append(result)
         if not result.success and result.collector_name in fatal:
             raise ToolkitError(result.error_type or "QueryFailed",
-                               result.error_message or "Required sample unavailable.")
+                               result.error_message or "Required sample unavailable.",
+                               database_error=result.database_error)
         if not result.success:
             break
     report = build_slow_report(adapter.instance, tuple(results), adapter.settings,

@@ -7,35 +7,8 @@ if TYPE_CHECKING:
     from dba.sqlserver import SQLServerAdapter
 
 
-READ_PERMISSIONS = frozenset(
-    {
-        "CONNECT SQL",
-        "CONNECT",
-        "VIEW ANY DATABASE",
-        "VIEW SERVER STATE",
-        "VIEW SERVER PERFORMANCE STATE",
-        "VIEW SERVER SECURITY STATE",
-        "VIEW ANY DEFINITION",
-        "VIEW DEFINITION",
-        "VIEW DATABASE STATE",
-        "VIEW DATABASE PERFORMANCE STATE",
-        "VIEW DATABASE SECURITY STATE",
-        "SELECT",
-        "REFERENCES",
-        "VIEW CHANGE TRACKING",
-        "VIEW ANY ERROR LOG",
-        "VIEW SECURITY DEFINITION",
-        "VIEW PERFORMANCE DEFINITION",
-        "VIEW ANY SECURITY DEFINITION",
-        "VIEW ANY PERFORMANCE DEFINITION",
-        "VIEW ANY COLUMN ENCRYPTION KEY DEFINITION",
-        "VIEW ANY COLUMN MASTER KEY DEFINITION",
-    }
-)
-
-
 class SQLServerMonitorPreflight:
-    """Checks effective rights in the connected database, then real read probes.
+    """Reject unsafe monitoring principals and verify basic instance identity.
 
     This cannot certify rights in every other database. DBA provisioning must
     enforce a dedicated monitoring login across the instance.
@@ -49,6 +22,7 @@ class SQLServerMonitorPreflight:
                 raise ToolkitError(
                     result.error_type or "PreflightFailed",
                     f"Preflight capability failed: {name}. {result.error_message}",
+                    database_error=result.database_error,
                 )
             if name.startswith("monitor_") and result.truncated:
                 raise ToolkitError(
@@ -91,7 +65,6 @@ class SQLServerMonitorPreflight:
             ("DATABASE", "TAKE OWNERSHIP"): "TAKE OWNERSHIP",
             ("DATABASE", "IMPERSONATE"): "IMPERSONATE",
         }
-        permission_warnings: list[dict[str, str]] = []
         for row in permissions:
             scope = str(row.get("scope", "")).upper()
             name = str(row.get("permission_name", "")).upper()
@@ -142,65 +115,21 @@ class SQLServerMonitorPreflight:
                     f"Explicit high-risk permission detected: {display_name}.",
                     trigger_reason=trigger_reason,
                 )
-            if (source_type in {"EXPLICIT", "INHERITED"}
-                    and row.get("permission_name") not in READ_PERMISSIONS):
-                permission_warnings.append({"name": name, "scope": scope,
-                                            "object": object_name or "unspecified",
-                                            "source": source_name,
-                                            "source_type": str(source_type)})
-        effective = sorted({
-            str(row.get("permission_name"))
-            for row in permissions
-            if row.get("source_type") == "EFFECTIVE"
-            and row.get("permission_name") in READ_PERMISSIONS
-        })
-        unknown_effective = sorted({
-            str(row.get("permission_name"))
-            for row in permissions
-            if row.get("source_type") == "EFFECTIVE"
-            and row.get("permission_name") not in READ_PERMISSIONS
-        })
-        explicit = sorted({
-            str(row.get("permission_name"))
-            for row in permissions
-            if row.get("source_type") == "EXPLICIT"
-        })
+        explicit = sorted({str(row.get("permission_name")) for row in permissions
+                           if row.get("source_type") == "EXPLICIT"})
         adapter.privilege_classification = {
             "high_risk_server_roles": [],
             "high_risk_server_permissions": [],
             "high_risk_database_roles": [],
             "database_ownership": [],
-            "effective_monitoring_permissions": effective,
             "explicit_permissions": explicit,
-            "unknown_effective_permissions": unknown_effective,
             "unknown_membership_checks": unknown_roles,
-            "unclassified_permissions": permission_warnings,
-            "classification": "UNKNOWN" if unknown_roles or unknown_effective or permission_warnings else "MONITORING_ACCOUNT",
-            "warning": bool(unknown_roles or unknown_effective or permission_warnings),
+            "classification": "UNKNOWN" if unknown_roles else "MONITORING_ACCOUNT",
+            "warning": bool(unknown_roles),
         }
         major = account.get("major_version")
         if not isinstance(major, int) or major < 10:
             raise ToolkitError("UnsupportedVersion", "SQL Server 2008 R2 or later is required.")
-        permission = "view_server_performance_state" if major >= 16 else "view_server_state"
-        adapter.permission_observations.clear()
-        if account.get("view_server_state") == 1:
-            adapter.permission_observations.add("VIEW SERVER STATE")
-        if account.get("view_server_performance_state") == 1:
-            adapter.permission_observations.add("VIEW SERVER PERFORMANCE STATE")
-        if account.get("view_any_database") == 1:
-            adapter.permission_observations.add("VIEW ANY DATABASE")
-        if account.get("backup_history_select") == 1:
-            adapter.permission_observations.add("SELECT msdb.dbo.backupset")
-        if account.get(permission) != 1:
-            raise ToolkitError(
-                "MissingPermission",
-                f"Missing cross-session visibility: {permission.upper().replace('_', ' ')}. DBA review required; no grants are executed.",
-            )
-        if account.get("view_any_database") != 1:
-            raise ToolkitError(
-                "MissingPermission",
-                "Missing database inventory visibility: VIEW ANY DATABASE. DBA review required.",
-            )
         info = probe("server_info")
         if not info or not isinstance(info[0].get("product_version"), str):
             raise ToolkitError("PreflightIncomplete", "Basic instance information is unavailable.")
@@ -215,5 +144,3 @@ class SQLServerMonitorPreflight:
             bool(account["sessions_database_id"]),
             bool(account["sessions_open_transaction_count"]),
         )
-        for name in ("database_status", "active_sessions", "active_requests"):
-            probe(name)

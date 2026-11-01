@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>DBA Toolkit | Slow Diagnose · 阻塞诊断报告（优化版预览）</title>
+<style>
+:root {
+  --canvas:#f6f8fc; --surface:#ffffff; --surface-soft:#f9fbfe; --ink:#14243a;
+  --muted:#66778c; --subtle:#8593a5; --stroke:#e5ebf3; --stroke-strong:#d8e1ed;
+  --navy:#101f38; --navy-2:#1b3154; --blue:#3068cb; --blue-bg:#eaf1ff;
+  --red:#bd4050; --red-bg:#fff0f2; --amber:#96601b; --amber-bg:#fff7e8;
+  --green:#287c60; --green-bg:#eaf7f0; --shadow:0 3px 15px rgba(31,55,88,.035);
+  --radius:15px; --mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+}
+* { box-sizing:border-box }
+html { scroll-behavior:smooth; scroll-padding-top:24px }
+body { margin:0; background:var(--canvas); font:13px/1.6 "Inter","Segoe UI","Microsoft YaHei","PingFang SC",Arial,sans-serif; color:var(--ink); -webkit-font-smoothing:antialiased }
+button,input { font:inherit }
+button { cursor:pointer }
+a { color:inherit; text-decoration:none }
+:focus-visible { outline:3px solid #6fa7ff; outline-offset:3px }
+svg.icon { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; flex:none }
+.shell { display:grid; grid-template-columns:240px minmax(0,1fr); max-width:1680px; min-height:100vh; margin:auto }
+.sidebar { position:sticky; top:0; align-self:start; height:100vh; padding:30px 20px 24px; border-right:1px solid var(--stroke); background:#fff; display:flex; flex-direction:column; z-index:5 }
+.brand { display:flex; align-items:center; gap:11px; padding:3px 8px 27px; border-bottom:1px solid var(--stroke) }
+.brand-logo { width:40px; height:40px; border-radius:12px; background:var(--navy); display:grid; place-items:center; color:white; font-size:13px; font-weight:800; letter-spacing:-1px; box-shadow:0 5px 13px #20385d25 }
+.brand strong { font-size:15px; display:block; line-height:1.2; letter-spacing:-.3px }
+.brand small { display:block; margin-top:5px; color:var(--muted); font-size:10px }
+.nav-heading { font-size:10px; font-weight:800; letter-spacing:1.7px; color:#94a0af; margin:31px 12px 12px }
+.nav-links { display:flex; flex-direction:column; gap:4px }
+.nav-links a { padding:11px 12px; border-radius:10px; display:flex; align-items:center; gap:10px; color:#5f6f84; font-size:12px; font-weight:580; transition:background .15s,color .15s }
+.nav-links a:hover,.nav-links a.active { color:#1d57b0; background:#eef4ff }
+.nav-links .num { font:10px var(--mono); color:#a2adba; min-width:19px }
+.nav-links a.active .num { color:#507cb9 }
+.nav-end { margin-top:auto; padding:15px 12px; background:#f6f8fc; border:1px solid var(--stroke); border-radius:12px }
+.nav-end b { display:flex; align-items:center; gap:7px; font-size:11px }
+.nav-end p { color:var(--muted); font-size:10px; line-height:1.75; margin:7px 0 0 }
+.nav-end .dot { background:#2b9c74; width:7px; height:7px; border-radius:50% }
+.main { padding:28px clamp(20px,3.3vw,54px) 58px; width:100%; max-width:1438px; margin:0 auto; min-width:0 }
+.toolbar { display:flex; justify-content:space-between; align-items:center; gap:15px; margin-bottom:23px }
+.breadcrumb { display:flex; align-items:center; gap:9px; color:var(--muted); font-size:11px }
+.breadcrumb b { color:#2f4460; font-weight:700 }
+.toolbar-actions,.button-cluster { display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+.btn { border:1px solid var(--stroke-strong); border-radius:9px; padding:9px 12px; display:inline-flex; gap:7px; align-items:center; justify-content:center; background:#fff; color:#344b66; font-size:11px; font-weight:700; min-height:35px; white-space:nowrap; transition:background .15s,border-color .15s }
+.btn:hover { background:#eef4fd; border-color:#b5c9ea }
+.btn-primary { background:#264f99; color:#fff; border-color:#264f99 }
+.btn-primary:hover { background:#1b3e7a; border-color:#1b3e7a }
+.preview-flag { border:1px solid #efd9ad; background:#fff9ed; color:#785626; border-radius:10px; padding:11px 15px; display:flex; gap:10px; align-items:flex-start; font-size:11px; margin-bottom:15px }
+.preview-flag strong { color:#77521c }
+.preview-flag .icon { margin-top:1px }
+.hero { position:relative; isolation:isolate; overflow:hidden; background:linear-gradient(118deg,#0f213a 0%,#18365b 65%,#214d7b 100%); border-radius:18px; color:white; padding:30px 32px 28px; box-shadow:0 10px 27px #263c5a17 }
+.hero::before { content:""; position:absolute; z-index:-1; pointer-events:none; width:330px; height:330px; top:-160px; right:-100px; border:1px solid rgba(255,255,255,.12); border-radius:50%; box-shadow:0 0 0 62px rgba(255,255,255,.025),0 0 0 125px rgba(255,255,255,.02) }
+.hero-top { display:flex; justify-content:space-between; gap:16px; align-items:center }
+.overline { color:#a8c3e5; letter-spacing:2px; font-size:10px; font-weight:800 }
+.hero-risk { background:#ffffff1a; border:1px solid #ffffff38; color:#eaf4ff; display:inline-flex; gap:8px; align-items:center; padding:7px 11px; border-radius:999px; white-space:nowrap; font-size:11px; font-weight:700 }
+.hero-risk .pulse { background:#ffacb0; width:7px; height:7px; border-radius:50% }
+.hero h1 { font-size:clamp(24px,2.6vw,33px); line-height:1.28; letter-spacing:-.7px; margin:20px 0 9px; font-weight:780 }
+.hero-desc { margin:0; max-width:780px; color:#cbd9eb; font-size:12px; line-height:1.85 }
+.hero-meta { margin-top:26px; padding-top:18px; border-top:1px solid #ffffff28; display:grid; grid-template-columns:1.05fr 1fr 1.8fr 1fr; gap:13px }
+.hero-meta span { display:block; color:#afc2da; font-size:10px }
+.hero-meta strong { display:block; margin-top:4px; color:white; font-size:11px; font-weight:650; overflow-wrap:anywhere }
+.section { margin-top:29px; scroll-margin-top:24px }
+.section-heading { display:flex; justify-content:space-between; align-items:end; gap:10px; margin:0 0 13px }
+.heading-left { display:flex; align-items:center; gap:10px }
+.section-number { font-size:10px; font-family:var(--mono); font-weight:700; color:#7895c1; background:#e8f0fb; border-radius:7px; padding:5px 7px }
+.section-heading h2 { font-size:16px; margin:0; font-weight:760; letter-spacing:-.25px }
+.section-heading p { margin:0; color:var(--muted); font-size:11px }
+.grid-kpi { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px }
+.card { min-width:0; background:var(--surface); border:1px solid var(--stroke); border-radius:var(--radius); box-shadow:var(--shadow) }
+.metric { padding:18px 17px; border-top:3px solid transparent }
+.metric.danger { border-top-color:#d96b76 }
+.metric.caution { border-top-color:#e6b35d }
+.metric .metric-top { display:flex; justify-content:space-between; gap:8px; color:#708197; font-size:11px }
+.metric-icon { width:26px; height:26px; background:#f1f5fb; border-radius:8px; display:grid; place-items:center; color:#6f839b }
+.metric.danger .metric-icon { background:var(--red-bg); color:var(--red) }
+.metric.caution .metric-icon { background:var(--amber-bg); color:var(--amber) }
+.metric-value { font-size:32px; letter-spacing:-1.2px; line-height:1.15; font-weight:800; margin:9px 0 6px; font-variant-numeric:tabular-nums }
+.metric.danger .metric-value { color:var(--red) }
+.metric.caution .metric-value { color:var(--amber) }
+.metric-bottom { font-size:10px; color:var(--muted); line-height:1.5 }
+.split { display:grid; grid-template-columns:minmax(0,1.38fr) minmax(310px,.9fr); gap:14px; align-items:stretch }
+.panel { padding:23px 24px }
+.panel-header { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px }
+.panel-header h3 { margin:0; font-size:14px; font-weight:760 }
+.panel-subtitle { font-size:10px; color:var(--muted); margin-top:4px }
+.badge { display:inline-flex; align-items:center; border-radius:6px; padding:4px 7px; font-size:10px; font-weight:750; line-height:1.4; white-space:nowrap }
+.badge.red { background:var(--red-bg); color:var(--red) }
+.badge.amber { background:var(--amber-bg); color:var(--amber) }
+.badge.green { background:var(--green-bg); color:var(--green) }
+.badge.blue { background:var(--blue-bg); color:var(--blue) }
+.badge.gray { background:#eef2f7; color:#62758b }
+.session-line { display:flex; align-items:baseline; flex-wrap:wrap; column-gap:13px; row-gap:4px; margin-bottom:20px }
+.session-line .session-big { font:780 32px/1.1 var(--mono); letter-spacing:-1px }
+.session-line .session-type { color:var(--red); font-size:11px; font-weight:800 }
+.session-line .session-note { font-size:10px; color:var(--muted) }
+.facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px }
+.fact { border:1px solid #e9edf4; border-radius:9px; background:#f9fbfd; padding:10px 11px; min-width:0 }
+.fact span { display:block; color:#8591a1; font-size:10px; margin-bottom:4px }
+.fact strong { display:block; color:#253a56; font-size:12px; line-height:1.4; overflow-wrap:anywhere; font-weight:720 }
+.fact strong.hot { color:var(--red) }
+.reason { border-left:3px solid #4e83d4; background:#f3f7ff; margin:17px 0 0; padding:11px 13px; border-radius:0 8px 8px 0; font-size:11px; color:#405675; line-height:1.85 }
+.reason b { color:#2355a4 }
+.evidence-source { margin-top:12px; color:var(--muted); font-size:10px }
+.evidence-source code,.mono { font-family:var(--mono) }
+.checklist { list-style:none; margin:0; padding:0; display:grid; gap:0 }
+.checklist li { display:grid; grid-template-columns:24px 1fr; gap:9px; padding:12px 0; border-bottom:1px solid var(--stroke) }
+.checklist li:first-child { padding-top:0 }
+.checklist li:last-child { border-bottom:0; padding-bottom:2px }
+.step-number { width:23px; height:23px; border-radius:7px; background:#edf3ff; color:#3268bc; display:grid; place-items:center; font:750 11px var(--mono) }
+.checklist b { font-size:11px; display:block; margin-bottom:4px }
+.checklist p { font-size:10px; color:var(--muted); margin:0; line-height:1.8 }
+.signal { border-radius:10px; background:#fff8ed; border:1px solid #f2e4c6; padding:12px; display:flex; gap:9px; margin-top:16px; color:#78591f; font-size:10px }
+.signal .icon { margin-top:1px }
+.chain-card { padding:23px 24px }
+.chain-visual { display:grid; grid-template-columns:minmax(0,1fr) 35px minmax(0,1fr) 35px minmax(0,1fr); gap:8px; align-items:center; margin:17px 0 19px }
+.chain-node { min-width:0; border:1px solid #dfe7f1; border-radius:11px; padding:14px 13px; position:relative; background:#fbfcff; min-height:117px }
+.chain-node.root { background:#fff7f7; border-color:#ecc2c7 }
+.chain-node .node-top { font-size:10px; font-weight:800; color:#8b9aab; letter-spacing:.8px }
+.chain-node.root .node-top { color:var(--red) }
+.chain-node .node-id { display:block; font:800 24px/1.2 var(--mono); letter-spacing:-.6px; margin-top:8px }
+.chain-node .node-desc { color:var(--muted); font-size:10px; display:block; margin-top:7px; overflow-wrap:anywhere }
+.chain-node.root .node-id { color:#ae3444 }
+.chain-arrow { display:flex; flex-direction:column; align-items:center; gap:4px; min-width:0; color:#95a5b9 }
+.chain-arrow svg { width:28px; height:20px }
+.chain-arrow span { font-size:9px; color:#8594a9; white-space:nowrap }
+.chain-explainer { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:#f6f8fc; border:1px solid var(--stroke); padding:11px 13px; border-radius:9px; color:#52657c; font-size:11px }
+.chain-explainer strong { color:var(--ink) }
+.chain-explainer .separator { color:#a6b2c3 }
+.panel-note { font-size:10px; line-height:1.8; color:var(--muted); margin:13px 0 0 }
+.operation { border:1px solid #f0d6d7; border-radius:15px; background:#fff; overflow:hidden; box-shadow:var(--shadow) }
+.operation-top { padding:16px 23px; border-bottom:1px solid #f4e1e4; background:linear-gradient(90deg,#fff7f7,#fff); display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap }
+.operation-top h3 { margin:0; font-size:13px }
+.operation-content { display:grid; grid-template-columns:minmax(0,1.12fr) minmax(0,.88fr); gap:0 }
+.operation-code { padding:22px 23px; min-width:0 }
+.code-label { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:11px; color:#576982; font-size:11px; font-weight:700 }
+.code-surface { background:#101e32; color:#e8f1ff; border:1px solid #1b2b44; border-radius:10px; display:flex; justify-content:space-between; gap:10px; align-items:center; padding:15px 13px 15px 17px; min-width:0 }
+.code-surface code { font:13px/1.6 var(--mono); overflow-wrap:anywhere; word-break:break-word }
+.code-surface .kw { color:#e8ac72 }
+.copy-dark { color:#dce8fb; background:#ffffff17; border:1px solid #ffffff32; border-radius:7px; padding:6px 8px; font-size:10px; white-space:nowrap; display:inline-flex; align-items:center; gap:6px }
+.copy-dark:hover { background:#ffffff30 }
+.operation-code .emphasis { font-weight:720; font-size:11px; margin-top:12px; display:block; color:#a6454c }
+.operation-code p { color:var(--muted); font-size:10px; margin:6px 0 0; line-height:1.8 }
+.operation-warning { border-left:1px solid #f4e1e4; padding:21px 23px; background:#fffafb }
+.operation-warning h4 { margin:0 0 9px; color:#a13a45; font-size:11px; display:flex; align-items:center; gap:6px }
+.operation-warning ul { padding-left:17px; margin:0; color:#667085; font-size:10px; line-height:1.95 }
+.operation-footer { border-top:1px solid #f4e1e4; padding:12px 23px; display:flex; align-items:center; gap:10px; justify-content:space-between; flex-wrap:wrap; color:#6f8093; font-size:10px }
+.operation-footer strong { font-weight:700; color:#3e536d }
+.accordion-stack { overflow:hidden }
+.accordion { border-bottom:1px solid var(--stroke) }
+.accordion:last-child { border-bottom:0 }
+.accordion summary { list-style:none; display:flex; justify-content:space-between; gap:12px; align-items:center; cursor:pointer; padding:17px 23px; user-select:none }
+.accordion summary::-webkit-details-marker { display:none }
+.accordion summary:hover { background:#fbfcff }
+.accordion summary .summary-left { display:flex; align-items:center; gap:10px; font-size:12px; font-weight:750 }
+.accordion .summary-right { display:flex; gap:12px; align-items:center }
+.accordion .chevron { color:#8b9bae; transition:transform .2s }
+.accordion[open] summary .chevron { transform:rotate(180deg) }
+.accordion-content { border-top:1px solid var(--stroke); padding:6px 23px 19px }
+.table-scroll { overflow-x:auto; max-width:100% }
+table { width:100%; border-collapse:collapse; font-size:11px; text-align:left; min-width:710px }
+th { background:#f7f9fc; color:#6c7b90; font-size:10px; font-weight:800; white-space:nowrap; letter-spacing:.1px }
+th,td { border-bottom:1px solid #edf1f6; padding:12px 13px; vertical-align:top }
+tbody tr:last-child td { border-bottom:0 }
+tbody tr:hover { background:#fbfdff }
+/* 会话 / 事务状态颜色：阻塞链相关标红，当前未发现阻塞标绿 */
+tbody tr.row-blocked td { background:#fff0f2; }
+tbody tr.row-blocked td:first-child { box-shadow:inset 3px 0 0 #bd4050; }
+tbody tr.row-blocked:hover td { background:#ffe7ea; }
+tbody tr.row-clear td { background:#eaf7f0; }
+tbody tr.row-clear td:first-child { box-shadow:inset 3px 0 0 #287c60; }
+tbody tr.row-clear:hover td { background:#ddf1e7; }
+tbody tr.row-partial td { background:#fff7e8; }
+tbody tr.row-partial td:first-child { box-shadow:inset 3px 0 0 #c58a31; }
+td { color:#344961 }
+.state-legend { display:inline-flex; align-items:center; gap:13px; flex-wrap:wrap; }
+.state-legend span { display:inline-flex; align-items:center; gap:5px; }
+.state-legend i { display:inline-block; width:8px; height:8px; border-radius:50%; }
+.state-legend .legend-red { background:#bd4050; }
+.state-legend .legend-green { background:#287c60; }
+td code { font:11px/1.6 var(--mono); color:#294f82; overflow-wrap:anywhere }
+.sql-text { font:11px/1.65 var(--mono); color:#294f82; min-width:200px; max-width:430px; overflow-wrap:anywhere }
+.td-muted { color:#8190a3 }
+.table-tip { color:var(--muted); margin:10px 0 0; font-size:10px; line-height:1.8 }
+.quality-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px }
+.quality-tile { border:1px solid var(--stroke); background:var(--surface-soft); border-radius:11px; padding:14px 13px }
+.quality-tile .quality-caption { display:block; font-size:10px; color:#748499; margin-bottom:8px }
+.quality-tile strong { font:780 11px var(--mono); display:block; margin-bottom:6px }
+.quality-tile small { font-size:10px; color:var(--muted); line-height:1.6; display:block }
+.quality-alert { margin-top:13px; padding:11px 13px; border:1px solid #eedcb9; background:#fffaef; color:#836128; font-size:11px; border-radius:9px; line-height:1.8 }
+.collector { margin-top:13px; border:1px solid var(--stroke); border-radius:10px; overflow:hidden }
+.collector summary { list-style:none; padding:12px 15px; cursor:pointer; font-size:11px; font-weight:740; display:flex; align-items:center; justify-content:space-between }
+.collector summary::-webkit-details-marker { display:none }
+.collector summary:hover { background:#f8faff }
+.collector[open] summary { border-bottom:1px solid var(--stroke) }
+.collector .table-scroll { padding:8px 13px 12px }
+.appendix-top { display:flex; gap:14px; align-items:center; justify-content:space-between; flex-wrap:wrap; margin-bottom:13px }
+.appendix-top .display-count { font-size:11px; color:var(--muted) }
+.appendix-top strong { color:#324d70 }
+.searchbox { display:flex; align-items:center; gap:8px; border:1px solid var(--stroke-strong); border-radius:8px; padding:0 10px; background:#fff; min-width:min(100%,265px); color:#8393a7 }
+.searchbox input { border:0; outline:0; padding:9px 0; width:100%; min-width:0; background:transparent; color:var(--ink); font-size:11px }
+.searchbox:focus-within { border-color:#7ea7e2; box-shadow:0 0 0 3px #e8f1ff }
+.searchbox input::placeholder { color:#9caaba }
+.empty-filter { display:none; text-align:center; padding:24px 10px; color:var(--muted); font-size:11px }
+.foot { margin-top:34px; padding-top:19px; border-top:1px solid var(--stroke); display:flex; justify-content:space-between; gap:14px; flex-wrap:wrap; font-size:10px; color:#8c9aad }
+.toast { position:fixed; bottom:24px; right:24px; z-index:100; background:#192f4e; color:#fff; padding:11px 17px; border-radius:10px; box-shadow:0 10px 25px #0d203c2b; font-size:11px; opacity:0; transform:translateY(12px); pointer-events:none; transition:opacity .2s,transform .2s }
+.toast.show { opacity:1; transform:translateY(0) }
+@media(min-width:1500px){.main{padding-left:60px;padding-right:60px}}
+@media(max-width:1250px){.shell{grid-template-columns:205px minmax(0,1fr)}.sidebar{padding-left:12px;padding-right:12px}.main{padding:24px 25px 50px}.split{grid-template-columns:1fr 0.95fr}.facts{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-kpi{gap:9px}.metric{padding:15px 13px}}
+@media(max-width:1050px){.split{grid-template-columns:1fr}.hero-meta{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-kpi{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:800px){.shell{display:block}.sidebar{position:static;width:100%;height:auto;padding:14px 18px;display:block;border-right:0;border-bottom:1px solid var(--stroke)}.brand{padding:0;border:0}.nav-heading,.nav-links,.nav-end{display:none}.main{padding:20px 16px 44px}.toolbar{align-items:flex-start;gap:12px;flex-wrap:wrap}.hero{padding:24px}.quality-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.operation-content{grid-template-columns:1fr}.operation-warning{border-left:0;border-top:1px solid #f4e1e4}}
+@media(max-width:560px){.toolbar-actions{width:100%}.toolbar-actions .btn{flex:1}.hero-top{align-items:flex-start;flex-direction:column}.hero h1{font-size:25px;margin-top:17px}.hero-meta{gap:12px}.grid-kpi{grid-template-columns:repeat(2,minmax(0,1fr))}.metric-value{font-size:29px}.section-heading{align-items:start;flex-direction:column;gap:5px}.panel,.chain-card{padding:17px}.facts{grid-template-columns:repeat(2,minmax(0,1fr))}.chain-visual{grid-template-columns:1fr;gap:5px;margin:14px 0}.chain-node{min-height:0;padding:12px 14px}.chain-node .node-id{margin-top:3px;font-size:21px}.chain-node .node-desc{margin-top:2px}.chain-arrow{height:29px;gap:0}.chain-arrow svg{transform:rotate(90deg);width:23px;height:19px}.chain-arrow span{display:none}.accordion summary{padding:15px}.accordion-content{padding:6px 12px 15px}.quality-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.chain-explainer{gap:6px}.operation-top,.operation-code,.operation-warning,.operation-footer{padding-left:17px;padding-right:17px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{transition:none!important}}
+@page{size:A4; margin:13mm 11mm}
+@media print{
+  :root{--canvas:#fff;--shadow:none}
+  html{scroll-behavior:auto}
+  body{background:#fff; color:#17243a; print-color-adjust:exact; -webkit-print-color-adjust:exact}
+  .shell{display:block;max-width:none}.sidebar,.toolbar-actions,.searchbox,.copy-dark,.toast{display:none!important}
+  .main{max-width:none;padding:0}.toolbar{margin:0 0 12px}.preview-flag{margin-bottom:10px}
+  .hero{padding:20px 22px}.hero h1{font-size:25px;margin-top:12px}.hero-meta{margin-top:16px;padding-top:11px}
+  .section{margin-top:19px}.section-heading{margin-bottom:9px}.section-heading h2{font-size:14px}
+  .card,.operation,.metric,.quality-tile{box-shadow:none;break-inside:avoid}
+  .metric{padding:13px}.metric-value{font-size:25px}.grid-kpi{gap:7px}
+  .panel,.chain-card{padding:16px}.accordion{break-inside:avoid}.accordion summary{padding:11px 14px}.accordion-content{padding:4px 12px 12px}
+  .chain-node{padding:10px}.chain-node .node-id{font-size:20px}.chain-node .node-desc{font-size:9px}
+  .operation-content{grid-template-columns:1fr 1fr}.operation-code,.operation-warning{padding:13px}
+  th,td{padding:7px 8px}.table-scroll{overflow:visible}table{min-width:0;font-size:9px}.sql-text{min-width:0;font-size:9px}
+  .foot{margin-top:20px}
+}
+</style>
+</head>
+<body>
+<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-printer" viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v8H6zM18 12h.01"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M3 8l6-6m6 0 6 6M3 16l6 6m6 0 6-6"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.7 2.5 17.4A2 2 0 0 0 4.2 20h15.6a2 2 0 0 0 1.7-2.6L13.7 3.7a2 2 0 0 0-3.4 0zM12 9v4m0 4h.01"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zM9 12l2 2 4-4"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1 0l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7M14 11a5 5 0 0 0-7.1 0l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"/></symbol>
+</svg>
+<div class="shell">
+  <aside class="sidebar" aria-label="报告导航">
+    <div class="brand"><div class="brand-logo">DB</div><div><strong>DBA Toolkit</strong><small>SLOW DIAGNOSE / REPORT</small></div></div>
+    <div class="nav-heading">报告导航 / CONTENTS</div>
+    <nav class="nav-links" aria-label="页面章节">
+      <a href="#overview" class="active"><span class="num">01</span> 故障概况</a>
+      <a href="#assessment"><span class="num">02</span> 根阻塞判断</a>
+      <a href="#blocking"><span class="num">03</span> 阻塞传播链</a>
+      <a href="#action"><span class="num">04</span> 人工处置参考</a>
+      <a href="#evidence"><span class="num">05</span> 诊断证据</a>
+      <a href="#quality"><span class="num">06</span> 采集质量</a>
+      <a href="#appendix"><span class="num">07</span> 会话附录</a>
+    </nav>
+    <div class="nav-end"><b><span class="dot"></span> 只读诊断报告</b><p>本文件可离线打开；所展示的 KILL 仅为参考文本，不会连接数据库或执行任何处置操作。</p></div>
+  </aside>
+  <main class="main" id="top">
+    <div class="toolbar">
+      <div class="breadcrumb"><span>DATABASE OPERATIONS</span><span>/</span><b>慢 SQL 与阻塞诊断</b></div>
+      <div class="toolbar-actions">
+        <button type="button" class="btn" id="toggleDetails"><svg class="icon"><use href="#i-expand"/></svg> <span>展开全部</span></button>
+        <button type="button" class="btn" id="copySummary"><svg class="icon"><use href="#i-copy"/></svg> 复制摘要</button>
+        <button type="button" class="btn btn-primary" id="printReport"><svg class="icon"><use href="#i-printer"/></svg> 打印 / PDF</button>
+      </div>
+    </div>
+    <div class="preview-flag" role="note"><svg class="icon"><use href="#i-alert"/></svg><div><strong>模板预览 · 全部数据为模拟数据。</strong> 下列实例、会话、SQL、采集时间及统计数字均用于展示版式，不代表真实生产诊断结果。</div></div>
+    <header class="hero">
+      <div class="hero-top"><div class="overline">INCIDENT INSIGHT / BLOCKING DETECTED</div><div class="hero-risk"><span class="pulse"></span> 检测到阻塞 · 需人工复核</div></div>
+      <h1>检测到阻塞链，根会话持有未提交事务</h1>
+      <p class="hero-desc">当前快照识别 1 个根阻塞候选（Session 39），直接影响 Session 42，并经 Session 42 间接影响 Session 41。根会话处于 Sleep，但事务尚未提交。所有结论均基于本次采集快照。</p>
+      <div class="hero-meta">
+        <div><span>数据库版本</span><strong>MySQL 8.4.11</strong></div>
+        <div><span>实例标识</span><strong>mysql-test-01</strong></div>
+        <div><span>采集窗口</span><strong>2026-11-01 20:31:02 — 20:31:04</strong></div>
+        <div><span>快照一致性</span><strong>BEST_EFFORT</strong></div>
+      </div>
+    </header>
+
+    <section class="section" id="overview" aria-labelledby="overview-h">
+      <div class="section-heading"><div class="heading-left"><span class="section-number">01</span><h2 id="overview-h">故障概况</h2></div><p>当前快照 / 单次采集结果</p></div>
+      <div class="grid-kpi">
+        <div class="card metric danger"><div class="metric-top"><span>根阻塞候选</span><span class="metric-icon"><svg class="icon"><use href="#i-link"/></svg></span></div><div class="metric-value">1</div><div class="metric-bottom">ROOT BLOCKER</div></div>
+        <div class="card metric danger"><div class="metric-top"><span>被阻塞会话</span><span class="metric-icon"><svg class="icon"><use href="#i-alert"/></svg></span></div><div class="metric-value">2</div><div class="metric-bottom">1 直接 + 1 间接</div></div>
+        <div class="card metric caution"><div class="metric-top"><span>关联未提交事务</span><span class="metric-icon"><svg class="icon"><use href="#i-clock"/></svg></span></div><div class="metric-value">1</div><div class="metric-bottom">根会话事务仍存在</div></div>
+        <div class="card metric"><div class="metric-top"><span>采集活动会话</span><span class="metric-icon"><svg class="icon"><use href="#i-shield"/></svg></span></div><div class="metric-value">6</div><div class="metric-bottom">sessions 采集行数</div></div>
+        <div class="card metric"><div class="metric-top"><span>其他长运行 SQL</span><span class="metric-icon"><svg class="icon"><use href="#i-clock"/></svg></span></div><div class="metric-value">1</div><div class="metric-bottom">非阻塞候选</div></div>
+      </div>
+    </section>
+
+    <section class="section" id="assessment" aria-labelledby="assessment-h">
+      <div class="section-heading"><div class="heading-left"><span class="section-number">02</span><h2 id="assessment-h">根阻塞判断</h2></div><p>会话身份 + 事务 + 阻塞关系联合研判</p></div>
+      <div class="split">
+        <article class="card panel">
+          <div class="panel-header"><div><h3>首要排查对象</h3><div class="panel-subtitle">阻塞证据指向的根会话</div></div><span class="badge red">ROOT BLOCKER</span></div>
+          <div class="session-line"><span class="session-big">#39</span><span class="session-type">Sleep · 未提交事务</span><span class="session-note">当前并未执行 SQL ≠ 不持锁</span></div>
+          <div class="facts">
+            <div class="fact"><span>连接用户</span><strong>dba_test</strong></div>
+            <div class="fact"><span>客户端 / 主机</span><strong>APP-SRV-01 / 10.0.1.25</strong></div>
+            <div class="fact"><span>数据库</span><strong>orders</strong></div>
+            <div class="fact"><span>事务已持续</span><strong>00:02:00</strong></div>
+            <div class="fact"><span>受影响会话</span><strong class="hot">2 个（直接 / 间接）</strong></div>
+            <div class="fact"><span>应用标识</span><strong>OrderService</strong></div>
+          </div>
+          <div class="reason"><b>判断依据：</b>采集到的阻塞依赖关系以 #39 为起点；事务记录与该连接关联，且仍处于未提交状态。该证据支持将其列为<strong>根阻塞候选</strong>，不等于已确认业务根因。</div>
+          <details class="collector" data-expandable><summary>根会话 SQL 上下文 <span class="badge gray">最近 SQL · 非当前 SQL</span></summary><div class="table-scroll" style="padding:13px"><div class="code-surface"><code>UPDATE orders SET status = 'processing' WHERE order_id = 10086;</code><button type="button" class="copy-dark" data-copy="UPDATE orders SET status = 'processing' WHERE order_id = 10086;" aria-label="复制最近 SQL"><svg class="icon"><use href="#i-copy"/></svg> 复制</button></div><p class="table-tip">来源：最近执行语句记录。不能据此认定该 SQL 仍在执行，也不能单凭最近 SQL 确认具体加锁语句。</p></div></details>
+        </article>
+        <article class="card panel">
+          <div class="panel-header"><div><h3>建议核查顺序</h3><div class="panel-subtitle">先确认事实，再决定是否人工干预</div></div><span class="badge blue">DBA CHECKLIST</span></div>
+          <ol class="checklist">
+            <li><span class="step-number">1</span><div><b>核实当前阻塞仍存在</b><p>确认 #39 → #42 → #41 的锁等待关系在重新查询时仍成立。</p></div></li>
+            <li><span class="step-number">2</span><div><b>复核根连接身份与事务</b><p>核对 PROCESSLIST_ID、USER、HOST、事务 ID、开始时间，排除连接变化或 ID 复用。</p></div></li>
+            <li><span class="step-number">3</span><div><b>评估业务影响与回滚成本</b><p>联系业务方确认事务用途、是否可等待，评估终止后的回滚 I/O 与错误影响。</p></div></li>
+            <li><span class="step-number">4</span><div><b>由 DBA 决定是否手工执行</b><p>报告只提供参考命令；工具不会自动 KILL 或进行任何会话处置。</p></div></li>
+          </ol>
+          <div class="signal"><svg class="icon"><use href="#i-alert"/></svg><div>当前采集为 <b>BEST_EFFORT</b> 快照，且等待事件部分缺失。请勿将瞬时快照当作永久事实。</div></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="blocking" aria-labelledby="blocking-h">
+      <div class="section-heading"><div class="heading-left"><span class="section-number">03</span><h2 id="blocking-h">阻塞传播链</h2></div><p>按实际依赖方向展示，避免将间接受阻误画为并列</p></div>
+      <article class="card chain-card">
+        <div class="panel-header"><h3>阻塞链 #1</h3><span class="badge red">影响 2 个会话</span></div>
+        <div class="chain-visual" aria-label="阻塞链：39 阻塞 42，42 阻塞 41">
+          <div class="chain-node root"><div class="node-top">ROOT / 根阻塞</div><strong class="node-id">39</strong><span class="node-desc">Sleep · 未提交事务</span></div>
+          <div class="chain-arrow"><span>阻塞</span><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M1 7h25m-6-5 6 5-6 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+          <div class="chain-node"><div class="node-top">LEVEL 1 / 直接受阻</div><strong class="node-id">42</strong><span class="node-desc">等待锁 · 00:01:42</span></div>
+          <div class="chain-arrow"><span>阻塞</span><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M1 7h25m-6-5 6 5-6 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+          <div class="chain-node"><div class="node-top">LEVEL 2 / 间接受阻</div><strong class="node-id">41</strong><span class="node-desc">等待锁 · 00:01:15</span></div>
+        </div>
+        <div class="chain-explainer"><strong>1</strong> 个根会话 <span class="separator">·</span> <strong>1</strong> 个直接受阻 <span class="separator">·</span> <strong>1</strong> 个间接受阻 <span class="separator">·</span> <strong>2</strong> 条阻塞依赖边</div>
+        <p class="panel-note">展示方向为阻塞者 → 等待者。#41 的直接阻塞者是 #42，而不是 #39；#39 是其上游根阻塞候选。</p>
+      </article>
+    </section>
+
+    <section class="section" id="action" aria-labelledby="action-h">
+      <div class="section-heading"><div class="heading-left"><span class="section-number">04</span><h2 id="action-h">人工处置参考</h2></div><p>仅生成可检查文本 · 不执行数据库操作</p></div>
+      <article class="operation">
+        <div class="operation-top"><h3>目标会话 <span class="mono">#39</span> <span class="badge amber" style="margin-left:8px">需人工确认</span></h3><span class="badge gray">来源：阻塞关系 + 事务证据</span></div>
+        <div class="operation-content">
+          <div class="operation-code"><div class="code-label"><span>MySQL · 会话终止参考语句</span><span class="badge blue">仅复制文本</span></div><div class="code-surface"><code><span class="kw">KILL CONNECTION</span> 39;</code><button type="button" class="copy-dark" data-copy="KILL CONNECTION 39;" aria-label="复制 KILL 参考命令"><svg class="icon"><use href="#i-copy"/></svg> 复制命令</button></div><span class="emphasis">Toolkit 未执行，报告也不具备执行能力。</span><p>复制动作仅将命令文本放入剪贴板，是否执行由 DBA 在独立的数据库客户端中决定。</p></div>
+          <div class="operation-warning"><h4><svg class="icon"><use href="#i-alert"/></svg> 人工执行前必须复核</h4><ul><li>连接 ID 是否仍为 39，防止已退出或复用。</li><li>用户名、来源主机、事务 ID 与开始时间是否匹配。</li><li>终止会话是否触发长时间回滚、额外 I/O 或业务失败。</li><li>取得适当的业务确认，并重新确认现场证据。</li></ul></div>
+        </div>
+        <div class="operation-footer"><span><strong>身份复核：</strong> PROCESSLIST_ID / USER / HOST / TRX_ID / TRX_STARTED</span><span class="badge green">执行状态：未执行</span></div>
+      </article>
+    </section>
+
+    <section class="section" id="evidence" aria-labelledby="evidence-h">
+      <div class="section-heading"><div class="heading-left"><span class="section-number">05</span><h2 id="evidence-h">诊断证据</h2></div><p class="state-legend"><span><i class="legend-red"></i>阻塞链相关</span><span><i class="legend-green"></i>当前未发现阻塞</span></p></div>
+      <div class="card accordion-stack">
+        <details class="accordion" open data-expandable><summary><span class="summary-left">被阻塞会话 <span class="badge red">2 条</span></span><span class="summary-right"><span class="badge gray">按阻塞链顺序</span><svg class="icon chevron"><use href="#i-chevron"/></svg></span></summary><div class="accordion-content"><div class="table-scroll"><table><thead><tr><th>会话 ID</th><th>直接阻塞者</th><th>用户</th><th>来源主机</th><th>状态</th><th>等待时间</th><th>当前 SQL</th></tr></thead><tbody><tr class="row-blocked" data-diagnostic-state="blocked"><td><b class="mono">42</b></td><td class="mono">39</td><td>app_user</td><td>APP-SRV-02</td><td><span class="badge red">等待锁</span></td><td class="mono">00:01:42</td><td class="sql-text">UPDATE orders SET ... WHERE order_id = 10086</td></tr><tr class="row-blocked" data-diagnostic-state="blocked"><td><b class="mono">41</b></td><td class="mono">42</td><td>app_user</td><td>APP-SRV-03</td><td><span class="badge red">等待锁</span></td><td class="mono">00:01:15</td><td class="sql-text">SELECT * FROM orders WHERE order_id = 10086 FOR UPDATE</td></tr></tbody></table></div></div></details>
+        <details class="accordion" data-expandable><summary><span class="summary-left">非阻塞长运行 SQL <span class="badge blue">1 条</span></span><span class="summary-right"><svg class="icon chevron"><use href="#i-chevron"/></svg></span></summary><div class="accordion-content"><div class="table-scroll"><table><thead><tr><th>会话 ID</th><th>用户</th><th>状态</th><th>运行时间</th><th>原生状态 / 等待信息</th><th>SQL 摘要</th></tr></thead><tbody><tr class="row-clear" data-diagnostic-state="clear"><td class="mono">55</td><td>report_user</td><td>执行中</td><td class="mono">00:00:48</td><td>Sending data</td><td class="sql-text">SELECT ... FROM order_detail JOIN ...</td></tr></tbody></table></div><p class="table-tip">此 SQL 与当前阻塞链无已展示的关联证据，不应直接判定为阻塞来源。</p></div></details>
+        <details class="accordion" data-expandable><summary><span class="summary-left">未提交事务明细 <span class="badge amber">1 条</span></span><span class="summary-right"><svg class="icon chevron"><use href="#i-chevron"/></svg></span></summary><div class="accordion-content"><div class="table-scroll"><table><thead><tr><th>关联会话</th><th>事务标识（示例）</th><th>事务开始时间</th><th>持续时长</th><th>状态</th><th>关联证据</th></tr></thead><tbody><tr class="row-blocked" data-diagnostic-state="blocked"><td class="mono">39</td><td class="mono">TRX-88421</td><td class="mono">20:29:04</td><td class="mono">120 秒</td><td><span class="badge amber">未提交</span></td><td>根阻塞关联</td></tr></tbody></table></div></div></details>
+        <details class="accordion" data-expandable><summary><span class="summary-left">根会话身份信息</span><span class="summary-right"><svg class="icon chevron"><use href="#i-chevron"/></svg></span></summary><div class="accordion-content"><div class="table-scroll"><table><thead><tr><th>会话 ID</th><th>用户</th><th>主机名</th><th>客户端 IP</th><th>应用标识</th><th>数据库</th></tr></thead><tbody><tr class="row-blocked" data-diagnostic-state="blocked"><td class="mono">39</td><td>dba_test</td><td>APP-SRV-01</td><td class="mono">10.0.1.25</td><td>OrderService</td><td>orders</td></tr></tbody></table></div></div></details>
+        <details class="accordion" data-expandable><summary><span class="summary-left">等待事件与采集限制 <span class="badge amber">PARTIAL</span></span><span class="summary-right"><svg class="icon chevron"><use href="#i-chevron"/></svg></span></summary><div class="accordion-content"><p class="table-tip">本演示仅提供“等待锁”摘要。实际报告应保留数据库原生等待事件 / 等待类型及采集来源；不可见字段应明确标为未知，而不是“无等待”。当前 waits Collector 为 PARTIAL。</p></div></details>
+      </div>
+    </section>
+
+    <section class="section" id="quality" aria-labelledby="quality-h">
+      <div class="section-heading"><div class="heading-left"><span class="section-number">06</span><h2 id="quality-h">采集质量与可信度</h2></div><p>区分「未发现」与「未采集 / 部分可见」</p></div>
+      <div class="card panel">
+        <div class="quality-grid">
+          <div class="quality-tile"><span class="quality-caption">会话采集 / sessions</span><strong style="color:var(--green)">COMPLETE</strong><small>6 行 · 未截断</small></div>
+          <div class="quality-tile"><span class="quality-caption">阻塞关系 / blocking</span><strong style="color:var(--green)">COMPLETE</strong><small>2 条依赖关系</small></div>
+          <div class="quality-tile"><span class="quality-caption">事务采集 / transactions</span><strong style="color:var(--green)">COMPLETE</strong><small>1 行 · 已关联</small></div>
+          <div class="quality-tile"><span class="quality-caption">等待事件 / waits</span><strong style="color:var(--amber)">PARTIAL</strong><small>部分事件不可见</small></div>
+        </div>
+        <div class="quality-alert"><b>完整性提示：</b>等待事件并未完整采集；BEST_EFFORT 表示不同 Collector 的结果并非严格一致时点。会话附录展示了 4 / 6 条，不代表其余 2 条不存在。</div>
+        <details class="collector" data-expandable><summary><span>Collector 采集执行明细</span><svg class="icon"><use href="#i-chevron"/></svg></summary><div class="table-scroll"><table><thead><tr><th>Collector</th><th>开始</th><th>结束</th><th>耗时</th><th>行数</th><th>状态</th><th>说明</th></tr></thead><tbody><tr><td><code>sessions</code></td><td>20:31:02.010</td><td>20:31:02.030</td><td>20 ms</td><td>6</td><td><span class="badge green">COMPLETE</span></td><td>正常</td></tr><tr><td><code>blocking</code></td><td>20:31:02.031</td><td>20:31:02.048</td><td>17 ms</td><td>2</td><td><span class="badge green">COMPLETE</span></td><td>正常</td></tr><tr><td><code>transactions</code></td><td>20:31:02.049</td><td>20:31:02.061</td><td>12 ms</td><td>1</td><td><span class="badge green">COMPLETE</span></td><td>正常</td></tr><tr><td><code>waits</code></td><td>20:31:02.062</td><td>20:31:02.083</td><td>21 ms</td><td>—</td><td><span class="badge amber">PARTIAL</span></td><td>部分等待事件不可见</td></tr></tbody></table></div></details>
+      </div>
+    </section>
+
+    <section class="section" id="appendix" aria-labelledby="appendix-h">
+      <div class="section-heading"><div class="heading-left"><span class="section-number">07</span><h2 id="appendix-h">会话明细附录</h2></div><p>红色：阻塞源头 / 被阻塞会话　绿色：当前未发现阻塞</p></div>
+      <div class="card panel">
+        <div class="appendix-top"><span class="display-count">本次采集 <strong>6</strong> 行 · 当前报告展示 <strong>4</strong> 行 · 省略 <strong>2</strong> 行 <span id="filteredCount"></span></span><label class="searchbox"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="sessionSearch" aria-label="搜索已展示的会话" placeholder="筛选会话 ID、用户、SQL…"></label></div>
+        <div class="table-scroll"><table id="sessionTable"><thead><tr><th>会话 ID</th><th>用户</th><th>状态</th><th>运行时间</th><th>直接阻塞者</th><th>SQL 来源</th><th>SQL 摘要</th></tr></thead><tbody>
+          <tr class="row-blocked" data-diagnostic-state="blocked"><td><b class="mono">39</b></td><td>dba_test</td><td><span class="badge red">ROOT / Sleep</span></td><td class="td-muted">—</td><td class="td-muted">—</td><td>最近 SQL</td><td class="sql-text">UPDATE orders ...</td></tr>
+          <tr class="row-blocked" data-diagnostic-state="blocked"><td><b class="mono">42</b></td><td>app_user</td><td><span class="badge red">Waiting</span></td><td>102 秒</td><td class="mono">39</td><td>当前 SQL</td><td class="sql-text">UPDATE orders ...</td></tr>
+          <tr class="row-blocked" data-diagnostic-state="blocked"><td><b class="mono">41</b></td><td>app_user</td><td><span class="badge red">Waiting</span></td><td>75 秒</td><td class="mono">42</td><td>当前 SQL</td><td class="sql-text">SELECT ... FOR UPDATE</td></tr>
+          <tr class="row-clear" data-diagnostic-state="clear"><td><b class="mono">55</b></td><td>report_user</td><td><span class="badge green">Running · 未阻塞</span></td><td>48 秒</td><td class="td-muted">—</td><td>当前 SQL</td><td class="sql-text">SELECT ... JOIN ...</td></tr>
+        </tbody></table></div>
+        <div id="noResults" class="empty-filter">已展示的 4 条会话中没有匹配项；未展示的 2 条不会被本地筛选搜索。</div>
+        <p class="table-tip">数据保留原有模板中的有界展示方式。筛选结果仅用于定位本页已展示行，不改变采集总数，也不代表全库搜索。</p>
+      </div>
+    </section>
+    <footer class="foot"><span>DBA Toolkit / Slow Diagnose · 优化版静态模板</span><span>自包含 · 离线可用 · 纯演示数据 · 无数据库连接或自动处置</span></footer>
+  </main>
+</div>
+<div class="toast" role="status" aria-live="polite" id="toast"></div>
+<script>
+(function(){
+  'use strict';
+  var toastNode = document.getElementById('toast');
+  var toastTimer = null;
+  function toast(message){
+    toastNode.textContent=message;
+    toastNode.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer=setTimeout(function(){toastNode.classList.remove('show');},2600);
+  }
+  function fallbackCopy(value){
+    var t=document.createElement('textarea');
+    t.value=value; t.setAttribute('readonly','');
+    t.style.position='fixed';t.style.opacity='0';document.body.appendChild(t);
+    t.select();
+    var ok=false;
+    try{ok=document.execCommand('copy');}catch(e){ok=false;}
+    document.body.removeChild(t);
+    return ok;
+  }
+  function copyText(value,description){
+    if(navigator.clipboard && window.isSecureContext){
+      navigator.clipboard.writeText(value).then(function(){toast(description+'已复制（仅文本，未执行）');}).catch(function(){
+        toast(fallbackCopy(value)?description+'已复制（仅文本，未执行）':'复制失败，请手动选中复制');
+      });
+    }else{toast(fallbackCopy(value)?description+'已复制（仅文本，未执行）':'复制失败，请手动选中复制');}
+  }
+  document.querySelectorAll('[data-copy]').forEach(function(button){
+    button.addEventListener('click',function(){copyText(button.getAttribute('data-copy'),'SQL 文本');});
+  });
+  document.getElementById('copySummary').addEventListener('click',function(){
+    copyText([
+      '【DBA Toolkit · Slow Diagnose（演示数据）】',
+      '实例：mysql-test-01 / MySQL 8.4.11',
+      '采集窗口：2026-11-01 20:31:02 — 20:31:04（BEST_EFFORT）',
+      '根阻塞候选：Session 39，Sleep，存在未提交事务（120 秒）',
+      '阻塞链：39 → 42 → 41；直接受阻 1，间接受阻 1',
+      '来源：dba_test / APP-SRV-01 / 10.0.1.25 / OrderService',
+      '证据限制：waits 采集 PARTIAL；本报告会话附录展示 4 / 6 行。',
+      '参考命令：KILL CONNECTION 39;（未执行）',
+      '注意：人工操作前必须重新核实连接身份、阻塞关系及事务回滚风险。'
+    ].join('\n'),'诊断摘要');
+  });
+  var allDetails=Array.from(document.querySelectorAll('details[data-expandable]'));
+  var toggle=document.getElementById('toggleDetails');
+  function updateToggle(){
+    var expanded=allDetails.every(function(item){return item.open;});
+    toggle.querySelector('span').textContent=expanded?'收起全部':'展开全部';
+    toggle.setAttribute('aria-expanded',expanded?'true':'false');
+  }
+  toggle.addEventListener('click',function(){
+    var target=!allDetails.every(function(item){return item.open;});
+    allDetails.forEach(function(item){item.open=target;});updateToggle();
+  });
+  allDetails.forEach(function(d){d.addEventListener('toggle',updateToggle);});
+  updateToggle();
+  var search=document.getElementById('sessionSearch');
+  var rows=Array.from(document.querySelectorAll('#sessionTable tbody tr'));
+  var count=document.getElementById('filteredCount');
+  var empty=document.getElementById('noResults');
+  search.addEventListener('input',function(){
+    var q=search.value.trim().toLocaleLowerCase();var visible=0;
+    rows.forEach(function(row){
+      var match=/^\d+$/.test(q) ? row.cells[0].textContent.trim()===q : row.textContent.toLocaleLowerCase().includes(q);
+      row.hidden=!match;row.style.display=match?'':'none';if(match){visible++;}
+    });
+    count.textContent=q?' · 筛选命中 '+visible+' / 4 行':'';
+    empty.style.display=visible?'none':'block';
+  });
+  // 打印时临时展开详情，打印完成后恢复浏览器内原状态，避免遗漏隐藏的表格。
+  var beforePrintStates=null;
+  function preparePrint(){
+    if(beforePrintStates!==null)return;
+    beforePrintStates=allDetails.map(function(d){return d.open;});
+    allDetails.forEach(function(d){d.open=true;});
+    rows.forEach(function(r){r.style.display='';r.hidden=false;});
+    empty.style.display='none';
+  }
+  function restorePrint(){
+    if(beforePrintStates===null)return;
+    allDetails.forEach(function(d,i){d.open=beforePrintStates[i];});
+    beforePrintStates=null;
+    search.dispatchEvent(new Event('input'));
+    updateToggle();
+  }
+  window.addEventListener('beforeprint',preparePrint);
+  window.addEventListener('afterprint',restorePrint);
+  document.getElementById('printReport').addEventListener('click',function(){window.print();});
+  var links=Array.from(document.querySelectorAll('.nav-links a'));
+  links.forEach(function(link){link.addEventListener('click',function(){links.forEach(function(a){a.classList.remove('active');});link.classList.add('active');});});
+  if('IntersectionObserver' in window){
+    var observer=new IntersectionObserver(function(entries){
+      entries.filter(function(e){return e.isIntersecting;}).forEach(function(entry){
+        links.forEach(function(link){link.classList.toggle('active',link.getAttribute('href')==='#'+entry.target.id);});
+      });
+    },{rootMargin:'-12% 0px -72% 0px',threshold:0});
+    document.querySelectorAll('main section[id]').forEach(function(section){observer.observe(section);});
+  }
+})();
+</script>
+</body>
+</html>

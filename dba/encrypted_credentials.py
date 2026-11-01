@@ -15,11 +15,10 @@ import os
 import secrets
 import stat
 import sys
-import tempfile
 import warnings
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from dba.credential_session import CredentialSessionClient
 from dba.credentials import (
@@ -181,6 +180,14 @@ class EncryptedFileCredentialStore(CredentialStore):
         self._unlocked: dict[str, Credential] | None = None
         self._cached_master: str | None = None
         self._session_key: bytes | None = None
+        self._read_binding: tuple[int, int, str] | None = None
+
+    @staticmethod
+    def _deny_write() -> NoReturn:
+        raise ToolkitError("CredentialStoreReadOnly",
+                           "Legacy JSON Credential Store is read-only. Explicitly migrate with "
+                           "`dba credentials migrate --source <old-file> --destination <new-private-directory>/credentials.db` "
+                           "and select --backend sqlite. No Store was changed or selected automatically.")
 
     @property
     def backend_name(self) -> str:
@@ -285,7 +292,22 @@ class EncryptedFileCredentialStore(CredentialStore):
         self._require_crypto()
         self._check_location()
         try:
-            raw = self.path.read_bytes()
+            if os.name == "nt":
+                from dba.credential_session import _windows_store_snapshot
+                stream, fingerprint, identity = _windows_store_snapshot(str(self.path))
+                try:
+                    raw = stream.read()
+                    binding = (*identity, fingerprint)
+                finally:
+                    stream.close()
+            else:
+                with self.path.open("rb") as stream:
+                    observed = os.fstat(stream.fileno())
+                    raw = stream.read()
+                    binding = (observed.st_dev, observed.st_ino, hashlib.sha256(raw).hexdigest())
+            if self._read_binding is not None and binding != self._read_binding:
+                self.lock()
+                raise ToolkitError("CredentialStoreChanged", "Legacy Store changed after unlock; open and authenticate the target again.")
             header = json.loads(raw)
         except (OSError, UnicodeError, json.JSONDecodeError):
             raise ToolkitError("CredentialStoreCorrupted", "Credential Store Corrupted or Authentication Failed. Preserve a backup before recovery.") from None
@@ -319,8 +341,10 @@ class EncryptedFileCredentialStore(CredentialStore):
             raise ToolkitError("CredentialStoreCorrupted", "Credential Store Corrupted or Authentication Failed. Preserve a backup before recovery.") from None
         if len(salt) < SALT_BYTES or len(nonce) != NONCE_BYTES or len(ciphertext) < 16:
             raise ToolkitError("CredentialStoreCorrupted", "Credential Store Corrupted or Authentication Failed. Preserve a backup before recovery.")
-        password = self._cached_master or self._password_provider("Unlock encrypted credential store: ")
-        key = self._derive(password, salt, params)
+        key = self._session_key
+        if key is None:
+            password = self._password_provider("Unlock encrypted credential store: ")
+            key = self._derive(password, salt, params)
         AESGCM, _, _ = self._crypto()
         try:
             plaintext = AESGCM(key).decrypt(nonce, ciphertext, self._aad(header))
@@ -339,7 +363,8 @@ class EncryptedFileCredentialStore(CredentialStore):
                 decoded[checked_alias] = Credential(value["username"], value["password"])
         except Exception:
             raise ToolkitError("CredentialStoreUnlockFailed", self._unlock_message()) from None
-        self._cached_master = password
+        self._read_binding = binding
+        self._cached_master = None
         self._unlocked = decoded
         self._session_key = key
         return header, decoded
@@ -355,42 +380,7 @@ class EncryptedFileCredentialStore(CredentialStore):
     def persist_session_credentials(
         self, credentials: dict[str, Credential], key: bytes, expected_fingerprint: str
     ) -> str:
-        """Atomically rewrite an already-unlocked store without retaining its master password."""
-        self._require_crypto()
-        self._check_location()
-        with _StoreLock(self.path.with_suffix(self.path.suffix + ".lock")):
-            try:
-                raw = self.path.read_bytes()
-                current = hashlib.sha256(raw).hexdigest()
-            except OSError:
-                raise ToolkitError("CredentialStoreFailed", "Encrypted credential store could not be verified.") from None
-            if not secrets.compare_digest(current, expected_fingerprint):
-                raise ToolkitError("CredentialStoreChanged", "Encrypted credential store changed during session save.")
-            try:
-                header = json.loads(raw)
-                if (not isinstance(header, dict) or self._canonical(header) != raw
-                        or header.get("format") != FORMAT or header.get("version") != FORMAT_VERSION):
-                    raise ValueError
-                AESGCM, _, _ = self._crypto()
-                nonce = secrets.token_bytes(NONCE_BYTES)
-                updated_header = dict(header)
-                updated_header["nonce"] = base64.b64encode(nonce).decode("ascii")
-                payload = self._canonical({
-                    "store_version": 1,
-                    "credentials": {alias: {"username": item.username, "password": item.password}
-                                    for alias, item in credentials.items()},
-                })
-                updated_header["ciphertext"] = base64.b64encode(
-                    AESGCM(key).encrypt(nonce, payload, self._aad(updated_header))
-                ).decode("ascii")
-                encoded = self._canonical(updated_header)
-            except (KeyError, TypeError, ValueError):
-                raise ToolkitError("CredentialStoreCorrupted", "Credential Store Corrupted or Authentication Failed.") from None
-            self._atomic_write(encoded)
-        self._unlocked = None
-        self._cached_master = None
-        self._session_key = None
-        return hashlib.sha256(encoded).hexdigest()
+        self._deny_write()
 
     def _encode(self, credentials: dict[str, Credential], password: str) -> bytes:
         AESGCM, _, _ = self._crypto()
@@ -416,139 +406,39 @@ class EncryptedFileCredentialStore(CredentialStore):
         return self._canonical(header)
 
     def _atomic_write(self, encoded: bytes) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if os.name != "nt":
-            os.chmod(self.path.parent, 0o700)
-        fd, temp_name = tempfile.mkstemp(prefix=".credentials-", suffix=".tmp", dir=self.path.parent)
-        temp = Path(temp_name)
-        replaced = False
-        try:
-            if os.name != "nt":
-                os.chmod(temp, 0o600)
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp, self.path)
-            replaced = True
-            if os.name != "nt":
-                os.chmod(self.path, 0o600)
-                directory_fd = os.open(self.path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-        except Exception:
-            try:
-                temp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            message = ("Credential store replacement completed but durability could not be confirmed. "
-                       "Preserve the current file and verify it before retrying." if replaced else
-                       "Credential store update failed; the existing store was preserved.")
-            raise ToolkitError("CredentialStoreWriteFailed", message) from None
+        self._deny_write()
 
     def initialize(self, password: str) -> None:
-        self._require_crypto()
-        if len(password) < MIN_MASTER_PASSWORD_LENGTH:
-            raise ToolkitError("WeakMasterPassword", "Master password must be at least 12 characters.")
-        self._check_location()
-        with _StoreLock(self.path.with_suffix(self.path.suffix + ".lock")):
-            if self.path.exists():
-                raise ToolkitError("CredentialStoreExists", "Credential store already exists; it was not overwritten.")
-            self._atomic_write(self._encode({}, password))
-        self._cached_master = password
-        self._unlocked = {}
+        self._deny_write()
 
     def rekey(self, old_password: str, new_password: str) -> None:
-        self._require_crypto()
-        if len(new_password) < MIN_MASTER_PASSWORD_LENGTH:
-            raise ToolkitError("WeakMasterPassword", "Master password must be at least 12 characters.")
-        self._cached_master = old_password
-        with _StoreLock(self.path.with_suffix(self.path.suffix + ".lock")):
-            _, credentials = self._read_container()
-            self._atomic_write(self._encode(credentials, new_password))
-        self._cached_master = new_password
-        self._unlocked = credentials.copy()
+        self._deny_write()
 
     def _write_changed(self, change: Callable[[dict[str, Credential]], dict[str, Credential]]) -> None:
-        with _StoreLock(self.path.with_suffix(self.path.suffix + ".lock")):
-            _, current = self._read_container()
-            password = self._cached_master
-            if password is None:
-                raise ToolkitError("CredentialStoreUnlockFailed", self._unlock_message())
-            updated = change(current)
-            self._atomic_write(self._encode(updated, password))
-        self._unlocked = updated.copy()
+        self._deny_write()
 
     def get(self, alias: str) -> Credential | None:
         self._require_crypto()
         checked = validate_alias(alias)
         if not self.path.exists():
             return None
-        if self._unlocked is None:
-            _, credentials = self._read_container()
-        else:
-            credentials = self._unlocked
+        _, credentials = self._read_container()
         return credentials.get(checked)
 
     def set(self, alias: str, credential: Credential) -> None:
-        self._require_crypto()
-        checked = validate_alias(alias)
-        if not self.path.exists():
-            raise ToolkitError("CredentialStoreNotInitialized", "Run `dba credentials init --backend encrypted` first.")
-        if self._unlocked is None:
-            self._read_container()
-        def update(credentials: dict[str, Credential]) -> dict[str, Credential]:
-            updated = credentials.copy()
-            updated[checked] = credential
-            return updated
-        self._write_changed(update)
+        self._deny_write()
 
     def set_if_absent(self, alias: str, credential: Credential) -> None:
-        self._require_crypto()
-        checked = validate_alias(alias)
-        if not self.path.exists():
-            raise ToolkitError("CredentialStoreNotInitialized", "Run `dba credentials init --backend encrypted` first.")
-        if self._unlocked is None:
-            self._read_container()
-
-        def add(credentials: dict[str, Credential]) -> dict[str, Credential]:
-            if checked in credentials:
-                raise ToolkitError("CredentialAliasExists", "Credential alias already exists in target backend.")
-            updated = credentials.copy()
-            updated[checked] = credential
-            return updated
-
-        self._write_changed(add)
+        self._deny_write()
 
     def delete(self, alias: str) -> bool:
-        self._require_crypto()
-        checked = validate_alias(alias)
-        if not self.path.exists():
-            return False
-        if self._unlocked is None:
-            self._read_container()
-        existed = False
-        def remove(credentials: dict[str, Credential]) -> dict[str, Credential]:
-            nonlocal existed
-            updated = credentials.copy()
-            existed = checked in updated
-            updated.pop(checked, None)
-            return updated
-        if checked not in (self._unlocked or {}):
-            return False
-        self._write_changed(remove)
-        return existed
+        self._deny_write()
 
     def aliases(self) -> tuple[str, ...]:
         self._require_crypto()
         if not self.path.exists():
             return ()
-        if self._unlocked is None:
-            _, credentials = self._read_container()
-        else:
-            credentials = self._unlocked
+        _, credentials = self._read_container()
         return tuple(sorted(credentials))
 
     def lock(self) -> None:
@@ -565,12 +455,16 @@ class CredentialResolver(CredentialProvider):
                  credential_prompt: Callable[[str, str], Credential] = prompt_jit_credential,
                  save_prompt: Callable[[], bool] = confirm_save_credential,
                  ephemeral_prompt: Callable[..., bool] = confirm_ephemeral_credential) -> None:
-        if mode not in {"auto", "os", "encrypted", "interactive"}:
+        if mode not in {"auto", "os", "encrypted", "sqlite", "interactive"}:
             raise ValueError("Unsupported credential backend selection")
+        if mode == "sqlite":
+            from dba.sqlite_credentials import SQLiteCredentialStore
+            if not isinstance(encrypted_store, SQLiteCredentialStore):
+                raise ToolkitError("CredentialBackendUnsupported", "SQLite must be selected with its own Store; no fallback is allowed.")
         self.os_store = os_store
         self.encrypted_store = encrypted_store
         self.fallback = fallback
-        self.mode = mode
+        self.mode = "encrypted" if mode == "sqlite" else mode
         self.database_id = database_id
         self.credential_prompt = credential_prompt
         self.save_prompt = save_prompt
@@ -588,7 +482,7 @@ class CredentialResolver(CredentialProvider):
         if self.mode == "encrypted":
             session_client = CredentialSessionClient()
             active_session = session_client.status().get("status") == "UNLOCKED"
-            session_credential = session_client.get(checked)
+            session_credential = session_client.get(checked, self.encrypted_store.path)
             if session_credential is not None:
                 self.last_backend = "Encrypted Credential Session"
                 return session_credential
@@ -612,7 +506,7 @@ class CredentialResolver(CredentialProvider):
         if self.mode == "auto":
             session_client = CredentialSessionClient()
             active_session = session_client.status().get("status") == "UNLOCKED"
-            session_credential = session_client.get(checked)
+            session_credential = session_client.get(checked, self.encrypted_store.path)
             if session_credential is not None:
                 self.last_backend = "Encrypted Credential Session"
                 return session_credential
@@ -644,17 +538,19 @@ class CredentialResolver(CredentialProvider):
         if target is None:
             sys.stderr.write("No secure persistent credential backend is available.\n"
                              "This credential will be used for this command only.\n"
-                             "To enable encrypted storage: dba credentials init --backend encrypted\n")
+                             "For an explicit writable encrypted Store, initialize SQLite with:\n"
+                             "  dba credentials init --backend sqlite\n"
+                             "Legacy JSON encrypted Stores are read-only and are never selected as a write target.\n")
             self.last_backend = "Ephemeral / This Run Only"
             return credential
         try:
             if target is self.encrypted_store and session_client is not None:
                 status = session_client.status()
                 if status.get("status") == "UNLOCKED":
-                    response = session_client.save(alias, credential)
+                    response = session_client.save(alias, credential, self.encrypted_store.path)
                     if response.get("status") == "ALREADY_EXISTS":
                         raise ToolkitError("CredentialAliasExists", "Credential alias already exists in target backend.")
-                    if response.get("status") != "SAVED_INVALIDATED":
+                    if response.get("status") not in {"SAVED_INVALIDATED", "SAVED"}:
                         raise ToolkitError("CredentialStoreFailed", "Credential could not be stored securely.")
                     self.last_backend = target.backend_name
                     return credential
@@ -666,6 +562,12 @@ class CredentialResolver(CredentialProvider):
             else:
                 target.set(alias, credential)
         except ToolkitError as exc:
+            # A read-only legacy Store is a deliberate security boundary, not
+            # a transient persistence failure. Never offer an ephemeral/JIT
+            # fallback that would hide the fact that this selected Store
+            # cannot be written or imply that another Store was selected.
+            if exc.error_type == "CredentialStoreReadOnly":
+                raise
             safe_ephemeral = exc.error_type in {
                 "CredentialStoreUnavailable", "CredentialStoreNotInitialized",
             }

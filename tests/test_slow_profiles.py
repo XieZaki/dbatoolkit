@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 from dba.collectors import CollectorResult
 from dba.core import DatabaseType
-from dba.permissions import PermissionStatus, requirements_for_profile
 from dba.registry import SqlScriptRegistry
 from dba.slow_profiles import (
     SLOW_OPTIONAL_COLLECTORS,
@@ -15,7 +14,6 @@ from dba.slow_profiles import (
     SLOW_SQL_PROFILES,
     collection_completeness,
     normalize_slow_result,
-    profile_permission_status,
     script_for_slow,
     validate_slow_profiles,
 )
@@ -30,7 +28,7 @@ from dba.versioning import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_all_slow_routes_bind_sql_permissions_parser_and_applicability() -> None:
+def test_all_slow_routes_bind_sql_parser_and_applicability() -> None:
     registry = SqlScriptRegistry(ROOT / "sql")
     assert PROFILE_RESOLVER.validate() == ()
     assert validate_slow_profiles(registry, PROFILE_BINDINGS) == ()
@@ -40,9 +38,6 @@ def test_all_slow_routes_bind_sql_permissions_parser_and_applicability() -> None
         assert binding.sql_profile_id in SLOW_SQL_PROFILES
         assert binding.parser_contract_id in SLOW_PARSER_CONTRACTS
         assert SLOW_REQUIRED_COLLECTORS[binding.sql_profile_id]
-        assert binding.required_privileges == requirements_for_profile(
-            binding.permission_profile_id
-        ).required
 
 
 def test_validate_fails_when_a_slow_family_route_is_missing() -> None:
@@ -89,18 +84,24 @@ def test_mysql57_legacy_sql_avoids_mysql8_lock_views() -> None:
         assert script.metadata.risk == "READ_ONLY" and script.metadata.reviewed
 
 
-def test_sqlserver_2025_is_unknown_and_auto_detected_permission_is_unknown() -> None:
+def test_sqlserver_2025_is_unknown_and_auto_detected_profile_routes_sql() -> None:
     unknown = PROFILE_RESOLVER.resolve(
         DatabaseType.SQLSERVER, "2025", DetectedDatabaseVersion("17.0.1", "2025"), "slow"
     )
     assert unknown.support_state == SupportState.UNKNOWN
     assert unknown.sql_profile_id is None
+    for feature in ("top-sql", "active-sql", "memory-grant", "plan"):
+        future = PROFILE_RESOLVER.resolve(
+            DatabaseType.SQLSERVER, "2025", DetectedDatabaseVersion("17.0.1", "2025"), feature
+        )
+        assert future.support_state == SupportState.UNKNOWN
+        assert future.sql_profile_id is None
+        assert future.parser_contract_id is None
     auto = PROFILE_RESOLVER.resolve(
         DatabaseType.MYSQL, None, DetectedDatabaseVersion("8.4.11", "8.4"), "slow"
     )
     assert auto.version_status == VersionStatus.AUTO_DETECTED
-    assert profile_permission_status(auto, {"PROCESS", "SELECT performance_schema"})["status"] \
-        == PermissionStatus.UNKNOWN
+    assert auto.sql_profile_id == "mysql84_slow"
 
 
 def test_parser_contract_adds_normalized_fields_without_losing_evidence() -> None:
@@ -143,16 +144,6 @@ def test_optional_evidence_failure_downgrades_visibility_not_required_success() 
     )
     assert missing_optional_complete is False
     assert missing_optional_visibility == "PARTIAL"
-
-
-def test_oracle_slow_permissions_include_bootstrap_and_only_used_optional_views() -> None:
-    requirement = requirements_for_profile("oracle_modern_slow")
-    assert requirement.required == (
-        "CREATE SESSION", "SELECT SYS.V_$INSTANCE", "SELECT SYS.V_$VERSION",
-        "SELECT SYS.V_$DATABASE", "SELECT SYS.V_$SESSION", "SELECT SYS.V_$SQL",
-        "SELECT SYS.V_$TRANSACTION",
-    )
-    assert requirement.optional == ("SELECT SYS.V_$LOCK", "SELECT SYS.V_$LOCKED_OBJECT")
 
 
 def test_collector_requirement_sets_are_separate_from_slow_thresholds() -> None:

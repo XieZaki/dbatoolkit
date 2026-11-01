@@ -241,7 +241,9 @@ class ExecutionPlanCollector:
         active = self.adapter.execute_readonly(active_script,
                                                plan_parameters=params)
         if not active.success:
-            raise ToolkitError(active.error_type or "QueryFailed", active.error_message or "Plan probe failed.")
+            raise ToolkitError(active.error_type or "QueryFailed",
+                               active.error_message or "Plan probe failed.",
+                               database_error=active.database_error)
         results = [active]
         if active.truncated or len(active.rows) > 1:
             return PlanSample(session_id, "active_request", True, None,
@@ -256,7 +258,9 @@ class ExecutionPlanCollector:
                                                plan_parameters=params)
         results.append(cached)
         if not cached.success:
-            raise ToolkitError(cached.error_type or "QueryFailed", cached.error_message or "Cached plan probe failed.")
+            raise ToolkitError(cached.error_type or "QueryFailed",
+                               cached.error_message or "Cached plan probe failed.",
+                               database_error=cached.database_error)
         if cached.truncated or len(cached.rows) > 1:
             return PlanSample(session_id, "cached_ambiguous", active_row is not None, None,
                               "Multiple cached plans matched this session; no plan was selected.",
@@ -384,7 +388,9 @@ class ExecutionPlanAnalyzer:
             "top_operators": [asdict(n) for n in sorted_nodes],
             "missing_indexes": [asdict(m) for m in plan.missing_indexes] if plan else [],
             "collector_samples": [{"script": r.collector_name, "row_count": r.row_count,
-                                   "elapsed_ms": r.elapsed_ms, "truncated": r.truncated}
+                                   "elapsed_ms": r.elapsed_ms, "truncated": r.truncated,
+                                   "error_type": r.error_type, "error_message": r.error_message,
+                                   "database_error": r.database_error}
                                   for r in sample.samples],
         }))
 

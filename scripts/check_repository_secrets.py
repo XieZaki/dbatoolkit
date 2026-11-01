@@ -59,6 +59,7 @@ _FORBIDDEN_ARTIFACT = re.compile(
     r"^config/inventory\.ya?ml$|^config/inventory/.+\.ya?ml$|"
     r"\.sqlplan$|(?:^|/)\.env(?:\.|$)|\.credential-(?:store|export)(?:\.|$)|\.keyring$|"
     r"(?:^|/)(?:credentials\.enc(?:\.lock)?|[^/]+\.credentials\.enc(?:\.lock)?|"
+    r"(?:[^/]+\.)?credentials\.db(?:-(?:journal|wal|shm))?|"
     r"master\.key|unlock\.key|recovery\.key|credential-password\.txt)$|"
     r"\.(?:key|pem|pfx|p12|secret|secrets)$"
 )
@@ -160,8 +161,16 @@ def _python_findings(relative: str, content: str) -> list[ScanFinding]:
             )
         ]
 
+    fixture_ranges = tuple((item.lineno, item.end_lineno or item.lineno)
+                           for item in tree.body if isinstance(item, ast.FunctionDef)
+                           and item.name == "test_evidence_references_never_copy_captured_sql_or_credentials")
+
     def add_secret_literal(node: ast.AST, value: ast.AST) -> None:
         if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            if (relative.replace("\\", "/") == "tests/test_performance_triage.py"
+                    and value.value == "must-not-appear"
+                    and any(start <= getattr(node, "lineno", 0) <= end for start, end in fixture_ranges)):
+                return
             if not _is_placeholder(value.value):
                 findings.append(
                     ScanFinding(relative, "credential literal assignment", getattr(node, "lineno", None))

@@ -20,10 +20,10 @@ from dba.oracle_collectors import (
     ActiveSessionsCollector,
     LongRunningCollector,
 )
+from dba.oracle_identity import OraclePrincipal
 from dba.oracle_slow import blocking_graph, build_slow_report
 from dba.oracle_slow_reporter import render_markdown
-from dba.permissions import OraclePrincipal, render_oracle_principal, render_profile_sql
-from dba.presentation import render_emergency_triage, render_human, render_json
+from dba.presentation import render_emergency_triage, render_json
 from dba.registry import SqlScriptRegistry
 from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.settings import OracleSettings
@@ -38,18 +38,23 @@ class FakeCursor:
         self.arraysize = 100
         self.prefetchrows = 100
         self.rows: list[dict[str, Any]] = []
+        self.offset = 0
         self.closed = False
 
-    def execute(self, sql: str) -> None:
+    def execute(self, sql: str, parameters: dict[str, Any] | None = None) -> None:
         name = self.connection.sql_names[sql]
         if name in self.connection.fail:
             raise self.connection.fail[name]
         self.rows = self.connection.data.get(name, [])
+        self.offset = 0
         self.description = [(key.upper(),) for key in self.rows[0]] if self.rows else [("EMPTY",)]
         self.connection.calls.append((name, self.connection.call_timeout))
+        self.connection.bound_parameters.append((name, parameters))
 
     def fetchmany(self, size: int) -> list[tuple[Any, ...]]:
-        return [tuple(row.values()) for row in self.rows[:size]]
+        rows = self.rows[self.offset:self.offset + size]
+        self.offset += len(rows)
+        return [tuple(row.values()) for row in rows]
 
     def close(self) -> None:
         self.closed = True
@@ -66,6 +71,7 @@ class FakeConnection:
         self.closed = False
         self.rolled_back = False
         self.calls: list[tuple[str, int]] = []
+        self.bound_parameters: list[tuple[str, dict[str, Any] | None]] = []
         self.cursors: list[FakeCursor] = []
 
     def cursor(self) -> FakeCursor:
@@ -97,7 +103,8 @@ def fixture() -> tuple[DatabaseInstance, SqlScriptRegistry, MockCredentialProvid
     instance = DatabaseInstance("oracle-test", "Oracle Test", DatabaseType.ORACLE,
                                 "example.invalid", 1521, "oracle-monitor", service_name="FREEPDB1")
     registry = SqlScriptRegistry(ROOT / "sql")
-    names = (*OracleAdapter.REQUIRED, "version_detect")
+    names = (*OracleAdapter.REQUIRED, "version_detect", "top_sql_11g", "top_sql_modern",
+             "top_sql_container")
     sql_names = {registry.get(name, DatabaseType.ORACLE).text: name for name in names}
     data: dict[str, list[dict[str, Any]]] = {
         "session_identity": [{"session_user": "MONITOR"}],
@@ -118,6 +125,14 @@ def fixture() -> tuple[DatabaseInstance, SqlScriptRegistry, MockCredentialProvid
                              "username": "APP", "status": "ACTIVE", "machine": "host"}],
         "active_requests": [{"inst_id": 1, "sid": 10, "serial_number": 20,
                              "duration_seconds": 65, "sql_text": "SELECT 1"}],
+        "top_sql_container": [{"con_id": 3, "con_name": "FREEPDB1"}],
+        "top_sql_modern": [{"sql_id": "8s3k1", "child_number": 0, "plan_hash_value": 44,
+                            "con_id": 3, "cpu_time": 55, "elapsed_time": 70,
+                            "buffer_gets": 12, "disk_reads": 2, "executions": 3,
+                            "ranking_value": 55}],
+        "top_sql_11g": [{"sql_id": "8s3k1", "child_number": 0, "plan_hash_value": 44,
+                         "cpu_time": 55, "elapsed_time": 70, "buffer_gets": 12,
+                         "disk_reads": 2, "executions": 3, "ranking_value": 55}],
     }
     data["long_running"] = data["active_requests"]
     conn = FakeConnection(sql_names, data)
@@ -151,35 +166,6 @@ def test_oracle_connect_collect_and_close() -> None:
     assert "TOPSECRET" not in repr(adapter)
 
 
-@pytest.mark.parametrize(("raw_name", "expected", "quoted_required"), [
-    ("DBA_MONITOR", "DBA_MONITOR", False),
-    ("dba_monitor", '"dba_monitor"', True),
-    ("Test-DBA", '"Test-DBA"', True),
-    ('Test"DBA', '"Test""DBA"', True),
-])
-def test_oracle_runtime_principal_rendering(raw_name: str, expected: str,
-                                            quoted_required: bool) -> None:
-    principal = OraclePrincipal.from_runtime(raw_name)
-    assert principal.quoted_required is quoted_required
-    assert render_oracle_principal(principal) == expected
-
-
-def test_oracle_unverified_credential_uses_placeholder_only() -> None:
-    principal = OraclePrincipal.unverified("dba_monitor")
-    rendered = render_profile_sql("oracle_modern_replication", DatabaseType.ORACLE, principal)
-    assert "TO <ORACLE_MONITOR_USER>" in rendered
-    assert 'TO "dba_monitor"' not in rendered
-    assert "TO DBA_MONITOR" not in rendered
-    assert "dba_monitor" not in rendered
-
-
-def test_oracle_plain_username_renderer_never_guesses_identity() -> None:
-    rendered = render_profile_sql("oracle_modern_replication", DatabaseType.ORACLE, "dba_monitor")
-    assert "TO <ORACLE_MONITOR_USER>" in rendered
-    assert 'TO "dba_monitor"' not in rendered
-    assert "TO DBA_MONITOR" not in rendered
-
-
 def test_oracle_session_identity_failure_precedes_monitoring_preflight_and_closes() -> None:
     adapter, driver = adapter_for_test()
     driver.connection.fail["session_identity"] = RuntimeError("ORA-01017: invalid credentials")
@@ -190,58 +176,15 @@ def test_oracle_session_identity_failure_precedes_monitoring_preflight_and_close
     assert adapter.principal is None
 
 
-def test_permissions_cli_uses_database_identity_when_monitor_view_preflight_fails(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    _, _, _, driver = fixture()
-    driver.connection.data["session_identity"] = [{"session_user": "DBA_MONITOR"}]
-    driver.connection.data["preflight"][0]["monitor_user"] = "DBA_MONITOR"
-    driver.connection.fail["preflight"] = RuntimeError(
-        'ORA-00942: table or view "SYS"."V_$INSTANCE" does not exist'
-    )
-    inventory = tmp_path / "inventory.yaml"
-    inventory.write_text(yaml.safe_dump({"databases": [{
-        "id": "oracle-test", "name": "Oracle test", "db_type": "oracle",
-        "host": "127.0.0.1", "port": 1521, "service_name": "FREEPDB1",
-        "credential_alias": "oracle-monitor", "enabled": True, "version_family": "26ai",
-    }]}), encoding="utf-8")
-
-    class RuntimeProvider:
-        def get_credential(self, _alias: str) -> Credential:
-            return Credential("dba_monitor", "TOPSECRET")
-
-    assert main(["--inventory", str(inventory), "permissions", "oracle-test", "--feature",
-                 "replication", "--json"], provider=RuntimeProvider(), driver=driver) == 0
-    output_text = capsys.readouterr().out
-    output = json.loads(output_text)
-    assert output["monitoring_principal"]["credential_username"] == "dba_monitor"
-    assert output["monitoring_principal"]["database_principal"] == "DBA_MONITOR"
-    assert output["monitoring_principal"]["verification"] == "VERIFIED"
-    assert output["version_profile"]["version_status"] == "UNVERIFIED"
-    assert output["features"][0]["status"] == "UNKNOWN"
-    assert output["runtime_verification"]["vendor_error"]["vendor_code"] == "ORA-00942"
-    grant = output["features"][0]["reference_grant"]
-    assert "GRANT CREATE SESSION TO DBA_MONITOR" in grant
-    assert 'TO "dba_monitor"' not in grant
-    assert "TOPSECRET" not in output_text
-    human = render_human("permissions", output)
-    assert "Credential Username" in human and "dba_monitor" in human
-    assert "Database Principal" in human and "DBA_MONITOR" in human
-    assert "Principal Verification" in human and "VERIFIED" in human
-    assert driver.connection.calls[0][0] == "session_identity"
-    assert driver.connection.closed
-
-
-def test_version_view_is_reported_as_detection_capability_without_auto_grant() -> None:
+def test_version_view_is_checked_by_its_reviewed_query_not_preflight() -> None:
     adapter, driver = adapter_for_test()
     driver.connection.data["preflight_object_grants"] = [
         row for row in driver.connection.data["preflight_object_grants"]
         if row["table_name"] != "V_$VERSION"
     ]
     with adapter:
-        assert adapter.preflight_checks["version_detection_view"] is False
-        assert "SELECT SYS.V_$VERSION" not in adapter.permission_observations
         assert adapter.get_server_version().startswith("19.")
+        assert "probe_lock" not in driver.connection.sql_names.values()
 
 
 def test_sid_target_and_invalid_targets() -> None:
@@ -261,7 +204,7 @@ def test_driver_error_redaction_and_cleanup() -> None:
         adapter.connect()
     assert "TOPSECRET" not in str(caught.value)
     adapter, driver = adapter_for_test()
-    driver.connection.fail["active_sessions"] = RuntimeError("password=TOPSECRET")
+    driver.connection.fail["preflight_privileges"] = RuntimeError("password=TOPSECRET")
     with pytest.raises(ToolkitError):
         adapter.connect()
     assert driver.connection.closed
@@ -278,11 +221,12 @@ def test_preflight_failure_preserves_sanitized_vendor_error() -> None:
     assert isinstance(caught.value.database_error, dict)
     assert caught.value.database_error["vendor_code"] == "ORA-01045"
     assert "ORA-01045" in caught.value.database_error["message"]
+    assert "docs/DATABASE_PERMISSIONS.md" in caught.value.database_error["guidance"]
     assert "TOPSECRET" not in repr(caught.value.database_error)
     assert driver.connection.closed
 
 
-def test_preflight_rejects_privileged_role_and_missing_view() -> None:
+def test_preflight_rejects_privileged_role() -> None:
     adapter, driver = adapter_for_test()
     driver.connection.data["preflight_privileges"] = [{"kind": "ROLE", "privilege_name": "DBA"}]
     with pytest.raises(ToolkitError, match="unreviewed role"):
@@ -290,7 +234,7 @@ def test_preflight_rejects_privileged_role_and_missing_view() -> None:
     assert driver.connection.closed
 
 
-def test_preflight_rejects_write_grant_and_downgrades_optional_views() -> None:
+def test_preflight_rejects_write_grant_and_does_not_probe_feature_views() -> None:
     adapter, driver = adapter_for_test()
     driver.connection.data["preflight_object_grants"].append(
         {"owner": "APP", "table_name": "T", "privilege": "UPDATE", "grantable": "NO"})
@@ -303,14 +247,9 @@ def test_preflight_rejects_write_grant_and_downgrades_optional_views() -> None:
         if row["table_name"] not in {"V_$LOCK", "V_$LOCKED_OBJECT", "V_$PROCESS",
                                      "V_$SESSION_WAIT"}]
     with adapter:
-        assert adapter.blocking_script == "blocking_basic"
-        assert not adapter.capabilities["lock_evidence"]
-        assert not adapter.preflight_checks["probe_wait"]
-    adapter, driver = adapter_for_test()
-    driver.connection.fail["probe_lock"] = RuntimeError("ORA-00942 password=TOPSECRET")
-    with pytest.raises(ToolkitError, match="probe_lock"):
-        adapter.connect()
-    assert driver.connection.closed
+        assert adapter.blocking_script == "blocking"
+        assert adapter.capabilities["lock_evidence"]
+        assert not any(name.startswith("probe_") for name, _ in driver.connection.calls)
 
 
 def test_timeout_and_registry_restrictions() -> None:
@@ -330,7 +269,7 @@ def test_timeout_and_registry_restrictions() -> None:
         assert "TOPSECRET" not in str(timed)
         assert driver.connection.closed
     adapter, driver = adapter_for_test()
-    driver.connection.fail["server_info"] = TimeoutError("password=TOPSECRET")
+    driver.connection.fail["preflight_owned_objects"] = TimeoutError("password=TOPSECRET")
     with pytest.raises(ToolkitError):
         adapter.connect()
     assert driver.connection.closed
@@ -909,5 +848,19 @@ def test_cli_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     report_path = tmp_path / "oracle.html"
     assert main([*prefix, "diagnose", instance.id, "slow", "--report", str(report_path), "--json"],
                 provider=provider, driver=driver) == 0
+    capsys.readouterr()
     assert "长运行请求 1 条" in report_path.read_text(encoding="utf-8")
     assert "TOPSECRET" not in report_path.read_text(encoding="utf-8")
+    _, _, _, driver = fixture()
+    assert main([*prefix, "diagnose", instance.id, "top-sql", "--json"],
+                provider=provider, driver=driver) == 0
+    top_sql = json.loads(capsys.readouterr().out)["top_sql"]
+    assert top_sql["ranking_metric"] == "cpu_time"
+    assert top_sql["metric_scope"] == "CHILD_CURSOR"
+    assert top_sql["collection_scope"] == "DATABASE"
+    assert top_sql["items"][0]["sql_identity"]["fields"] == {
+        "sql_id": "8s3k1", "child_number": 0, "inst_id": 1, "con_id": 3,
+    }
+    assert driver.connection.bound_parameters[-1] == (
+        "top_sql_modern", {"metric": "cpu_time", "top_n": 10, "con_id": 3},
+    )
