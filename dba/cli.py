@@ -321,6 +321,17 @@ def main(
     _add_output_options(doctor_command)
     runtime_command = commands.add_parser("runtime-info", help="Show local runtime components without connecting")
     _add_output_options(runtime_command)
+    driver_command = commands.add_parser("driver", help="Inspect and manage explicitly installed local database drivers")
+    driver_commands = driver_command.add_subparsers(dest="driver_command", required=True)
+    driver_commands.add_parser("list", help="List active and backup managed drivers")
+    driver_check = driver_commands.add_parser("check", help="Check driver packages and native requirements")
+    driver_check.add_argument("--database", choices=("mysql", "postgresql", "oracle", "sqlserver"))
+    driver_install = driver_commands.add_parser("install", help="Install a trusted local driver ZIP")
+    driver_install.add_argument("--file", type=Path, required=True)
+    driver_rollback = driver_commands.add_parser("rollback", help="Switch to the previous driver version")
+    driver_rollback.add_argument("--database", choices=("mysql", "postgresql", "oracle", "sqlserver"), required=True)
+    for subcommand in driver_commands.choices.values():
+        _add_output_options(subcommand)
     credentials = commands.add_parser(
         "credentials", help="Manage secure credentials; missing database aliases can be enrolled on demand",
         description=("Database commands can enroll a missing credential alias when first needed. "
@@ -415,6 +426,29 @@ def main(
         credential_parser.add_argument("--store-path", type=Path, default=None,
                                        help="Explicit encrypted Store path; never inferred from another Store")
     args = parser.parse_args(argv)
+    if args.command == "driver":
+        from dba.driver_manager import DriverManager
+
+        manager = DriverManager.from_environment()
+        try:
+            if args.driver_command == "list":
+                driver_result = manager.list()
+            elif args.driver_command == "check":
+                database = DatabaseType(args.database) if args.database else None
+                driver_result = manager.check(database)
+            elif args.driver_command == "install":
+                driver_result = manager.install(args.file)
+            else:
+                driver_result = manager.rollback(DatabaseType(args.database))
+            _emit(args, "driver", driver_result)
+            if args.driver_command == "check":
+                return 0 if all(item.get("status") in {"READY", "SYSTEM_DRIVER_AVAILABLE"}
+                                for item in driver_result.get("checks", [])) else 1
+            return 0
+        except ToolkitError as exc:
+            _emit(args, "driver", {"success": False, "error_type": exc.error_type,
+                                    "error_message": str(exc)})
+            return 1
     from dba.sqlite_credentials import SQLiteCredentialStore
     backend = getattr(args, "backend", getattr(args, "credential_backend", "auto"))
     store_path = getattr(args, "store_path", None) or getattr(args, "credential_store_path", None)

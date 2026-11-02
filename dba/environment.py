@@ -5,6 +5,9 @@ import struct
 import sys
 from typing import Any
 
+from dba.core import DatabaseType
+from dba.driver_manager import load_database_driver
+from dba.errors import ToolkitError
 from dba.runtime import ODBC_17, ODBC_18, select_sqlserver_driver
 
 
@@ -36,12 +39,12 @@ def driver_info() -> dict[str, Any]:
     source = "unavailable"
     error: str | None = None
     try:
-        module = importlib.import_module("pyodbc")
+        module = load_database_driver(DatabaseType.SQLSERVER, "pyodbc")
         version = str(module.version)
         drivers = sorted(str(item) for item in module.drivers())
         source = "pyodbc"
-    except ImportError:
-        error = "PyodbcNotInstalled"
+    except ToolkitError as exc:
+        error = "PyodbcNotInstalled" if exc.error_type == "DriverUnavailable" else exc.error_type
     except Exception:
         error = "DriverInspectionFailed"
     if source == "unavailable" and sys.platform == "win32":

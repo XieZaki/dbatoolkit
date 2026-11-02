@@ -195,6 +195,33 @@ def render_human(command: str, value: Any) -> str:
         return "Driver Information\n" + "-" * 42 + "\n" + "\n".join(
             _line(str(key), value) for key, value in data.items()
         )
+    if command == "driver":
+        if isinstance(data.get("checks"), list):
+            lines = ["Database Drivers", "-" * 42]
+            for item in data["checks"]:
+                lines.append(f"{item.get('database')}: {item.get('status')}  "
+                             f"{item.get('driver_name')} {item.get('driver_version') or ''}".rstrip())
+                if item.get("selected_native_driver"):
+                    lines.append(f"  Native: {item['selected_native_driver']}")
+                elif item.get("database") == "sqlserver":
+                    lines.append("  Native: Microsoft ODBC Driver 18/17 required separately")
+                if item.get("supported_database_versions"):
+                    lines.append("  Driver database range: "
+                                 + ", ".join(item["supported_database_versions"]))
+                lines.append("  Toolkit server profile: not checked without a database connection")
+            return "\n".join(lines)
+        if isinstance(data.get("drivers"), list):
+            lines = ["Managed Driver Versions", "-" * 42]
+            for item in data["drivers"]:
+                active = item.get("active") or {}
+                backup = item.get("backup") or {}
+                lines.append(f"{item.get('database')}: active {active.get('driver_version') or 'none'}; "
+                             f"backup {backup.get('driver_version') or 'none'}")
+            return "\n".join(lines)
+        return "Driver Package\n" + "-" * 42 + "\n" + "\n".join(
+            _line(str(key).replace("_", " ").title(), value) for key, value in data.items()
+            if key != "network_accessed"
+        )
     if command == "incident-summary" and isinstance(data, dict):
         return render_incident_summary(data)
     if command == "list":

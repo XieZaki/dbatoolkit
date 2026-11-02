@@ -1,0 +1,2 @@
+-r base.lock
+oracledb==3.4.2 --hash=sha256:3df8eee1410d25360599968b1625b000f10c5ae0e47274031a7842a9dc418890

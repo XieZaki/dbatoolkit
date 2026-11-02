@@ -1,0 +1,69 @@
+name: Build Windows portable ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Prepare matching x64 build Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.14'
+          architecture: x64
+
+      - name: Prepare offline wheelhouse
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path deployment/wheelhouse -Force | Out-Null
+          $locks = @('base.lock', 'mysql.lock', 'postgresql.lock', 'oracle.lock', 'sqlserver.lock')
+          foreach ($lock in $locks) {
+            python -m pip download --no-deps --only-binary=:all: `
+              --dest deployment/wheelhouse `
+              --require-hashes `
+              --platform win_amd64 --python-version 3.13 --implementation cp --abi cp313 `
+              --requirement (Join-Path 'deployment/locks/windows-cp313-x64' $lock)
+            if ($LASTEXITCODE -ne 0) { throw "Could not prepare wheelhouse from $lock." }
+          }
+
+      - name: Obtain official CPython embeddable runtime
+        shell: pwsh
+        run: |
+          $url = 'https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip'
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\python-3.13.17-embed-amd64.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not obtain the pinned CPython embeddable runtime.' }
+
+      - name: Build portable tree
+        shell: pwsh
+        run: |
+          $python = (Get-Command python).Source
+          .\deployment\build_portable.ps1 `
+            -PythonEmbedZip "$env:RUNNER_TEMP\python-3.13.17-embed-amd64.zip" `
+            -Wheelhouse .\deployment\wheelhouse `
+            -BuildPython $python
+
+      - name: Verify bundled runtime without database or network
+        shell: pwsh
+        run: .\deployment\verify_portable.ps1
+
+      - name: Create ZIP and SHA256
+        shell: pwsh
+        run: .\deployment\package_portable.ps1
+
+      - name: Upload build artifact (no Release or Tag)
+        uses: actions/upload-artifact@v4
+        with:
+          name: DBAToolkit-0.9.0-Windows-x64-Portable
+          path: |
+            dist/DBAToolkit-0.9.0-Windows-x64-Portable.zip
+            dist/DBAToolkit-0.9.0-Windows-x64-Portable.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

@@ -188,10 +188,49 @@ def wheelhouse_status(path: Path) -> dict[str, Any]:
 def runtime_info(manifest_path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
     manifest = RuntimeManifest.load(manifest_path)
     packages = {kind.value: _package(requirement) for kind, requirement in manifest.drivers.items()}
+    # In a portable distribution managed drivers live outside the application
+    # vendor directory. Reflect that explicit selection in runtime inspection.
+    from dba.driver_manager import DriverManager
+    from dba.errors import ToolkitError
+
+    manager = DriverManager.from_environment()
+    if manager.root is not None:
+        for kind in (DatabaseType.SQLSERVER, DatabaseType.POSTGRESQL,
+                     DatabaseType.MYSQL, DatabaseType.ORACLE):
+            try:
+                active = manager.active_package(kind)
+                if active is None:
+                    continue
+                checks = manager.check(kind)["checks"]
+                selected = checks[0]
+                requirement = manifest.drivers[kind]
+                packages[kind.value] = {
+                    "package": selected.get("driver_name", requirement.distribution),
+                    "module": requirement.module,
+                    "required_version": requirement.version,
+                    "version": selected.get("driver_version"),
+                    "status": (RuntimeStatus.READY.value if selected.get("python_driver_status") == "READY"
+                               else RuntimeStatus.MISSING.value),
+                    "managed": True,
+                    "python_abi": selected.get("python_abi"),
+                    "supported_database_versions": selected.get("supported_database_versions", []),
+                    "native_components": selected.get("native_components", []),
+                    "selected_native_driver": selected.get("selected_native_driver"),
+                }
+            except ToolkitError as exc:
+                packages[kind.value] = {
+                    "package": manifest.drivers[kind].distribution,
+                    "module": manifest.drivers[kind].module,
+                    "required_version": manifest.drivers[kind].version,
+                    "version": None,
+                    "status": RuntimeStatus.UNSUPPORTED.value,
+                    "managed": True,
+                    "error_type": exc.error_type,
+                }
     credential_package = _package(manifest.credential_store)
     credential_crypto = {name: _package(requirement)
                          for name, requirement in manifest.credential_crypto.items()}
-    odbc = installed_odbc_drivers() if packages["sqlserver"]["status"] == "READY" else ()
+    odbc = installed_odbc_drivers()
     selected = select_sqlserver_driver(odbc)
     return {
         "toolkit_version": __version__,

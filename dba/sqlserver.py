@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import time
 from collections.abc import Sequence
 from datetime import date, datetime, timezone
@@ -47,13 +46,17 @@ class Driver(Protocol):
 
 
 def load_driver() -> Driver:
+    from dba.driver_manager import load_database_driver
+
     try:
-        module = importlib.import_module("pyodbc")
-    except ImportError:
-        raise ToolkitError(
-            "DriverUnavailable",
-            "Install the sqlserver extra and approved Microsoft ODBC Driver 18 or compatible Driver 17.",
-        ) from None
+        module = load_database_driver(DatabaseType.SQLSERVER, "pyodbc")
+    except ToolkitError as exc:
+        if exc.error_type == "DriverUnavailable":
+            raise ToolkitError(
+                "DriverUnavailable",
+                "Install the sqlserver extra and approved Microsoft ODBC Driver 18 or compatible Driver 17.",
+            ) from None
+        raise
     # Set before the first ODBC connection, so close releases the physical session.
     setattr(module, "pooling", False)
     return cast(Driver, module)

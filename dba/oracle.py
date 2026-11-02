@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import re
 import time
 from collections.abc import Mapping, Sequence
@@ -100,10 +99,9 @@ class Driver(Protocol):
 
 
 def load_driver() -> Driver:
-    try:
-        return cast(Driver, importlib.import_module("oracledb"))
-    except ImportError:
-        raise ToolkitError("DriverUnavailable", "Install the oracle extra from an offline wheelhouse.") from None
+    from dba.driver_manager import load_database_driver
+
+    return cast(Driver, load_database_driver(DatabaseType.ORACLE, "oracledb"))
 
 
 def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:

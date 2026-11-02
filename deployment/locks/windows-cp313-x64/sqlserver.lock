@@ -1,0 +1,2 @@
+-r base.lock
+pyodbc==5.3.0 --hash=sha256:01166162149adf2b8a6dc21a212718f205cabbbdff4047dc0c415af3fd85867e

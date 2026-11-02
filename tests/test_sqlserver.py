@@ -849,11 +849,20 @@ def test_prompt_no_tty(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_driver_lazy_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dba import driver_manager
+    from dba.core import DatabaseType
     from dba.sqlserver import load_driver
 
     module = Mock()
-    monkeypatch.setattr("dba.sqlserver.importlib.import_module", lambda name: module)
+    calls: list[tuple[DatabaseType, str]] = []
+
+    def load(database: DatabaseType, module_name: str) -> Mock:
+        calls.append((database, module_name))
+        return module
+
+    monkeypatch.setattr(driver_manager, "load_database_driver", load)
     assert load_driver() is module and module.pooling is False
+    assert calls == [(DatabaseType.SQLSERVER, "pyodbc")]
 
 
 def test_changed_registered_script(

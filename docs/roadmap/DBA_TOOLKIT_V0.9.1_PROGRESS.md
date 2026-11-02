@@ -3,18 +3,22 @@
 ## Current position
 
 ```text
-CURRENT_PHASE: Phase 5 — HTML workbench integration
-CURRENT_TASK: V091-P5-WORKBENCH-001 — IN_PROGRESS; approved Slow Diagnose HTML template integration and offline validation recorded in the dated Slow Diagnose HTML Acceptance record
+CURRENT_PHASE: Deployment stabilization (existing OFFLINE-RUNTIME-001)
+CURRENT_TASK: OFFLINE-RUNTIME-001 — IN_PROGRESS; Windows x64 portable runtime and independently replaceable database drivers, user-authorized 2026-11-02
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.0
-CURRENT_HEAD: 469083a3cf0680ad24aaad7aa496740722e5b45a (dirty working tree; no commit created)
-CURRENT_TASK_DELIVERY: SQL-REGISTRY-SAFETY-001 final offline verification remains recorded in Acceptance and its canonical Backlog status is unchanged. The user explicitly authorized V091-P5-WORKBENCH-001; implementation and validation evidence are in the dated Slow Diagnose HTML Acceptance record. No Roadmap order change is implied.
-LAST_COMPLETED_TASK: PERMISSION-PREFLIGHT-001 — conditionally closed by formal user approval; canonical status DONE in Backlog.
-NEXT_READY_TASK: Await user review of V091-P5-WORKBENCH-001; Backlog remains IN_PROGRESS.
-WAITING_FOR_USER_REVIEW: YES — V091-P5-WORKBENCH-001 offline implementation checkpoint; four-database renderer E2E is not newly verified.
-WAITING_FOR_USER_ACTION: Review this Slow Diagnose HTML integration checkpoint; no subsequent task has started.
-FOLLOWING_ORDER: Roadmap task order remains unchanged; no subsequent task has started.
+BASE_HEAD_FOR_CURRENT_CHECKPOINT: 928ba188ecec5a5a7cfe26b93b5b0756831c40f8
+CURRENT_TASK_DELIVERY: User-provided portable distribution scope is being implemented under the existing OFFLINE-RUNTIME-001; no Task ID or Roadmap order change. Earlier SQL-REGISTRY-SAFETY-001 and V091-P5-WORKBENCH-001 evidence/state remains recorded and is not altered by this pointer.
+LAST_COMPLETED_TASK: PERMISSION-PREFLIGHT-001 — conditionally closed; canonical status DONE in Backlog.
+NEXT_READY_TASK: OFFLINE-RUNTIME-001; user has authorized implementation.
+WAITING_FOR_USER_REVIEW: NO — implementation in progress.
+WAITING_FOR_USER_ACTION: NONE.
+FOLLOWING_ORDER: Roadmap order unchanged; no other Backlog task started.
 ```
+
+### OFFLINE-RUNTIME-001 implementation checkpoint — 2026-11-02
+
+The Windows x64 portable runtime and independent driver manager are under implementation. Final offline full pytest passed **1186 passed, 3 skipped**; targeted driver/SQL Server tests passed **102**; Ruff, strict MyPy (76 source files), example-Inventory `dba validate`, PowerShell parser checks, and diff-check passed. The portable build reached driver bundling but safely rejected PyMySQL because wheel metadata (`1.1.3`) and module version (`2.2.8`) disagree; no distributable ZIP was produced. This is tracked separately as `MYSQL-DRIVER-PROVENANCE-001`; `OFFLINE-RUNTIME-001` remains `IN_PROGRESS`. See Acceptance §42 for scope and limits.
 
 ### INVENTORY-CONNECTION-001 first-phase implementation — 2026-10-31
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import time
 from collections.abc import Sequence
 from datetime import date, datetime, timezone
@@ -49,11 +48,9 @@ class Driver(Protocol):
 
 
 def load_driver() -> Driver:
-    try:
-        module = importlib.import_module("psycopg")
-    except ImportError:
-        raise ToolkitError("DriverUnavailable", "Install the postgresql extra from an offline wheelhouse.") from None
-    return cast(Driver, module)
+    from dba.driver_manager import load_database_driver
+
+    return cast(Driver, load_database_driver(DatabaseType.POSTGRESQL, "psycopg"))
 
 
 def _driver_error(exc: Exception, phase: str, secret: str = "", *, top_sql: bool = False) -> ToolkitError:
