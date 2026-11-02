@@ -30,6 +30,7 @@ from typing import Any, Iterator, cast
 
 from dba import __version__
 from dba.core import DatabaseType
+from dba.driver_versions import DriverModuleVersionError, validate_driver_module_version
 from dba.errors import ToolkitError
 
 SUPPORTED_DATABASES = frozenset({
@@ -466,6 +467,9 @@ class DriverManager:
     def _validate_import(package: DriverPackage, package_path: Path) -> None:
         source = (
             "import importlib, importlib.metadata, pathlib, sys\n"
+            "app_root = pathlib.Path(sys.argv[5]).resolve()\n"
+            "sys.path.insert(0, str(app_root))\n"
+            "from dba.driver_versions import validate_driver_module_version\n"
             "root = pathlib.Path(sys.argv[1]).resolve()\n"
             "name, distribution, expected = sys.argv[2:5]\n"
             "sys.path.insert(0, str(root))\n"
@@ -474,8 +478,8 @@ class DriverManager:
             "loaded.relative_to(root)\n"
             "actual = importlib.metadata.version(distribution)\n"
             "assert actual == expected\n"
-            "reported = getattr(module, '__version__', getattr(module, 'version', None))\n"
-            "assert reported is None or str(reported) == expected\n"
+            "validate_driver_module_version(module, module_name=name, "
+            "distribution_name=distribution, distribution_version=actual)\n"
         )
         env = os.environ.copy()
         for key in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE"):
@@ -483,7 +487,8 @@ class DriverManager:
         try:
             result = subprocess.run(
                 [sys.executable, "-I", "-c", source, str(package_path), package.module,
-                 package.distribution, package.driver_version],
+                 package.distribution, package.driver_version,
+                 str(Path(__file__).resolve().parents[1])],
                 capture_output=True, text=True, timeout=20, check=False, env=env,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -708,10 +713,16 @@ def load_database_driver(database: DatabaseType, module_name: str) -> Any:
         if actual != package.driver_version:
             raise _package_error("Selected driver metadata does not match its installed distribution.",
                                  "DriverPackageIncompatible")
-        reported = getattr(module, "__version__", getattr(module, "version", None))
-        if reported is not None and str(reported) != package.driver_version:
-            raise _package_error("Selected driver module and distribution versions do not match.",
-                                 "DriverPackageIncompatible")
+        try:
+            validate_driver_module_version(
+                module,
+                module_name=module_name,
+                distribution_name=package.distribution,
+                distribution_version=actual,
+            )
+        except DriverModuleVersionError:
+            raise _package_error("Selected driver module release and distribution versions do not match.",
+                                 "DriverPackageIncompatible") from None
         return module
     except (ImportError, importlib.metadata.PackageNotFoundError):
         raise ToolkitError("DriverUnavailable",

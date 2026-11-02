@@ -15,7 +15,7 @@ from pathlib import Path
 DATABASES = {
     "mysql": ("pymysql", "PyMySQL", ["MySQL 5.7", "MySQL 8.0", "MySQL 8.4"], []),
     "postgresql": ("psycopg", "psycopg", ["PostgreSQL 10-18 (driver library range)"], []),
-    "oracle": ("oracledb", "oracledb", ["Oracle 12.1+ Thin; Oracle 11g requires Thick mode"], []),
+    "oracle": ("oracledb", "oracledb", ["Oracle 12.1+ Thin", "Oracle 11g requires Thick mode"], []),
     "sqlserver": ("pyodbc", "pyodbc", ["Depends on installed Microsoft ODBC Driver"], [
         "Microsoft ODBC Driver 18 or 17 must be installed separately",
     ]),
@@ -28,6 +28,7 @@ def main() -> int:
     parser.add_argument("--database", choices=tuple(DATABASES), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--minimum-toolkit-version", required=True)
+    parser.add_argument("--project-root", type=Path, required=True)
     args = parser.parse_args()
     if platform.system() != "Windows" or struct.calcsize("P") != 8:
         raise SystemExit("Driver bundles must be built with 64-bit Windows Python.")
@@ -41,13 +42,29 @@ def main() -> int:
     main_dist = by_name.get(distribution_name.casefold().replace("_", "-"))
     if main_dist is None:
         raise SystemExit("Driver distribution metadata is missing from the build stage.")
+    project_root = args.project_root.resolve(strict=True)
+    sys.path.insert(0, str(project_root))
+    from dba.driver_versions import DriverModuleVersionError, validate_driver_module_version
+
     sys.path.insert(0, str(package_root))
     module = importlib.import_module(module_name)
     if not module.__file__ or not Path(module.__file__).resolve().is_relative_to(package_root):
         raise SystemExit("Driver module did not load from the isolated build stage.")
-    module_version = getattr(module, "__version__", getattr(module, "version", None))
-    if module_version is not None and str(module_version) != main_dist.version:
-        raise SystemExit("Driver module version and distribution metadata differ.")
+    try:
+        version_evidence = validate_driver_module_version(
+            module,
+            module_name=module_name,
+            distribution_name=distribution_name,
+            distribution_version=main_dist.version,
+        )
+    except DriverModuleVersionError:
+        raise SystemExit("Driver module release identity and distribution metadata differ.") from None
+    if version_evidence.reported_version_role:
+        print(
+            f"Driver module exposes {version_evidence.reported_version_role} version "
+            f"{version_evidence.reported_module_version}; release version is "
+            f"{version_evidence.release_version}."
+        )
 
     dependencies = [
         {"distribution": item.metadata["Name"], "version": f"=={item.version}"}

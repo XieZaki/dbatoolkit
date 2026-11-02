@@ -1,69 +1,141 @@
-name: Build Windows portable ZIP
+name: Build Windows Full and Update packages
 
 on:
+  push:
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Must match both pyproject.toml and dba.__version__'
+        required: false
+        type: string
+      publish_release:
+        description: 'Publish only when this workflow is manually run against a matching vX.Y.Z tag'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 jobs:
-  portable:
+  build:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Prepare matching x64 build Python
+      - name: Prepare x64 build Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12.14'
+          python-version: '3.13.17'
           architecture: x64
 
-      - name: Prepare offline wheelhouse
+      - name: Check tag and source package versions
+        id: version
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path deployment/wheelhouse -Force | Out-Null
+          $projectVersion = [regex]::Match((Get-Content pyproject.toml -Raw), '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+          $sourceVersion = [regex]::Match((Get-Content dba/__init__.py -Raw), '(?m)^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+          if (-not $projectVersion -or $projectVersion -ne $sourceVersion) { throw 'Project package version sources disagree.' }
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+            if ($tagVersion -ne $projectVersion) { throw 'Release tag does not match the project package version.' }
+          }
+          $requested = '${{ inputs.version }}'
+          if ($requested -and $requested -ne $projectVersion) { throw 'Requested build version does not match the project version.' }
+          "version=$projectVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Install test and quality tools
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check -e '.[dev]'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install project test tools.' }
+
+      - name: Run Windows test suite
+        shell: pwsh
+        run: |
+          python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { throw 'Windows pytest failed.' }
+          ruff check .
+          if ($LASTEXITCODE -ne 0) { throw 'Ruff failed.' }
+          python -m mypy dba
+          if ($LASTEXITCODE -ne 0) { throw 'Strict MyPy failed.' }
+
+      - name: Prepare hash-locked offline wheelhouse
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/portable-build-inputs/wheelhouse -Force | Out-Null
           $locks = @('base.lock', 'mysql.lock', 'postgresql.lock', 'oracle.lock', 'sqlserver.lock')
           foreach ($lock in $locks) {
-            python -m pip download --no-deps --only-binary=:all: `
-              --dest deployment/wheelhouse `
-              --require-hashes `
+            python -m pip download --disable-pip-version-check --no-deps --only-binary=:all: `
+              --dest dist/portable-build-inputs/wheelhouse --require-hashes `
               --platform win_amd64 --python-version 3.13 --implementation cp --abi cp313 `
               --requirement (Join-Path 'deployment/locks/windows-cp313-x64' $lock)
-            if ($LASTEXITCODE -ne 0) { throw "Could not prepare wheelhouse from $lock." }
+            if ($LASTEXITCODE -ne 0) { throw "Could not prepare the locked wheelhouse for $lock." }
           }
 
-      - name: Obtain official CPython embeddable runtime
+      - name: Obtain pinned CPython embeddable runtime
         shell: pwsh
         run: |
-          $url = 'https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip'
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\python-3.13.17-embed-amd64.zip"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not obtain the pinned CPython embeddable runtime.' }
+          $runtime = 'dist/portable-build-inputs/python-3.13.17-embed-amd64.zip'
+          New-Item -ItemType Directory -Path (Split-Path -Parent $runtime) -Force | Out-Null
+          Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip' -OutFile $runtime
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the pinned CPython runtime.' }
+          $hash = (Get-FileHash -LiteralPath $runtime -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38') { throw 'Pinned CPython runtime hash mismatch.' }
 
-      - name: Build portable tree
+      - name: Build and validate Full, Update and checksums
         shell: pwsh
         run: |
-          $python = (Get-Command python).Source
-          .\deployment\build_portable.ps1 `
-            -PythonEmbedZip "$env:RUNNER_TEMP\python-3.13.17-embed-amd64.zip" `
-            -Wheelhouse .\deployment\wheelhouse `
-            -BuildPython $python
+          .\deployment\build_release.ps1 -Version '${{ steps.version.outputs.version }}' `
+            -PythonEmbedZip 'dist/portable-build-inputs/python-3.13.17-embed-amd64.zip' `
+            -Wheelhouse 'dist/portable-build-inputs/wheelhouse' `
+            -BuildPython (Get-Command python).Source `
+            -BuildId '${{ github.sha }}' `
+            -OutputDirectory 'dist/release'
 
-      - name: Verify bundled runtime without database or network
-        shell: pwsh
-        run: .\deployment\verify_portable.ps1
-
-      - name: Create ZIP and SHA256
-        shell: pwsh
-        run: .\deployment\package_portable.ps1
-
-      - name: Upload build artifact (no Release or Tag)
+      - name: Upload Full and Update candidate artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: DBAToolkit-0.9.0-Windows-x64-Portable
+          name: DBAToolkit-${{ steps.version.outputs.version }}-Windows-x64-release-candidate
           path: |
-            dist/DBAToolkit-0.9.0-Windows-x64-Portable.zip
-            dist/DBAToolkit-0.9.0-Windows-x64-Portable.zip.sha256
+            dist/release/DBAToolkit-${{ steps.version.outputs.version }}-Windows-x64-Full.zip
+            dist/release/DBAToolkit-${{ steps.version.outputs.version }}-Windows-x64-Update.zip
+            dist/release/DBAToolkit-${{ steps.version.outputs.version }}-SHA256SUMS.txt
+            dist/release/使用说明.md
+            dist/release/*.sha256
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish_release == true)
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: DBAToolkit-${{ needs.build.outputs.version }}-Windows-x64-release-candidate
+          path: release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/DBAToolkit-${{ needs.build.outputs.version }}-Windows-x64-Full.zip
+            release-assets/DBAToolkit-${{ needs.build.outputs.version }}-Windows-x64-Update.zip
+            release-assets/DBAToolkit-${{ needs.build.outputs.version }}-SHA256SUMS.txt
+            release-assets/使用说明.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

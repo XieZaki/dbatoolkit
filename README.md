@@ -8,7 +8,8 @@ V0.7.1 已在隔离 Oracle Free 23 容器使用 python-oracledb Thin 及专用�
 V0.8 增加四库 `diagnose <database_id> disk-growth` 当前空间与日志保留诊断，Docker 实测结果见 [V0.8 验证记录](docs/VERIFICATION_V0_8.md)。
 首次运行前由 DBA 按目标数据库和版本准备只读监控账号，见 [Database Permissions](docs/DATABASE_PERMISSIONS.md)。Toolkit 不提供程序内权限预检或 GRANT/REVOKE 生成功能。
 V0.8.2 增加 Windows/Linux 可重复离线部署、六库 Runtime Manifest、SQL Server ODBC 18→17 回退、`doctor` 和 `runtime-info`。部署和升级流程见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
-Windows x64 绿色便携版与独立数据库驱动替换流程见 [docs/DRIVER_SETUP.md](docs/DRIVER_SETUP.md)。目标机器不需要安装 Python 或 pip；SQL Server 的 Microsoft ODBC Driver 仍由管理员单独安装。
+Windows x64 绿色便携版与独立数据库驱动替换流程见 [docs/DRIVER_SETUP.md](docs/DRIVER_SETUP.md)。Full/Update 包、升级、回滚和发布验收流程见 [便携版升级手册](docs/PORTABLE_UPDATES.md)。目标机器不需要安装 Python 或 pip；SQL Server 的 Microsoft ODBC Driver 仍由管理员单独安装。
+便携版中文快速入门见 [使用说明.md](使用说明.md)，完整操作手册见 [docs/用户操作手册.md](docs/用户操作手册.md)。
 V0.8.2.1 增加实例级非敏感 Connection Profile 解析及 OS Credential Store 命令，凭据缺失时回退为仅本次运行的交互输入。
 V0.8.3 增加 `dba check` / `dba status`、基于 Inventory 的 Runtime Doctor、人类可读默认输出和统一 JSON Presenter；结构化运行日志改为有界文件输出。
 V0.8.3.2 将详细诊断报告统一为自包含离线 HTML；终端保持事故摘要，`--json` 保持机器可读，运行日志仍为 JSONL。阻塞处置命令仅在证据完整时作为人工审核文本显示，Toolkit 永不执行。

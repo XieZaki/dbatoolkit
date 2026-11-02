@@ -1,10 +1,12 @@
 # Windows 绿色便携版与数据库驱动
 
-本手册说明 Windows x64 离线便携 ZIP、驱动检查和替换。当前产品版本仍为 `0.9.0`。便携包使用 CPython Embeddable Runtime 和普通可导入的 `dba` 应用目录；四种 Python 数据库驱动位于独立、带版本号的 `drivers/<database>/versions/`，通过本地 `driver.json` ZIP 显式安装。程序本身不下载、不调用 pip，也不自动执行系统安装器。
+中文操作手册：[用户操作手册](用户操作手册.md)；升级与回退：[UPDATE_GUIDE.md](UPDATE_GUIDE.md)；故障处理：[故障排查.md](故障排查.md)。
+
+本手册说明 Windows x64 离线 Full ZIP、独立 Update ZIP、驱动检查和替换。当前产品版本仍为 `0.9.0`。Full 包使用 CPython Embeddable Runtime 和普通可导入的 `dba` 应用目录；四种 Python 数据库驱动位于独立、带版本号的 `drivers/<database>/versions/`，通过本地 `driver.json` ZIP 显式安装。程序本身不下载、不调用 pip，也不自动执行系统安装器。
 
 ## 首次使用
 
-1. 从经批准的分发位置下载 `DBAToolkit-0.9.0-Windows-x64-Portable.zip` 和 `.sha256` 文件。
+1. 从经批准的分发位置下载 `DBAToolkit-0.9.0-Windows-x64-Full.zip` 和对应 `SHA256SUMS.txt`。
 2. 在 Windows PowerShell 使用 `Get-FileHash -Algorithm SHA256` 核对 ZIP，再解压到本机目录。不要解压到网络共享目录。
 3. 双击 `启动.bat`。也可从终端运行 `dba.bat --version`、`dba.bat validate` 或任意已有 `dba` 命令。
 4. 在 `config/inventory.yaml` 或 `config/inventory/` 配置本站 Inventory；便携包初始 Inventory 为空，不包含开发机或真实资产。`examples/inventory/` 中的示例均禁用；复制到站点配置前仍需按本站要求编辑。
@@ -19,7 +21,7 @@
 ```powershell
 .\dba.bat driver list
 .\dba.bat driver check
-.\dba.bat driver install --file D:\Drivers\mysql-driver.zip
+.\dba.bat driver install --file '.\driver-packages\mysql-driver.zip'
 .\dba.bat driver rollback --database mysql
 ```
 
@@ -49,45 +51,23 @@ Toolkit 不下载、运行 MSI、不修改 PATH/注册表、不安装/删除 ODB
 
 ## 更新与回退
 
-推荐把新版本 ZIP 解压到另一个目录，完成只读 smoke check 后再切换使用目录；旧目录可保留以便整体回退。需要原目录原地更新时，使用：
+首次安装使用 Full ZIP。正式版本 0.10.0 起提供 Full 和独立、完整的 Update ZIP。将唯一的最新 Update ZIP 放入安装目录 `updates/`，关闭 Toolkit 后双击 `升级.bat`。它使用 Windows PowerShell 外部更新器，不运行旧 Python 来覆盖自身 Runtime。详细步骤、版本兼容、首个 0.9.0 基线迁移和回滚命令见 [便携版升级手册](PORTABLE_UPDATES.md)。
 
-```powershell
-.\deployment\windows\upgrade-portable.ps1 `
-  -PackageZip D:\Releases\DBAToolkit-0.9.0-Windows-x64-Portable.zip `
-  -InstallDirectory D:\DBA\DBAToolkit
-```
-
-脚本先将新包解压到同卷隔离 staging 并检查运行时、Registry 和驱动，再切换 `runtime`、`app` 与启动器；更新前程序目录保留在带时间戳的备份目录。脚本不会覆盖或删除既有 `drivers`、`driver-packages`、`config`、`data`、`reports`、`logs`，也不读取/修改 Credential Store。切换中途失败会尝试恢复旧程序目录；若恢复失败，旧目录备份仍保留，需 DBA 手工恢复。不要将任意文件夹内容直接覆盖到已有便携目录。
+升级器验证清单、版本范围、完整文件列表与 SHA256、磁盘空间及新 Runtime/SQL Registry；在同卷 staging 中准备后再切换。升级失败会尝试恢复旧程序并保留备份。只在活动驱动确认为旧 Toolkit 默认包时更新默认驱动；用户选择的自定义驱动、活动驱动目录、`driver-packages`、Inventory、Credential Store、报告和日志均保留。不要将 ZIP 内容直接覆盖到已有便携目录。
 
 运行时源码与包内文件受用户目录 ACL 控制。这不是抵御同一 Windows 用户恶意篡改的安全边界；同一账户下可写包目录的进程也可以改动 Toolkit 或驱动。不要把便携目录放到多人可写共享盘。
 
 ## 构建和离线验证
 
-Windows 手工构建需要 Windows x64 CPython 3.13 Embeddable ZIP，以及为 CPython 3.13 / Windows x64 目标准备、并覆盖核心依赖和四个 driver bundle 的本地 wheelhouse。构建宿主使用受支持的 CPython 3.11–3.13 x64；锁定的 wheel 目标 ABI 必须与嵌入式运行时一致：
+Windows 手工构建入口为 `deployment/build_full.ps1 -Version <version>`、`deployment/build_update.ps1 -Version <version>` 和 `deployment/verify_release.ps1 -Version <version>`。版本必须匹配 `pyproject.toml` 与 `dba.__version__`。构建宿主使用 Windows x64 CPython，目标使用项目固定的 CPython 3.13.17 Embeddable Runtime 与哈希锁定 wheelhouse。构建只从本地 wheelhouse 使用 `pip --no-index`；目标端不需要 Python、pip 或联网。
 
 ```powershell
-New-Item -ItemType Directory -Path .\deployment\wheelhouse -Force | Out-Null
-foreach ($lock in @('base.lock', 'mysql.lock', 'postgresql.lock', 'oracle.lock', 'sqlserver.lock')) {
-    python -m pip download --no-deps --only-binary=:all: --require-hashes `
-        --platform win_amd64 --python-version 3.13 --implementation cp --abi cp313 `
-        --dest .\deployment\wheelhouse `
-        --requirement (Join-Path '.\deployment\locks\windows-cp313-x64' $lock)
-}
-.\deployment\build_portable.ps1 `
-  -PythonEmbedZip D:\BuildInputs\python-3.13.17-embed-amd64.zip `
-  -Wheelhouse .\deployment\wheelhouse `
-  -BuildPython .\.venv\Scripts\python.exe
-.\deployment\verify_portable.ps1
-.\deployment\package_portable.ps1
+.\deployment\build_full.ps1 -Version 0.9.0
+.\deployment\build_update.ps1 -Version 0.9.0
+.\deployment\verify_release.ps1 -Version 0.9.0
 ```
 
-构建脚本只从指定 wheelhouse 使用 `pip --no-index`，不会在目标端调用 pip；它显式复制产品源码、SQL、必要文档和禁用示例，不复制本机 `.venv`、Inventory、配置、凭据、诊断报告或 Git 数据。默认产物为 `dist/DBAToolkit-0.9.0-Windows-x64-Portable.zip` 和 SHA256。手动触发的 GitHub Actions workflow 构建 Windows 工件并短期上传，不创建 GitHub Release 或 Tag。
-
-```powershell
-Get-FileHash .\dist\DBAToolkit-0.9.0-Windows-x64-Portable.zip -Algorithm SHA256
-```
-
-验证脚本直接调用 ZIP 内 `runtime/python.exe`，并把 PATH 限制到 Windows System32；它运行版本命令、`dba validate` 和受管驱动的离线导入检查，不连接数据库、不发起网络请求。未安装 SQL Server ODBC Driver 时会单独警告，不会阻止其他三库验证。
+在当前 0.9.0 基线上，Full 是首次安装基线；同版本 Update 只作为不同 build ID 的开发候选。0.10.0 及以后正式版本才发布 Update。GitHub Actions 的 main 构建上传候选 Full/Update artifacts；匹配项目版本的正式 `vX.Y.Z` tag 才触发 Release 创建。工作流不创建 tag。完整升级说明见 [便携版升级手册](PORTABLE_UPDATES.md)。
 
 CPython Embeddable Runtime 使用 `._pth` 控制导入路径；它与完整 Python 安装和 pip 部署的运行语义不同。本项目只在便携验收范围内配置这些路径，不把该压缩包当作通用 Python 安装包。
 

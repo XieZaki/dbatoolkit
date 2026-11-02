@@ -3,22 +3,34 @@
 ## Current position
 
 ```text
-CURRENT_PHASE: Deployment stabilization (existing OFFLINE-RUNTIME-001)
-CURRENT_TASK: OFFLINE-RUNTIME-001 — IN_PROGRESS; Windows x64 portable runtime and independently replaceable database drivers, user-authorized 2026-11-02
+CURRENT_PHASE: Deployment stabilization (OFFLINE-RUNTIME-001 / PORTABLE-UPDATE-001)
+CURRENT_TASK: PORTABLE-UPDATE-001 — E2E_PENDING; r3 Update preflight defect fixed and r4 candidate verified in a disposable same-version build transition, 2026-11-02
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.0
 BASE_HEAD_FOR_CURRENT_CHECKPOINT: 928ba188ecec5a5a7cfe26b93b5b0756831c40f8
-CURRENT_TASK_DELIVERY: User-provided portable distribution scope is being implemented under the existing OFFLINE-RUNTIME-001; no Task ID or Roadmap order change. Earlier SQL-REGISTRY-SAFETY-001 and V091-P5-WORKBENCH-001 evidence/state remains recorded and is not altered by this pointer.
+CURRENT_TASK_DELIVERY: r4 Full/Update artifact hashes, corrected staged Inventory validation, disposable upgrade/rollback, synthetic data preservation, and current regression evidence are recorded in Acceptance §45. OFFLINE-RUNTIME-001 remains E2E_PENDING because a genuinely Python-absent host and physically disconnected network were unavailable; `doctor` was not run to protect the real Credential Session. Earlier task states and Roadmap order are unchanged.
 LAST_COMPLETED_TASK: PERMISSION-PREFLIGHT-001 — conditionally closed; canonical status DONE in Backlog.
-NEXT_READY_TASK: OFFLINE-RUNTIME-001; user has authorized implementation.
-WAITING_FOR_USER_REVIEW: NO — implementation in progress.
-WAITING_FOR_USER_ACTION: NONE.
+NEXT_READY_TASK: PORTABLE-UPDATE-001 closeout after genuine no-Python/disconnected-network checks and formal cross-version Update evidence; do not start another Backlog task.
+WAITING_FOR_USER_REVIEW: YES — portable package evidence and remaining environment limits.
+WAITING_FOR_USER_ACTION: Provide an authorized clean Windows VM/Sandbox with no Python and network disabled for the strict environment gates; publishing a GitHub Release remains a separate, not-yet-performed action.
 FOLLOWING_ORDER: Roadmap order unchanged; no other Backlog task started.
 ```
 
-### OFFLINE-RUNTIME-001 implementation checkpoint — 2026-11-02
+### PORTABLE-UPDATE-001 — package and manual validation — 2026-11-02
+
+Full and Update ZIPs plus the standalone Chinese quick-start manual are verified in `dist/portable-release-20261102-r3/`; archive hashes, package smoke, manuals, and quality evidence are recorded in Acceptance §44. Backlog status is `E2E_PENDING`. `OFFLINE-RUNTIME-001` also remains `E2E_PENDING` for a genuinely Python-absent Windows host and physically disconnected-network evidence. No GitHub Release or tag was created; Roadmap order is unchanged.
+
+### PORTABLE-UPDATE-001 — final package acceptance follow-up — 2026-11-02
+
+r3 Full package checks passed, but the actual r3 Update failed before replacement because staged validation lacked an Inventory. Fixed `apply-update.ps1` to use a temporary empty synthetic Inventory, added an updater regression, rebuilt r4, and verified r4 Full/Update hashes. The disposable r2-to-r4 same-version transition and manual/file-lock rollback preserved all synthetic user data; r4 package driver replacement/rollback was checked with a synthetic driver. Current Windows full pytest: 1203 passed, 3 skipped; Ruff, strict MyPy, `dba validate`, PowerShell parsing and `git diff --check` passed. Secret Scanner was unavailable. Both tasks remain E2E_PENDING: no truly Python-free host, disconnected-network test, or formal cross-version Update was available. No release/tag or next Backlog task started.
+
+### OFFLINE-RUNTIME-001 initial implementation checkpoint — 2026-11-02 (superseded by final package evidence below)
 
 The Windows x64 portable runtime and independent driver manager are under implementation. Final offline full pytest passed **1186 passed, 3 skipped**; targeted driver/SQL Server tests passed **102**; Ruff, strict MyPy (76 source files), example-Inventory `dba validate`, PowerShell parser checks, and diff-check passed. The portable build reached driver bundling but safely rejected PyMySQL because wheel metadata (`1.1.3`) and module version (`2.2.8`) disagree; no distributable ZIP was produced. This is tracked separately as `MYSQL-DRIVER-PROVENANCE-001`; `OFFLINE-RUNTIME-001` remains `IN_PROGRESS`. See Acceptance §42 for scope and limits.
+
+### OFFLINE-RUNTIME-001 final package evidence — 2026-11-02
+
+Acceptance §43 records the release-identity fix, final ZIP hash, Windows package smoke, independent driver replacement/rollback, synthetic user-data preservation, current full-suite and quality results. Backlog is `E2E_PENDING`: the launcher succeeded with `PATH` restricted to System32 and the bundled CPython 3.13 runtime, but the host still has Python installed and no genuinely Python-absent Windows environment was available. No database, Docker, Inventory, Credential Store or real credential was accessed. No Roadmap ordering or other task status changed; no commit/push occurred.
 
 ### INVENTORY-CONNECTION-001 first-phase implementation — 2026-10-31
 

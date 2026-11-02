@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$PackageRoot = 'dist\DBAToolkit-0.9.0-Windows-x64-Portable')
 
 $ErrorActionPreference = 'Stop'
@@ -8,6 +8,11 @@ $root = (Resolve-Path -LiteralPath $packageCandidate).Path
 $python = Join-Path $root 'runtime\python.exe'
 $entry = Join-Path $root 'app\portable_entry.py'
 foreach ($path in @($python, $entry, (Join-Path $root '启动.bat'),
+                    (Join-Path $root '使用说明.md'),
+                    (Join-Path $root 'docs\用户操作手册.md'),
+                    (Join-Path $root 'docs\DRIVER_SETUP.md'),
+                    (Join-Path $root 'docs\UPDATE_GUIDE.md'),
+                    (Join-Path $root 'docs\故障排查.md'),
                     (Join-Path $root 'drivers\mysql\state.json'),
                     (Join-Path $root 'drivers\postgresql\state.json'),
                     (Join-Path $root 'drivers\oracle\state.json'),

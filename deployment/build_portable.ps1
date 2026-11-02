@@ -1,8 +1,11 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$PythonEmbedZip,
     [Parameter(Mandatory = $true)][string]$Wheelhouse,
     [Parameter(Mandatory = $true)][string]$BuildPython,
+    [string]$Version = '0.9.0',
+    [string]$BuildId = '',
+    [string]$MinimumSupportedVersion = '0.9.0',
     [string]$OutputDirectory = 'dist'
 )
 
@@ -12,7 +15,7 @@ $embedZip = (Resolve-Path -LiteralPath $PythonEmbedZip).Path
 $wheelRoot = (Resolve-Path -LiteralPath $Wheelhouse).Path
 $buildPythonPath = (Resolve-Path -LiteralPath $BuildPython).Path
 $outputRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot $OutputDirectory))
-$packageName = 'DBAToolkit-0.9.0-Windows-x64-Portable'
+$packageName = "DBAToolkit-$Version-Windows-x64-Full"
 $packageRoot = Join-Path $outputRoot $packageName
 $expectedEmbedSha256 = '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38'
 $actualEmbedSha256 = (Get-FileHash -LiteralPath $embedZip -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -22,6 +25,18 @@ if ($actualEmbedSha256 -ne $expectedEmbedSha256) {
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'Portable builds require Windows x64.' }
 if (Test-Path -LiteralPath $packageRoot) { throw "Output already exists; choose a new output directory: $packageRoot" }
+if ($Version -notmatch '^\d+\.\d+\.\d+$' -or $MinimumSupportedVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw 'Release versions must use numeric major.minor.patch form.'
+}
+$projectVersion = [regex]::Match((Get-Content -LiteralPath (Join-Path $projectRoot 'pyproject.toml') -Raw),
+    '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+$sourceVersion = [regex]::Match((Get-Content -LiteralPath (Join-Path $projectRoot 'dba\__init__.py') -Raw),
+    '(?m)^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+if (-not $projectVersion -or $projectVersion -ne $sourceVersion -or $Version -ne $projectVersion) {
+    throw 'Requested package version must match both pyproject.toml and dba.__version__.'
+}
+if (-not $BuildId) { $BuildId = "local-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))" }
+if ($BuildId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$') { throw 'Build ID contains unsupported characters.' }
 if (@(Get-ChildItem -LiteralPath $wheelRoot -Filter '*.whl' -File).Count -eq 0) {
     throw 'The local wheelhouse is empty; prepare matching Windows x64 CPython wheels first.'
 }
@@ -40,6 +55,7 @@ New-Item -ItemType Directory -Path (Join-Path $packageRoot 'runtime') -Force | O
 New-Item -ItemType Directory -Path (Join-Path $packageRoot 'app') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $packageRoot 'app\vendor') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $packageRoot 'driver-packages') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $packageRoot 'app\default-driver-packages') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $packageRoot 'docs') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $packageRoot 'app\deployment') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $packageRoot 'deployment\windows') -Force | Out-Null
@@ -71,11 +87,25 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'app\portable_entry.py') -Destina
 Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\windows\PORTABLE_README.md') -Destination (Join-Path $packageRoot 'README.md') -Force
 foreach ($document in @('DEPLOYMENT.md', 'CREDENTIAL_SECURITY.md', 'DATABASE_PERMISSIONS.md',
                         'DRIVER_SETUP.md', 'USAGE.md', 'VERSION_PROFILES.md',
-                        'REPLICATION_DIAGNOSIS.md')) {
+                        'REPLICATION_DIAGNOSIS.md', 'PORTABLE_UPDATES.md',
+                        '用户操作手册.md', 'UPDATE_GUIDE.md', '故障排查.md')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot ("docs\" + $document)) `
         -Destination (Join-Path $packageRoot 'docs') -Force
 }
+Copy-Item -LiteralPath (Join-Path $projectRoot '使用说明.md') -Destination (Join-Path $packageRoot '使用说明.md') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\windows\startup_check.py') -Destination (Join-Path $packageRoot 'deployment\windows') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\verify_portable.ps1') `
+    -Destination (Join-Path $packageRoot 'deployment') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\windows\upgrade-portable.ps1') `
+    -Destination (Join-Path $packageRoot 'deployment\windows') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\windows\update-bootstrap.ps1') `
+    -Destination (Join-Path $packageRoot 'deployment\windows\update-bootstrap.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\windows\rollback-portable.ps1') `
+    -Destination (Join-Path $packageRoot 'deployment\windows\rollback-portable.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\windows\upgrade-launch.bat') `
+    -Destination (Join-Path $packageRoot '升级.bat') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\windows\upgrade-launch.bat') `
+    -Destination (Join-Path $packageRoot 'upgrade.bat') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\windows\portable-launch.bat') -Destination (Join-Path $packageRoot '启动.bat') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'deployment\windows\portable-cli.bat') -Destination (Join-Path $packageRoot 'dba.bat') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'examples') -Destination $packageRoot -Recurse
@@ -85,6 +115,15 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'examples') -Destination $package
 [IO.File]::WriteAllText((Join-Path $packageRoot 'config\inventory.yaml'), 'databases: []', [Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $packageRoot 'config\runtime.yaml.example'),
     '# Optional site-specific runtime settings. Do not put passwords here.', [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $packageRoot 'data\README.txt'),
+    'Local user data and the explicitly selected encrypted Credential Store belong here.',
+    [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $packageRoot 'reports\README.txt'),
+    'Generated diagnostic reports belong here. Application upgrades preserve this directory.',
+    [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $packageRoot 'logs\README.txt'),
+    'Local runtime logs belong here. Application upgrades preserve this directory.',
+    [Text.UTF8Encoding]::new($false))
 
 $baseLock = Join-Path $projectRoot 'deployment\locks\windows-cp313-x64\base.lock'
 & $buildPythonPath -m pip install --no-index --find-links $wheelRoot --only-binary=:all: `
@@ -109,20 +148,45 @@ foreach ($item in $drivers) {
     if ($LASTEXITCODE -ne 0) { throw "Driver wheel resolution failed for $($item.Database)." }
     $bundle = Join-Path $packageRoot ("driver-packages\" + $item.Database + '.zip')
     & $embeddedPython -I (Join-Path $projectRoot 'deployment\windows\write_driver_bundle.py') `
-        --site-packages $sitePackages --database $item.Database --output $bundle --minimum-toolkit-version '0.9.0'
+        --site-packages $sitePackages --database $item.Database --output $bundle `
+        --minimum-toolkit-version '0.9.0' --project-root $projectRoot
     if ($LASTEXITCODE -ne 0) { throw "Driver bundle creation failed for $($item.Database)." }
     & $embeddedPython -I (Join-Path $appRoot 'portable_entry.py') driver install --file $bundle --json
     if ($LASTEXITCODE -ne 0) { throw "Portable driver activation failed for $($item.Database)." }
+    Copy-Item -LiteralPath $bundle -Destination (Join-Path $packageRoot ("app\default-driver-packages\" + $item.Database + '.zip')) -Force
 }
 & $embeddedPython -I (Join-Path $packageRoot 'deployment\windows\startup_check.py')
 if ($LASTEXITCODE -ne 0) { throw 'Portable startup verification failed.' }
 & $embeddedPython -I (Join-Path $appRoot 'portable_entry.py') validate --json
 if ($LASTEXITCODE -ne 0) { throw 'Portable SQL Registry validation failed.' }
+# Build-time driver and validation commands write a local runtime log. It is
+# generated build data, not part of the portable application payload.
+$buildLog = Join-Path $packageRoot 'logs\dba.jsonl'
+if (Test-Path -LiteralPath $buildLog -PathType Leaf) { Remove-Item -LiteralPath $buildLog -Force }
+if (@(Get-ChildItem -LiteralPath (Join-Path $packageRoot 'logs') -Force -File |
+        Where-Object { $_.Name -ne 'README.txt' }).Count -gt 0) {
+    throw 'Portable package staging contains unexpected log output.'
+}
+$bytecodeDirectories = @(Get-ChildItem -LiteralPath $packageRoot -Directory -Filter '__pycache__' -Recurse -Force)
+foreach ($cacheDirectory in $bytecodeDirectories) {
+    Remove-Item -LiteralPath $cacheDirectory.FullName -Recurse -Force
+}
+Get-ChildItem -LiteralPath $packageRoot -File -Recurse -Force |
+    Where-Object { $_.Extension -in @('.pyc', '.pyo') } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 
 $manifest = [ordered]@{
-    product_version = '0.9.0'
+    package_type = 'Full'
+    application_version = $Version
+    product_version = $Version
+    minimum_supported_version = $MinimumSupportedVersion
+    maximum_supported_version = $null
+    runtime_version = $embeddedRuntime.major.ToString() + '.' + $embeddedRuntime.minor.ToString()
     python_runtime = $pythonMinor.Split(':')[0]
     architecture = 'x64'
+    data_schema_version = 1
+    driver_manifest_version = 1
+    build_id = $BuildId
     package_mode = 'CPython Embeddable Runtime + external versioned driver packages'
     driver_packages = @('mysql', 'postgresql', 'oracle', 'sqlserver')
     native_external = @('Microsoft ODBC Driver 18 or 17 for SQL Server')

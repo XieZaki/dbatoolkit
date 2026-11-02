@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$PackageZip,
     [Parameter(Mandatory = $true)][string]$InstallDirectory
@@ -50,7 +50,12 @@ try {
     & $verifyScript -PackageRoot $stage
     if ($LASTEXITCODE -ne 0) { throw 'Staged portable smoke validation failed.' }
 
-    $items = @('runtime', 'app', '启动.bat', 'dba.bat', 'deployment\windows\startup_check.py')
+    $items = @(
+        'runtime', 'app', 'docs',
+        '启动.bat', '升级.bat', 'upgrade.bat', 'dba.bat', 'README.md', '使用说明.md', 'portable-manifest.json',
+        'deployment\windows\startup_check.py', 'deployment\windows\update-bootstrap.ps1',
+        'deployment\windows\upgrade-portable.ps1', 'deployment\windows\rollback-portable.ps1'
+    )
     try {
         foreach ($relative in $items) {
             $destination = Join-Path $install $relative

@@ -5,6 +5,7 @@ import os
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from dba import __version__
 from dba.cli import main as cli_main
 from dba.core import DatabaseType
 from dba.driver_manager import DriverManager, _normalized_arch, _python_abi, load_database_driver
+from dba.driver_versions import DriverModuleVersionError, validate_driver_module_version
 from dba.errors import ToolkitError
 
 
@@ -48,7 +50,16 @@ def _write_driver_zip(path: Path, *, database: str = "mysql", version: str = "1.
     driver_version = str(manifest["driver_version"])
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("driver.json", json.dumps(manifest))
-        module_source = f"__version__ = {version!r}\n" + source
+        if database == "mysql" and module == "pymysql":
+            version_parts = tuple(int(part) for part in version.split(".")[:3])
+            module_source = (
+                f"__version__ = {version!r}\n"
+                f"VERSION_STRING = {version!r}\n"
+                f"VERSION = {(*version_parts, 'final')!r}\n"
+                + source
+            )
+        else:
+            module_source = f"__version__ = {version!r}\n" + source
         archive.writestr(f"site-packages/{module.replace('.', '/')}.py", module_source)
         archive.writestr(
             f"site-packages/{dist}-{driver_version}.dist-info/METADATA",
@@ -57,6 +68,70 @@ def _write_driver_zip(path: Path, *, database: str = "mysql", version: str = "1.
         for name, data in (extra or {}).items():
             archive.writestr(name, data)
     return path
+
+
+def test_pymysql_dual_version_identity_uses_release_metadata() -> None:
+    module = SimpleNamespace(
+        __version__="2.2.8",
+        VERSION_STRING="1.1.3",
+        VERSION=(1, 1, 3, "final"),
+        version_info=(2, 2, 8, "final", 1),
+    )
+
+    evidence = validate_driver_module_version(
+        module,
+        module_name="pymysql",
+        distribution_name="PyMySQL",
+        distribution_version="1.1.3",
+    )
+
+    assert evidence.release_version == "1.1.3"
+    assert evidence.reported_module_version == "2.2.8"
+    assert evidence.reported_version_role == "mysqlclient compatibility"
+
+
+def test_pymysql_dual_version_identity_rejects_release_or_compatibility_conflict() -> None:
+    module = SimpleNamespace(
+        __version__="2.2.8",
+        VERSION_STRING="1.1.3",
+        VERSION=(1, 1, 4, "final"),
+        version_info=(2, 2, 8, "final", 1),
+    )
+    with pytest.raises(DriverModuleVersionError):
+        validate_driver_module_version(
+            module,
+            module_name="pymysql",
+            distribution_name="PyMySQL",
+            distribution_version="1.1.3",
+        )
+
+    module.VERSION = (1, 1, 3, "final")
+    module.version_info = (2, 2, 9, "final", 1)
+    with pytest.raises(DriverModuleVersionError):
+        validate_driver_module_version(
+            module,
+            module_name="pymysql",
+            distribution_name="PyMySQL",
+            distribution_version="1.1.3",
+        )
+
+
+def test_regular_driver_module_version_must_match_distribution() -> None:
+    module = SimpleNamespace(__version__="3.3.6")
+    evidence = validate_driver_module_version(
+        module,
+        module_name="psycopg",
+        distribution_name="psycopg",
+        distribution_version="3.3.6",
+    )
+    assert evidence.release_version == "3.3.6"
+    with pytest.raises(DriverModuleVersionError):
+        validate_driver_module_version(
+            module,
+            module_name="psycopg",
+            distribution_name="psycopg",
+            distribution_version="3.3.7",
+        )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="portable driver packages target Windows")
