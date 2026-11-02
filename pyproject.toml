@@ -50,7 +50,7 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--basetemp=.tmp/pytest --strict-markers"
+addopts = "--strict-markers"
 markers = [
     "unit: deterministic function or component tests using fakes and temporary files",
     "integration: multiple Toolkit components composed with fake drivers or local files",

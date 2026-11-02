@@ -1477,6 +1477,14 @@ Both r4 manifests identify Full/Update `0.9.0`, build `manual-20261102-r4`, mini
 
 The r4 Update correction is in `deployment/windows/update-tools/apply-update.ps1`: staged Registry validation receives an explicit temporary `databases: []` Inventory in the staging root and deletes it after validation. It never copies the user's Inventory into staging. `tests/test_portable_update.py` now enforces that the updater supplies this disposable Inventory. The r3 archive failed the first real-package attempt as described; r4 was rebuilt and its actual Update path passed.
 
+## 46. Windows Actions pytest temporary-directory failure (2026-11-03)
+
+The Windows package workflow's pytest failure was reproduced locally with the same `pytest.ini` behavior: `pyproject.toml` set `--basetemp=.tmp/pytest`, but a clean checkout has no `.tmp` parent. A test requesting `tmp_path` then failed while pytest attempted to create the nested base directory (`FileNotFoundError`, Windows `WinError 3`). A trivial test without `tmp_path` did not trigger the failure, matching the fixture-dependent CI symptom. `tests/conftest.py` did not set `TEMP`, `TMP`, or `basetemp`; the repository-relative path came from `pyproject.toml`.
+
+The fixed configuration removes the repository-relative basetemp. The Windows Actions test step validates `RUNNER_TEMP`, creates dedicated pytest and process-temp directories beneath it, confirms both exist, sets `TEMP` and `TMP` in the PowerShell process before pytest (so child processes inherit them), and passes the prepared pytest directory via `--basetemp`.
+
+Local verification: a minimal clean-checkout fixture reproduced the prior failure (`tmp_path` setup raised `FileNotFoundError [WinError 3]` when `.tmp` was absent); the same repro without `tmp_path` passed. After the fix, the new CI-contract regression and repository safety tests passed (**18 passed**), the full Windows pytest suite passed (**1204 passed, 3 skipped, 0 failed**), Ruff passed, strict MyPy passed for 77 source files, and the workflow's PowerShell test block parsed successfully. These are local results, not a GitHub Actions run. The Actions rerun remains pending successful push; the configured GitHub OAuth credential previously rejected workflow-file updates because it lacks the `workflow` scope.
+
 ### Automated and static checks
 
 `ISOLATED_OFFLINE_TEST`: `tests/test_portable_update.py` — **14 passed**; Windows-local full pytest — **1203 passed, 3 skipped, 0 failed**. The skips were the POSIX permission-bit check (not applicable on Windows), native symlink creation unavailable to this process token, and opt-in system/real-database test not enabled. Ruff passed repository-wide; strict MyPy passed for 77 `dba` files; `dba validate --inventory examples/inventory` passed (11 assets, 118 SQL scripts, 0 warnings); all 15 deployment PowerShell scripts parsed; `git diff --check` passed (Git emitted existing LF-to-CRLF advisory notices).

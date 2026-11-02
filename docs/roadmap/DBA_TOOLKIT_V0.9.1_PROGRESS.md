@@ -16,6 +16,10 @@ WAITING_FOR_USER_ACTION: Provide an authorized clean Windows VM/Sandbox with no 
 FOLLOWING_ORDER: Roadmap order unchanged; no other Backlog task started.
 ```
 
+### Windows Actions pytest temporary-directory fix — 2026-11-03
+
+Root cause was `pyproject.toml` pinning pytest to repository-relative `.tmp/pytest`; clean CI checkouts lack the `.tmp` parent, and tests using `tmp_path` failed during fixture setup. The Windows workflow now provisions separate pytest and process temp directories under `RUNNER_TEMP`, sets `TEMP`/`TMP` for pytest and child processes, and passes the prepared pytest directory as `--basetemp`. Focused tests: 18 passed. Full Windows pytest: 1204 passed, 3 skipped. Ruff, strict MyPy (77 files), and PowerShell parsing passed. The local failure reproduction and GitHub push/Actions status are recorded in Acceptance §46; GitHub rerun is not yet available because the push credential lacks `workflow` scope. `OFFLINE-RUNTIME-001` and `PORTABLE-UPDATE-001` remain `E2E_PENDING`; no status or Roadmap order changed.
+
 ### PORTABLE-UPDATE-001 — package and manual validation — 2026-11-02
 
 Full and Update ZIPs plus the standalone Chinese quick-start manual are verified in `dist/portable-release-20261102-r3/`; archive hashes, package smoke, manuals, and quality evidence are recorded in Acceptance §44. Backlog status is `E2E_PENDING`. `OFFLINE-RUNTIME-001` also remains `E2E_PENDING` for a genuinely Python-absent Windows host and physically disconnected-network evidence. No GitHub Release or tag was created; Roadmap order is unchanged.

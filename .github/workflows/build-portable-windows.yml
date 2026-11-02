@@ -61,7 +61,23 @@ jobs:
       - name: Run Windows test suite
         shell: pwsh
         run: |
-          python -m pytest -q
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -or -not (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
+            throw 'GitHub Actions RUNNER_TEMP is unavailable.'
+          }
+          $pytestTemp = Join-Path $env:RUNNER_TEMP 'dbatoolkit-pytest'
+          $processTemp = Join-Path $env:RUNNER_TEMP 'dbatoolkit-process-temp'
+          New-Item -ItemType Directory -Path $pytestTemp -Force | Out-Null
+          New-Item -ItemType Directory -Path $processTemp -Force | Out-Null
+          $pytestTemp = (Resolve-Path -LiteralPath $pytestTemp).Path
+          $processTemp = (Resolve-Path -LiteralPath $processTemp).Path
+          if (-not (Test-Path -LiteralPath $pytestTemp -PathType Container) -or -not (Test-Path -LiteralPath $processTemp -PathType Container)) {
+            throw 'Could not prepare Windows pytest temporary directories.'
+          }
+          $env:TEMP = $processTemp
+          $env:TMP = $processTemp
+          Write-Host "Pytest basetemp: $pytestTemp"
+          Write-Host "Process TEMP/TMP: $processTemp"
+          python -m pytest -q --basetemp="$pytestTemp"
           if ($LASTEXITCODE -ne 0) { throw 'Windows pytest failed.' }
           ruff check .
           if ($LASTEXITCODE -ne 0) { throw 'Ruff failed.' }

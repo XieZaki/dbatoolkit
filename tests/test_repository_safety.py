@@ -48,6 +48,24 @@ def test_ignore_rules_cover_local_artifacts_and_keep_examples(tmp_path: Path) ->
         assert (result.returncode == 0) is expected, relative
 
 
+def test_windows_ci_pytest_temp_uses_runner_temp() -> None:
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github/workflows/build-portable-windows.yml").read_text(
+        encoding="utf-8"
+    )
+    test_step = workflow.split("- name: Run Windows test suite", 1)[1].split(
+        "- name:", 1
+    )[0]
+
+    assert "--basetemp=.tmp/pytest" not in pyproject
+    assert "Join-Path $env:RUNNER_TEMP 'dbatoolkit-pytest'" in test_step
+    assert "Join-Path $env:RUNNER_TEMP 'dbatoolkit-process-temp'" in test_step
+    assert "Test-Path -LiteralPath $pytestTemp -PathType Container" in test_step
+    assert "$env:TEMP = $processTemp" in test_step
+    assert "$env:TMP = $processTemp" in test_step
+    assert 'python -m pytest -q --basetemp="$pytestTemp"' in test_step
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
 def test_local_inventory_survives_repository_update(tmp_path: Path) -> None:
     source = tmp_path / "checkout"
