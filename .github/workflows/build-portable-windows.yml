@@ -73,6 +73,21 @@ jobs:
           if (-not (Test-Path -LiteralPath $pytestTemp -PathType Container) -or -not (Test-Path -LiteralPath $processTemp -PathType Container)) {
             throw 'Could not prepare Windows pytest temporary directories.'
           }
+          $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          Write-Host "Windows runner current-user SID: $runnerSid"
+          foreach ($entry in @(
+            @{ label = 'Pytest basetemp'; path = $pytestTemp },
+            @{ label = 'Process TEMP/TMP'; path = $processTemp }
+          )) {
+            $acl = Get-Acl -LiteralPath $entry.path
+            $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            $trusteeSids = @($acl.Access | ForEach-Object {
+              try { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }
+              catch { [string]$_.IdentityReference }
+            } | Sort-Object -Unique)
+            Write-Host "$($entry.label) owner SID: $ownerSid"
+            Write-Host "$($entry.label) DACL trustee SIDs: $($trusteeSids -join ', ')"
+          }
           $env:TEMP = $processTemp
           $env:TMP = $processTemp
           Write-Host "Pytest basetemp: $pytestTemp"

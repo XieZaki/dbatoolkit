@@ -53,14 +53,18 @@ def _windows_acl(path: Path, *, initialize: bool = False) -> None:
     if initialize:
         descriptor = ctypes.c_void_p()
         flags = "OICI" if path.is_dir() else ""
-        sddl = f"D:P(A;{flags};FA;;;{sid})(A;{flags};FA;;;SY)"
+        # Some Windows service/admin tokens default newly created objects to the
+        # Administrators owner.  Initialization must establish the current user
+        # as owner as well as applying the private DACL; validation below then
+        # verifies both properties without widening the accepted owner set.
+        sddl = f"O:{sid}D:P(A;{flags};FA;;;{sid})(A;{flags};FA;;;SY)"
         advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
             wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
         advapi.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
         if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
             raise _failure("CredentialStoreUnsafe")
         try:
-            if not advapi.SetFileSecurityW(str(path), 0x80000004, descriptor):
+            if not advapi.SetFileSecurityW(str(path), 0x80000005, descriptor):
                 raise _failure("CredentialStoreUnsafe")
         finally:
             kernel.LocalFree(descriptor)

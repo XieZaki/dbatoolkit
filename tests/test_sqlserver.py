@@ -93,7 +93,8 @@ class FakeConnection:
         self.cursors: list[FakeCursor] = []
         self.failures: dict[str, Exception] = {}
         self.scripts = {
-            p.read_text(encoding="utf-8"): p.stem for p in (ROOT / "sql/sqlserver").glob("*.sql")
+            p.read_bytes().decode("utf-8"): p.stem
+            for p in (ROOT / "sql/sqlserver").glob("*.sql")
         }
         self.results: dict[str, list[dict[str, Any]]] = {
             "monitor_capabilities": [

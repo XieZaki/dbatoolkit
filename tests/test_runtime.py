@@ -222,7 +222,7 @@ def test_doctor_uses_inventory_and_runtime_info_does_not_load_it(
         "credential_store": {"status": "READY"},
         "components": {"sqlserver": {"status": "READY"}},
     })
-    inventory = ROOT / "config" / "inventory.yaml"
+    inventory = ROOT / "examples" / "inventory"
     assert main(["--inventory", str(inventory), "doctor", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["overall"] == "READY"
     assert main(["--inventory", "missing.yaml", "doctor", "--database", "sqlserver",
@@ -264,7 +264,9 @@ def test_dependency_extras_and_lock_files_are_present() -> None:
     for name in ("base", "sqlserver", "postgresql", "mysql", "oracle", "mongodb", "redis"):
         assert (ROOT / "requirements" / f"{name}.lock").is_file()
     base_lock = (ROOT / "requirements/base.lock").read_text(encoding="utf-8")
-    assert "cryptography>=" in base_lock and "argon2-cffi>=" in base_lock
+    assert all(package in base_lock for package in (
+        "cryptography>=", "argon2-cffi>=", "tzdata>=",
+    ))
     data = tomllib.loads(project)
     extras = data["project"]["optional-dependencies"]
     manifest = RuntimeManifest.load(ROOT / "deployment/runtime-manifest.yaml")

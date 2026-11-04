@@ -9,6 +9,20 @@ Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+function Get-Sha256Hex([string]$Path) {
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Assert-OrdinaryPath([string]$Path, [string]$Label) {
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -127,7 +141,7 @@ function Expand-VerifiedUpdate([string]$ZipPath, [string]$StagePath, $Manifest) 
                 $output.Dispose()
                 $input.Dispose()
             }
-            $actualHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actualHash = Get-Sha256Hex $destination
             if ($actualHash -ne ([string]$item.sha256).ToLowerInvariant()) {
                 throw 'Update payload hash verification failed.'
             }

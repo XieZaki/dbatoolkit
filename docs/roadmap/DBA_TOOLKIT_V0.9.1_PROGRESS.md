@@ -3,18 +3,30 @@
 ## Current position
 
 ```text
-CURRENT_PHASE: Deployment stabilization (OFFLINE-RUNTIME-001 / PORTABLE-UPDATE-001)
-CURRENT_TASK: PORTABLE-UPDATE-001 — E2E_PENDING; r3 Update preflight defect fixed and r4 candidate verified in a disposable same-version build transition, 2026-11-02
+CURRENT_PHASE: Deployment stabilization (BUG-WINDOWS-CI-FAILURES-001; parent PORTABLE-UPDATE-001 paused)
+CURRENT_TASK: BUG-WINDOWS-CI-FAILURES-001 — CODE_COMPLETE; five Windows Actions failure classes fixed and final scoped ACL/tzdata/Portable Update acceptance passed, remote Actions rerun pending, 2026-11-04
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.0
-BASE_HEAD_FOR_CURRENT_CHECKPOINT: 928ba188ecec5a5a7cfe26b93b5b0756831c40f8
-CURRENT_TASK_DELIVERY: r4 Full/Update artifact hashes, corrected staged Inventory validation, disposable upgrade/rollback, synthetic data preservation, and current regression evidence are recorded in Acceptance §45. OFFLINE-RUNTIME-001 remains E2E_PENDING because a genuinely Python-absent host and physically disconnected network were unavailable; `doctor` was not run to protect the real Credential Session. Earlier task states and Roadmap order are unchanged.
+BASE_HEAD_FOR_CURRENT_CHECKPOINT: 6ff0fba0f7b629b5fb347c6c5fdad515b618b471
+CURRENT_TASK_DELIVERY: Acceptance §47 records the 198-failure classification, CRLF-exact Fake Driver fixtures, strict SQLite Owner initialization, module-independent .NET SHA256, tzdata dependency, example-Inventory test isolation, Windows-local ACL evidence, and full regression. The 2026-11-04 follow-up independently checks Owner/DACL and revalidates tzdata plus update rejection/recovery in Windows PowerShell 5.1 and PowerShell 7 without rerunning full pytest. No production safety check was relaxed. PORTABLE-UPDATE-001 and OFFLINE-RUNTIME-001 remain E2E_PENDING; Roadmap order and version are unchanged.
 LAST_COMPLETED_TASK: PERMISSION-PREFLIGHT-001 — conditionally closed; canonical status DONE in Backlog.
-NEXT_READY_TASK: PORTABLE-UPDATE-001 closeout after genuine no-Python/disconnected-network checks and formal cross-version Update evidence; do not start another Backlog task.
-WAITING_FOR_USER_REVIEW: YES — portable package evidence and remaining environment limits.
-WAITING_FOR_USER_ACTION: Provide an authorized clean Windows VM/Sandbox with no Python and network disabled for the strict environment gates; publishing a GitHub Release remains a separate, not-yet-performed action.
+NEXT_READY_TASK: Post-fix GitHub Actions rerun for BUG-WINDOWS-CI-FAILURES-001 after user-approved commit/push; then resume PORTABLE-UPDATE-001. Do not start another Backlog task.
+WAITING_FOR_USER_REVIEW: YES — review the CI fix and local acceptance before commit/push.
+WAITING_FOR_USER_ACTION: Approve Commit and Push so the Windows Actions rerun can provide remote verification. GitHub Release/tag/version changes remain out of scope.
 FOLLOWING_ORDER: Roadmap order unchanged; no other Backlog task started.
 ```
+
+### BUG-WINDOWS-CI-FAILURES-001 — code-complete local acceptance — 2026-11-03
+
+The failed Actions run at `6ff0fba0f7b629b5fb347c6c5fdad515b618b471` was classified into five causes: 170 database Fake Driver failures from CRLF-preserving Registry text versus newline-normalizing fixture keys; 21 SQLite Credential Store initialization failures because a Runner admin/service token could leave Administrators as Owner after the private DACL was set; 5 Portable Update failures because Windows PowerShell 5.1 inherited a module path where `Get-FileHash` was unavailable; one missing-IANA-data failure; and one test dependency on ignored local `config/inventory.yaml`.
+
+Fixtures now decode SQL bytes exactly; a synthetic CRLF checkout regression covers SQL Server, MySQL, and PostgreSQL. SQLite initialization explicitly sets current-user Owner plus the existing private current-user/SYSTEM DACL, then runs the unchanged strict validation. Update hashing uses .NET SHA256 under Windows PowerShell 5.1 and PowerShell 7. `tzdata` is a base/offline dependency, and the runtime test uses committed example Inventory. The workflow will emit Runner SID and temp Owner/DACL trustee SIDs on the next run.
+
+Final Windows-local `ISOLATED_OFFLINE_TEST`: 1211 passed, 3 skipped, 0 failed. Focused database 485/1, credential 44/1, Portable Update 18/0, and independent timezone/Inventory/CRLF 6/0 checks passed. Ruff, strict MyPy, all 15 deployment PowerShell parses, `dba validate`, diff check and secret scans passed. Exact evidence and boundaries are in Acceptance §47. No database, Docker, real Inventory, real Credential Store, credential, commit, push, tag, Release, or version change occurred. Remote GitHub Actions is `NOT_EXECUTED` until the user approves commit/push; Bug status is `CODE_COMPLETE`, not VERIFIED.
+
+### Final targeted acceptance follow-up — 2026-11-04
+
+`ISOLATED_OFFLINE_TEST`: the focused Credential Store ACL, Portable Update and timezone selection passed **29 tests**; the runtime lock/timezone supplement passed **2 tests** (timezone repeated). PowerShell 5.1 and 7 both rejected SHA256 mismatches, restored a failed update, completed manual rollback, and passed all three version transitions. The existing Full ZIP's bundled runtime resolved `Asia/Shanghai` with system TZPATH cleared, confirming the packaged tzdata. Targeted Ruff and `git diff --check` passed. Full pytest was not rerun. Backlog status remains `CODE_COMPLETE`; remote GitHub Actions remains pending user-approved Commit and Push.
 
 ### Windows Actions pytest temporary-directory fix — 2026-11-03
 

@@ -61,6 +61,8 @@ def test_windows_ci_pytest_temp_uses_runner_temp() -> None:
     assert "Join-Path $env:RUNNER_TEMP 'dbatoolkit-pytest'" in test_step
     assert "Join-Path $env:RUNNER_TEMP 'dbatoolkit-process-temp'" in test_step
     assert "Test-Path -LiteralPath $pytestTemp -PathType Container" in test_step
+    assert "Windows runner current-user SID" in test_step
+    assert "DACL trustee SIDs" in test_step
     assert "$env:TEMP = $processTemp" in test_step
     assert "$env:TMP = $processTemp" in test_step
     assert 'python -m pytest -q --basetemp="$pytestTemp"' in test_step

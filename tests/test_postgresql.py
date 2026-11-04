@@ -96,7 +96,7 @@ class FakeConnection:
 
 class FakeDriver:
     def __init__(self) -> None:
-        scripts = {path.read_text(encoding="utf-8"): path.stem
+        scripts = {path.read_bytes().decode("utf-8"): path.stem
                    for path in (ROOT / "sql/postgresql").glob("*.sql")}
         self.connection = FakeConnection(scripts)
         self.options: dict[str, Any] = {}

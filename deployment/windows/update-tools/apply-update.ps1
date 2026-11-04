@@ -27,6 +27,20 @@ $stage = [IO.Path]::GetFullPath($StageRoot).TrimEnd('\')
 $payload = Join-Path $stage 'payload'
 $updateManifestPath = Join-Path $stage 'update-manifest.json'
 
+function Get-Sha256Hex([string]$Path) {
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Read-JsonFile([string]$Path, [int]$MaximumBytes = 4MB) {
     $info = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if ($info.Length -gt $MaximumBytes) { throw 'A required update manifest is too large.' }
@@ -67,7 +81,7 @@ function Assert-ManifestFiles($Manifest, [string]$RootPath) {
         }
         $file = Get-Item -LiteralPath $path -Force
         if ($file.Length -ne [int64]$item.size -or
-            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne ([string]$item.sha256)) {
+            (Get-Sha256Hex $path) -ne ([string]$item.sha256)) {
             throw 'Update payload hash or size verification failed.'
         }
     }
@@ -116,7 +130,7 @@ function Get-DriverPackageIdentity([string]$Path, [string]$ExpectedDatabase) {
         if ($driver.database -ne $ExpectedDatabase -or
             [string]$driver.driver_version -notmatch '^[A-Za-z0-9.+_-]{1,80}$' -or
             [string]$driver.python_abi -notmatch '^cp\d{2,3}$') { return $null }
-        $digest = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $digest = Get-Sha256Hex $Path
         return [ordered]@{
             id = ([string]$driver.driver_version + '-' + [string]$driver.python_abi + '-' + $digest.Substring(0, 16))
             database = $ExpectedDatabase

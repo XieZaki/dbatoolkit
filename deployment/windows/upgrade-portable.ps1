@@ -5,6 +5,21 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-Sha256Hex([string]$Path) {
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 $zip = (Resolve-Path -LiteralPath $PackageZip).Path
 $install = (Resolve-Path -LiteralPath $InstallDirectory).Path
 $hashPath = "$zip.sha256"
@@ -21,7 +36,7 @@ if ([IO.Path]::GetFullPath($sidecarPath) -eq [IO.Path]::GetFullPath($zip)) {
     throw 'Package and SHA256 sidecar paths are invalid.'
 }
 $expectedHash = $hashMatch.Groups[1].Value.ToLowerInvariant()
-$actualHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$actualHash = Get-Sha256Hex $zip
 if ($actualHash -ne $expectedHash) { throw 'Package SHA256 verification failed.' }
 foreach ($required in @('runtime\python.exe', 'app\portable_entry.py', '启动.bat')) {
     if (-not (Test-Path -LiteralPath (Join-Path $install $required))) {

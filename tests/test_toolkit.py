@@ -1,7 +1,9 @@
 import gc
+import importlib
 import inspect
 import io
 import logging
+import shutil
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +36,29 @@ from dba.reporters import ConsoleReporter, MarkdownReporter
 from dba.security import check_sql
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(("module_name", "database_type", "script_name"), (
+    ("test_sqlserver", DatabaseType.SQLSERVER, "monitor_capabilities"),
+    ("test_mysql", DatabaseType.MYSQL, "preflight"),
+    ("test_postgresql", DatabaseType.POSTGRESQL, "preflight"),
+))
+def test_fake_driver_registry_keys_preserve_crlf_checkout_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    module_name: str, database_type: DatabaseType, script_name: str,
+) -> None:
+    database_root = tmp_path / "sql" / database_type.value
+    shutil.copytree(ROOT / "sql" / database_type.value, database_root)
+    for path in database_root.glob("*.sql"):
+        content = path.read_bytes().replace(b"\r\n", b"\n")
+        path.write_bytes(content.replace(b"\n", b"\r\n"))
+
+    fixture_module = importlib.import_module(module_name)
+    monkeypatch.setattr(fixture_module, "ROOT", tmp_path)
+    driver = fixture_module.FakeDriver()
+    script = SqlScriptRegistry(tmp_path / "sql").get(script_name, database_type)
+
+    assert driver.connection.scripts[script.text] == script_name
 
 
 @pytest.fixture

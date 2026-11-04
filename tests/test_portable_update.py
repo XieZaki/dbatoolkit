@@ -23,9 +23,26 @@ from deployment.windows.release_package import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = PROJECT_ROOT / "deployment" / "windows" / "update-bootstrap.ps1"
 ROLLBACK = PROJECT_ROOT / "deployment" / "windows" / "rollback-portable.ps1"
+UPGRADE_PORTABLE = PROJECT_ROOT / "deployment" / "windows" / "upgrade-portable.ps1"
 UPDATE_TOOLS = PROJECT_ROOT / "deployment" / "windows" / "update-tools"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
+POWERSHELLS = tuple(dict.fromkeys(filter(None, (
+    POWERSHELL,
+    shutil.which("pwsh.exe") or shutil.which("pwsh"),
+))))
 DATABASES = ("mysql", "postgresql", "oracle", "sqlserver")
+
+
+def test_update_hash_verification_does_not_depend_on_get_file_hash_module() -> None:
+    scripts = (
+        BOOTSTRAP,
+        UPDATE_TOOLS / "apply-update.ps1",
+        PROJECT_ROOT / "deployment" / "windows" / "upgrade-portable.ps1",
+    )
+    for script in scripts:
+        source = script.read_text(encoding="utf-8")
+        assert "Get-FileHash" not in source
+        assert "Security.Cryptography.SHA256" in source
 
 
 def _driver_zip(path: Path, database: str, version: str) -> str:
@@ -282,24 +299,28 @@ def test_release_verifier_rejects_non_chinese_manual_content(tmp_path: Path) -> 
         verify_update_archive(archive, "0.9.0")
 
 
-def _run_bootstrap(root: Path, package: Path | None = None) -> subprocess.CompletedProcess[str]:
-    if not POWERSHELL:
+def _run_bootstrap(
+    root: Path, package: Path | None = None, shell: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    executable = shell or POWERSHELL
+    if not executable:
         pytest.skip("Windows PowerShell is required for the portable updater integration tests.")
-    command = [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+    command = [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                "-File", str(BOOTSTRAP), "-InstallRoot", str(root)]
     if package is not None:
         command.extend(["-PackageZip", str(package)])
-    return subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+    return subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=90, check=False)
 
 
 @pytest.mark.skipif(os.name != "nt" or not POWERSHELL, reason="Windows PowerShell portable package checks")
+@pytest.mark.parametrize("shell", POWERSHELLS)
 @pytest.mark.parametrize(("installed", "target"), (
     ("0.9.0", "0.10.0"),
     ("0.9.0", "0.11.0"),
     ("0.10.0", "0.11.0"),
 ))
 def test_direct_update_transition_preserves_user_files_and_custom_driver(
-    tmp_path: Path, installed: str, target: str
+    tmp_path: Path, installed: str, target: str, shell: str,
 ) -> None:
     root = tmp_path / "portable"
     old_defaults, before = _install_tree(root, installed)
@@ -309,7 +330,7 @@ def test_direct_update_transition_preserves_user_files_and_custom_driver(
     updates.mkdir()
     shutil.copy2(update, updates / update.name)
 
-    result = _run_bootstrap(root)
+    result = _run_bootstrap(root, shell=shell)
 
     assert result.returncode == 0, (
         "Portable Update failed its synthetic direct transition: " + result.stdout + result.stderr
@@ -327,14 +348,42 @@ def test_direct_update_transition_preserves_user_files_and_custom_driver(
     assert old_defaults["mysql"]
 
 
+@pytest.mark.skipif(os.name != "nt" or not POWERSHELL, reason="Windows portable package checks")
+@pytest.mark.parametrize("shell", POWERSHELLS)
+def test_full_package_sha256_mismatch_rejects_upgrade(tmp_path: Path, shell: str) -> None:
+    package = tmp_path / "synthetic-portable.zip"
+    package.write_bytes(b"synthetic package with a deliberately incorrect digest")
+    sidecar = Path(str(package) + ".sha256")
+    sidecar.write_text("0" * 64 + "  " + package.name + "\n", encoding="ascii")
+    install = tmp_path / "installed-portable"
+    (install / "runtime").mkdir(parents=True)
+    (install / "app").mkdir()
+    (install / "runtime" / "python.exe").write_bytes(b"synthetic runtime sentinel")
+    (install / "app" / "portable_entry.py").write_bytes(b"synthetic program sentinel")
+    (install / "启动.bat").write_bytes(b"synthetic launcher sentinel")
+    before = {path.relative_to(install): path.read_bytes() for path in install.rglob("*") if path.is_file()}
+
+    result = subprocess.run(
+        [shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(UPGRADE_PORTABLE), "-PackageZip", str(package), "-InstallDirectory", str(install)],
+        capture_output=True, text=True, errors="replace", timeout=30, check=False,
+    )
+
+    assert result.returncode != 0
+    assert "sha256 verification failed" in (result.stdout + result.stderr).lower()
+    assert {path.relative_to(install): path.read_bytes() for path in install.rglob("*") if path.is_file()} == before
+    assert package.read_bytes() == b"synthetic package with a deliberately incorrect digest"
+
+
 @pytest.mark.skipif(os.name != "nt" or not POWERSHELL, reason="Windows PowerShell portable package checks")
-def test_startup_failure_restores_program_and_keeps_user_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shell", POWERSHELLS)
+def test_startup_failure_restores_program_and_keeps_user_files(tmp_path: Path, shell: str) -> None:
     root = tmp_path / "portable"
     _, before = _install_tree(root, "0.9.0")
     old_app = (root / "app" / "portable_entry.py").read_bytes()
     update = _make_update(tmp_path, "0.10.0", "bad-startup", startup_fails=True)
 
-    result = _run_bootstrap(root, update)
+    result = _run_bootstrap(root, update, shell)
 
     assert result.returncode != 0
     assert "automatically" in (result.stdout + result.stderr).lower() or "restored" in (result.stdout + result.stderr).lower()
@@ -345,8 +394,11 @@ def test_startup_failure_restores_program_and_keeps_user_files(tmp_path: Path) -
 
 
 @pytest.mark.skipif(os.name != "nt" or not POWERSHELL, reason="Windows PowerShell portable package checks")
+@pytest.mark.parametrize("shell", POWERSHELLS)
 @pytest.mark.parametrize("failure", ("truncated", "payload_hash", "missing_file", "unsupported", "disk_space"))
-def test_invalid_update_fails_before_program_or_user_files_change(tmp_path: Path, failure: str) -> None:
+def test_invalid_update_fails_before_program_or_user_files_change(
+    tmp_path: Path, failure: str, shell: str,
+) -> None:
     root = tmp_path / "portable"
     _, before = _install_tree(root, "0.9.0")
     old_app = (root / "app" / "portable_entry.py").read_bytes()
@@ -374,7 +426,7 @@ def test_invalid_update_fails_before_program_or_user_files_change(tmp_path: Path
                 target.writestr(info.filename, data)
         update = replacement
 
-    result = _run_bootstrap(root, update)
+    result = _run_bootstrap(root, update, shell)
 
     assert result.returncode != 0
     assert (root / "app" / "portable_entry.py").read_bytes() == old_app
@@ -399,18 +451,19 @@ def test_running_toolkit_process_blocks_upgrade(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt" or not POWERSHELL, reason="Windows PowerShell portable package checks")
-def test_manual_rollback_restores_program_only(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shell", POWERSHELLS)
+def test_manual_rollback_restores_program_only(tmp_path: Path, shell: str) -> None:
     root = tmp_path / "portable"
     _, before = _install_tree(root, "0.9.0")
     update = _make_update(tmp_path, "0.10.0", "manual-rollback")
-    result = _run_bootstrap(root, update)
+    result = _run_bootstrap(root, update, shell)
     assert result.returncode == 0, result.stderr
     backup = next((root / "backup").glob("program-backup-*"))
     rolled_back = subprocess.run(
-        [POWERSHELL or "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+        [shell, "-NoLogo", "-NoProfile", "-NonInteractive",
          "-ExecutionPolicy", "Bypass", "-File", str(ROLLBACK),
          "-InstallRoot", str(root), "-BackupDirectory", str(backup)],
-        capture_output=True, text=True, timeout=60, check=False,
+        capture_output=True, text=True, errors="replace", timeout=60, check=False,
     )
     assert rolled_back.returncode == 0
     assert json.loads((root / "portable-manifest.json").read_text(encoding="utf-8"))["application_version"] == "0.9.0"

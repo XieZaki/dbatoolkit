@@ -1490,3 +1490,56 @@ Local verification: a minimal clean-checkout fixture reproduced the prior failur
 `ISOLATED_OFFLINE_TEST`: `tests/test_portable_update.py` — **14 passed**; Windows-local full pytest — **1203 passed, 3 skipped, 0 failed**. The skips were the POSIX permission-bit check (not applicable on Windows), native symlink creation unavailable to this process token, and opt-in system/real-database test not enabled. Ruff passed repository-wide; strict MyPy passed for 77 `dba` files; `dba validate --inventory examples/inventory` passed (11 assets, 118 SQL scripts, 0 warnings); all 15 deployment PowerShell scripts parsed; `git diff --check` passed (Git emitted existing LF-to-CRLF advisory notices).
 
 Secret Scanner was **NOT_EXECUTED**: no project scanner script or scanner executable was available in this execution context. No scanner PASS is claimed. The real GitHub Release, tag, external checksum distribution, no-Python host, disconnected-network test, and formal `0.10.0` cross-version Update test remain unverified. No version, Roadmap order, or task status was changed; no commit, push, or release was performed.
+
+## 47. BUG-WINDOWS-CI-FAILURES-001 — 198-failure root-cause repair (2026-11-03)
+
+### Failed-run identity and classification
+
+Input evidence was `github_actions_failed.log` from GitHub Actions commit `6ff0fba0f7b629b5fb347c6c5fdad515b618b471`, Windows Server 2025, CPython 3.13.17 x64, PowerShell 7 workflow, and Windows PowerShell 5.1 updater subprocesses. The run reported **198 failed, 1007 passed, 2 skipped**. The failed-node list and tracebacks classify exactly as follows:
+
+| Root cause | Failed tests | Evidence and causal chain |
+|---|---:|---|
+| Registry/Fake Driver newline mismatch | 170 | Git clean checkout supplied CRLF SQL. `SqlScriptRegistry` intentionally reads exact UTF-8 bytes and preserved CRLF, while SQL Server/MySQL/PostgreSQL Fake Drivers used `Path.read_text()`, which normalized Windows newlines to LF. Exact-string dictionary lookup raised `KeyError`; adapter redaction converted that test-double exception into the observed sanitized QueryFailed/Preflight messages. The error detail contained SQL text only, not a password, connection string, or credential value. Production Preflight and Registry authorization were functioning and were not bypassed. |
+| SQLite Credential Store Owner initialization | 21 | Initialization protected the DACL but did not set Owner. The hosted Runner token could create the directory/file with a default Owner other than the current user or SYSTEM, so the immediately following unchanged strict check rejected it at `owner_text.value not in {sid, "S-1-5-18"}`. |
+| Portable Update hash cmdlet availability | 5 | Windows PowerShell 5.1 inherited the workflow process environment/module path and could not resolve `Get-FileHash`; failure occurred before payload replacement. SHA256 policy itself was correct and remains mandatory. |
+| Missing IANA timezone data | 1 | Standard Windows Python had no `Asia/Shanghai` data and the editable `.[dev]` install did not install `tzdata`, although the portable CPython lock already pinned it. |
+| Local Inventory test dependency | 1 | `test_doctor_uses_inventory_and_runtime_info_does_not_load_it` referenced ignored local `config/inventory.yaml`, which is intentionally absent from a clean checkout. |
+| **Total** | **198** | Five independent environment/fixture defects; no evidence supported weakening database, credential, update, or Registry safety policy. |
+
+### Repairs and preserved boundaries
+
+- The three Fake Drivers build their SQL lookup maps from `read_bytes().decode("utf-8")`, matching the Registry's exact source text. A deterministic regression copies each engine Registry to a temporary CRLF tree and proves the formal Registry-issued script matches the Fake Driver key. No Adapter, Preflight, permission policy, Registry digest, reviewed SQL, bind contract, timeout, row bound, or cleanup behavior changed.
+- Windows SQLite initialization SDDL now includes `O:<current-user-SID>` and applies `OWNER_SECURITY_INFORMATION` together with the existing protected DACL. The accepted Owner set remains exactly current user or SYSTEM; DACL trustees remain current user and SYSTEM. It does not make ACL validation optional or accept Administrators/Users.
+- `update-bootstrap.ps1`, `update-tools/apply-update.ps1`, and `upgrade-portable.ps1` compute SHA256 with `System.Security.Cryptography.SHA256` and compare the full 64-hex digest. No integrity comparison was removed. `restore-update.ps1` has no hash calculation to replace. Direct synthetic transitions `0.9.0 -> 0.10.0`, `0.9.0 -> 0.11.0`, and `0.10.0 -> 0.11.0` run under both Windows PowerShell 5.1 and PowerShell 7; failure recovery, manual rollback, user files, and custom drivers remain covered.
+- `tzdata>=2026.1,<2027` is now a base dependency and generic offline lock entry, aligned with the existing Windows CPython 3.13 portable pin `tzdata==2026.5`.
+- The doctor/runtime test uses committed disabled example Inventory rather than ignored site-local Inventory. No real Inventory was read or committed.
+- The Windows workflow logs the current-user SID and the pytest/process-temp Owner and DACL trustee SIDs on its next execution. It continues to use separate directories under `RUNNER_TEMP` and passes an explicit pytest basetemp.
+
+### Windows-local ACL evidence
+
+`ISOLATED_OFFLINE_TEST`: the current Windows process SID was `S-1-5-21-3088435879-1396255872-2259687785-1001`. The retained synthetic ACL fixture's `acl-vault` directory and `credentials.db` both had that exact Owner SID, protected DACLs, and exactly two non-inherited FullControl trustees: the current-user SID and SYSTEM (`S-1-5-18`). The pytest base directory had broader test-runner ACLs, demonstrating that the Store initialization itself established the stricter boundary. The failed GitHub log did not record the hosted Runner's actual user/Owner SID, so that historical value is not guessed; the workflow diagnostic will capture it on the next run.
+
+### Automated and static evidence
+
+All evidence below is `ISOLATED_OFFLINE_TEST`; no database or Docker endpoint was contacted.
+
+- Required first-test checks were executed separately with `pytest -vv -x`: SQL Server `test_connect_credential_options_cleanup`, MySQL `test_adapter_preflight_credentials_timeout_registry_and_cleanup`, and PostgreSQL `test_adapter_preflight_credentials_timeout_and_close` each passed locally. Local SQL files were LF, so these runs establish the local/CI divergence; the new forced-CRLF regression establishes the identified clean-checkout cause.
+- Database/Preflight focused group: **485 passed, 1 skipped**. Credential Store focused group: **44 passed, 1 skipped**. Portable Update final focused group: **18 passed**. Timezone, Inventory, dependency and forced-CRLF checks: **6 passed**.
+- Final Windows-local full pytest: **1211 passed, 3 skipped, 0 failed** in 76.91 seconds. Skips are unchanged: POSIX permission-bit validation is inapplicable on Windows, native symlink creation is unavailable to this process token, and the real database system test is opt-in and was not enabled. No skip, xfail, ignored exception, relaxed assertion, or disabled security check was added.
+- Ruff passed repository-wide. Strict MyPy passed for **77 source files**. `dba validate --inventory examples/inventory` passed with **11 instances, 118 reviewed SQL scripts, 0 warnings**. All **15** deployment PowerShell scripts parsed. `git diff --check` passed with existing LF-to-CRLF advisory messages only.
+- The official Secret Scanner passed for Git-index paths/content. A supplemental named-file worktree scan passed for the 17 task files (workflow, SQLite ACL implementation, three updater scripts, dependency metadata/lock, seven test modules, and Backlog/Progress/Acceptance); unrelated untracked review archives, the supplied failure log, and diagnostic JSON files were not scanned or modified. No scanner rule or allowlist changed.
+
+### Final targeted acceptance follow-up — 2026-11-04
+
+`ISOLATED_OFFLINE_TEST`; only the Credential Store ACL, tzdata runtime, and Portable Update areas were rechecked. The full suite was not rerun.
+
+- Credential Store ACL: `test_sqlite_private_acl_covers_database_directory_and_journal` passed. Windows `Get-Acl` evidence asserts Owner separately from DACL: the directory and database Owner is limited to the current user or SYSTEM; DACLs contain only Allow/FullControl entries for the current user and SYSTEM, and the directory/database DACLs are protected. The live rollback journal is checked separately for Owner and DACL principals/rights. Production validation remains unchanged and fail-closed.
+- tzdata: `test_dependency_extras_and_lock_files_are_present` and the existing Asia/Shanghai timezone regression passed. The Full builder installs the hash-pinned Windows CPython lock with `--no-index --require-hashes` into `app/vendor`, the embedded runtime `._pth` path includes `..\app\vendor`, and the Full package step archives the complete package tree. Read-only inspection of the existing r5 Full ZIP confirmed `app/vendor/tzdata/zoneinfo/Asia/Shanghai`; its bundled CPython resolved that zone after `zoneinfo.reset_tzpath([])` using tzdata 2026.5 (`2026-10-19T07:30:00+08:00`). No package was rebuilt in this follow-up.
+- Portable Update: the focused selection passed **29 tests**. Both Windows PowerShell 5.1 and PowerShell 7 passed all three version transitions, external Full-package SHA256 mismatch rejection, payload SHA256 mismatch rejection, startup-failure automatic restoration, and manual rollback. The transition/rollback checks retained user files and custom-driver state. Exact host versions: Windows PowerShell 5.1.26100.9711 and PowerShell 7.6.5.
+- A supplementary runtime-lock/timezone invocation passed **2 tests** (the timezone regression was repeated). Targeted Ruff passed for the two changed test modules; `git diff --check` passed with only Git's existing LF-to-CRLF advisory messages. No skip/xfail, assertion relaxation, or security-check removal was introduced.
+
+### Boundaries and remaining verification
+
+`WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED**; this task deliberately used Fake Drivers and synthetic credential/update files only. No real database, Docker, production asset, real Inventory, real Credential Store, credential, or `local_config.py` was accessed. Package version remains `0.9.0`; no tag or GitHub Release was created. No commit or push occurred.
+
+The post-fix GitHub Actions run is **NOT_EXECUTED** because the user requires review before Commit and Push. Therefore `BUG-WINDOWS-CI-FAILURES-001` is `CODE_COMPLETE`, not `VERIFIED`. The next task is the user-approved commit/push followed by the Windows Actions rerun; after remote verification, resume the paused `PORTABLE-UPDATE-001` closeout rather than starting a new feature.

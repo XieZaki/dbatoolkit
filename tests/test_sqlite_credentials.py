@@ -207,11 +207,59 @@ def test_sqlite_private_acl_covers_database_directory_and_journal(
 ) -> None:
     if os.name != "nt":
         pytest.skip("SQLite credential ACL validation is Windows-specific")
+    from dba.credential_session import _windows_identity
     from dba.sqlite_credentials import _windows_acl
+
+    def acl_evidence(path: Path) -> dict[str, object]:
+        escaped_path = str(path).replace("'", "''")
+        script = f"""
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+$acl = Get-Acl -LiteralPath '{escaped_path}'
+$rules = @($acl.Access | ForEach-Object {{
+    [pscustomobject]@{{
+        Sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        Type = $_.AccessControlType.ToString()
+        Rights = [int]$_.FileSystemRights
+    }}
+}})
+[pscustomobject]@{{
+    Owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    DaclProtected = $acl.AreAccessRulesProtected
+    Rules = $rules
+}} | ConvertTo-Json -Compress -Depth 4
+"""
+        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        environment = os.environ.copy()
+        environment["PSModulePath"] = os.pathsep.join((
+            str(system_root / "System32" / "WindowsPowerShell" / "v1.0" / "Modules"),
+            str(program_files / "WindowsPowerShell" / "Modules"),
+        ))
+        result = subprocess.run(
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=20, check=False, env=environment,
+        )
+        assert result.returncode == 0, "Windows ACL inspection failed: " + result.stderr
+        return json.loads(result.stdout)
 
     store = new_store(tmp_path, "acl-vault")
     _windows_acl(store.path.parent)
     _windows_acl(store.path)
+    sid, _ = _windows_identity()
+    system_sid = "S-1-5-18"
+    full_control = 0x1F01FF
+
+    for path in (store.path.parent, store.path):
+        acl = acl_evidence(path)
+        # Verify the Owner independently from the DACL trustee checks.
+        assert acl["Owner"] in {sid, system_sid}
+        # Verify the DACL independently: only the current user and SYSTEM get full control.
+        rules = acl["Rules"]
+        assert isinstance(rules, list) and rules
+        assert {rule["Sid"] for rule in rules} == {sid, system_sid}
+        assert all(rule["Type"] == "Allow" for rule in rules)
+        assert all(rule["Rights"] & full_control == full_control for rule in rules)
+        assert acl["DaclProtected"] is True
 
     class RollbackProbe(Exception):
         pass
@@ -222,6 +270,14 @@ def test_sqlite_private_acl_covers_database_directory_and_journal(
             connection.execute("UPDATE credential_store SET generation=generation+1 WHERE id=1")
             assert journal.exists()
             _windows_acl(journal)
+            journal_acl = acl_evidence(journal)
+            # Journal Owner and DACL are checked as separate properties too.
+            assert journal_acl["Owner"] in {sid, system_sid}
+            journal_rules = journal_acl["Rules"]
+            assert isinstance(journal_rules, list) and journal_rules
+            assert {rule["Sid"] for rule in journal_rules} == {sid, system_sid}
+            assert all(rule["Type"] == "Allow" for rule in journal_rules)
+            assert all(rule["Rights"] & full_control == full_control for rule in journal_rules)
             raise RollbackProbe
 
     assert not journal.exists()
