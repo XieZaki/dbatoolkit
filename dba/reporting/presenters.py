@@ -20,7 +20,11 @@ from dba.reporting.model import (
     ReportSection,
     ReportTable,
 )
-from dba.reporting.normalizers import sqlserver_transaction_label
+from dba.reporting.normalizers import (
+    postgresql_server_version_num,
+    postgresql_version_label,
+    sqlserver_transaction_label,
+)
 
 _VALUE_LABELS = {
     "TRANSACTION_LOG": "事务日志", "WAL": "WAL", "BINLOG": "Binlog",
@@ -157,23 +161,37 @@ def _omitted(total: int, displayed: int, noun: str) -> str:
     return text
 
 
-def _top_sql_section(value: Any) -> ReportSection | None:
-    """Map a shared Top SQL contract to a bounded human section without SQL text."""
-    if hasattr(value, "to_dict"):
-        value = value.to_dict()
-    if not isinstance(value, dict):
+def _top_sql_section(value: Any,
+                     policy: HumanReportPolicy = DEFAULT_HUMAN_REPORT_POLICY,
+                     *, integrated: bool = False) -> ReportSection | None:
+    """Present cumulative Top SQL separately from current Slow evidence."""
+    payload = _top_sql_payload(value)
+    if payload is None:
         return None
+    raw_items: list[Any] = payload.get("items", [])
+    if not isinstance(raw_items, list):
+        raw_items = []
     metadata = ("collection_status", "completeness", "data_visibility",
                 "database_engine", "database_version", "profile_id", "collection_timestamp",
                 "ranking_metric", "ranking_direction", "metric_name", "metric_unit",
                 "metric_semantics", "metric_scope", "collection_scope", "evidence_source", "limitations",
-                "source_metadata")
-    fields = tuple((_label(key), _human(value.get(key))[:256])
-                   for key in metadata if value.get(key) is not None)
-    raw_items: list[Any] = value.get("items", [])
-    if not isinstance(raw_items, list):
-        raw_items = []
+                "source_metadata", "returned_records")
+    fields_list: list[tuple[str, str]] = []
+    for key in metadata:
+        if key == "returned_records":
+            fields_list.append((_label(key), str(len(raw_items))))
+        elif payload.get(key) is not None:
+            field_value = payload.get(key)
+            if key == "database_engine" and isinstance(field_value, str):
+                field_value = {"mysql": "MySQL", "postgresql": "PostgreSQL",
+                               "sqlserver": "SQL Server", "oracle": "Oracle"}.get(
+                                   field_value.lower(), field_value)
+            elif key == "database_version" and payload.get("database_engine") == "postgresql":
+                field_value = postgresql_version_label(field_value)
+            fields_list.append((_label(key), _human(field_value)[:256]))
+    fields = tuple(fields_list)
     rows: list[tuple[str, ...]] = []
+    code_blocks: list[ReportCodeBlock] = []
     for item in raw_items[:10]:
         if not isinstance(item, dict) or item.get("rank") is None:
             continue
@@ -209,16 +227,115 @@ def _top_sql_section(value: Any) -> ReportSection | None:
             identity_text = f"{identity.get('database_engine', 'UNKNOWN')}:{native or 'identity unavailable'}"[:256]
         else:
             identity_text = "identity unavailable"
-        rows.append((str(item.get("rank")), identity_text, _human(item.get("metric_value"))))
-    table = ReportTable(("Rank", "SQL identity", "Metric value"), tuple(rows)) if rows else None
-    if value.get("collection_status") == "COLLECTED" and not raw_items:
+        association = item.get("sql_text_association") if integrated else None
+        association_status = (association.get("status") if isinstance(association, dict)
+                              else "NOT_ATTEMPTED")
+        base_row = (str(item.get("rank")), identity_text, _human(item.get("metric_value")))
+        rows.append((*base_row, _human(association_status)) if integrated else base_row)
+        if integrated and isinstance(association, dict) and association_status == "MATCHED":
+            sql_text = association.get("sql_text")
+            if isinstance(sql_text, str) and sql_text:
+                clipped = sql_text[:policy.max_sql_chars]
+                code_blocks.append(ReportCodeBlock(
+                    f"Top SQL rank {item.get('rank')} — exactly matched Slow SQL",
+                    str(redact(clipped)), "sql", True))
+    headers = (("Rank", "SQL identity", "Metric value", "SQL text association") if integrated else
+               ("Rank", "SQL identity", "Metric value"))
+    table = ReportTable(headers, tuple(rows)) if rows else None
+    if payload.get("collection_status") == "COLLECTED" and not raw_items:
         summary = "已完成采集，但没有匹配记录；不生成虚假排名。"
     elif not rows:
         summary = "当前没有可用的已排名 Top SQL 记录；状态和限制见契约字段。"
     else:
         summary = _omitted(len(raw_items), len(rows), "Top SQL rows")
+    if integrated:
+        summary = ("Top SQL 排名反映数据库统计视图中的累计表现，不代表当前故障根因。 "
+                   "它与当前活动会话、等待和阻塞证据分开呈现。 "
+                   "此处完整性仅描述 Top SQL 附加快照，不改变 Slow 核心证据完整性。 " + summary)
     return ReportSection("top-sql", "Top SQL", summary=summary, fields=fields,
-                         tables=(table,) if table else ())
+                         tables=(table,) if table else (), code_blocks=tuple(code_blocks))
+
+
+def _top_sql_payload(value: Any) -> dict[str, Any] | None:
+    if hasattr(value, "to_dict"):
+        value = value.to_dict()
+    return value if isinstance(value, dict) else None
+
+
+def _top_sql_quality_row(value: Any, collector: str | None = None) -> dict[str, str] | None:
+    payload = _top_sql_payload(value)
+    if payload is None:
+        return None
+    collection_status = str(payload.get("collection_status") or "UNKNOWN")
+    completeness = str(payload.get("completeness") or "UNKNOWN")
+    visibility = str(payload.get("data_visibility") or "UNKNOWN")
+    if collection_status == "COLLECTED":
+        if completeness == "COMPLETE" and visibility == "COMPLETE":
+            status = "COMPLETE"
+        elif completeness == "PARTIAL" or visibility == "PARTIAL":
+            status = "PARTIAL"
+        else:
+            status = "UNKNOWN"
+    else:
+        status = collection_status
+    engine = payload.get("database_engine")
+    name = collector or (f"{engine}_top_sql" if isinstance(engine, str) else "top_sql")
+    impact = (f"Collection status={collection_status}; completeness={completeness}; "
+              f"data visibility={visibility}.")
+    limitations = payload.get("limitations")
+    if limitations:
+        impact += f" Limitations: {_human(limitations)}."
+    return {"collector": name, "status": status, "impact": impact}
+
+
+def _top_sql_integration_quality_row(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    raw_status = value.get("status")
+    if not isinstance(raw_status, str):
+        return None
+    impact = value.get("reason") or value.get("error_type") or "Top SQL was not collected."
+    return {"collector": "top_sql", "status": raw_status, "impact": _human(impact)}
+
+
+def _top_sql_integration_section(value: Any) -> ReportSection | None:
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    if not isinstance(status, str):
+        return None
+    reason = value.get("reason")
+    error_type = value.get("error_type")
+    fields = [("Collection status", status)]
+    for key, label in (("database_engine", "Database type"),
+                       ("database_version", "Database version"),
+                       ("ranking_metric", "Metric")):
+        if isinstance(value.get(key), str):
+            fields.append((label, value[key][:128]))
+    if isinstance(reason, str):
+        fields.append(("Reason", reason))
+    if isinstance(error_type, str):
+        fields.append(("Error type", error_type[:128]))
+    summary = ("Top SQL 作为附加证据未采集；Slow 核心证据保持原样。"
+               if status == "NOT_COLLECTED" else
+               "Top SQL Collector ERROR（FAILED）；Slow 核心诊断不受影响。"
+               if status == "FAILED" else
+               "Top SQL 附加采集未成功；Slow 核心诊断不受影响。")
+    return ReportSection("top-sql", "Top SQL", summary=summary, fields=tuple(fields))
+
+
+def render_report_section_text(section: ReportSection) -> str:
+    """Render one already-bounded ReportModel section for the CLI console."""
+    lines = [section.title]
+    if section.summary:
+        lines.append(section.summary)
+    lines.extend(f"{label}: {value}" for label, value in section.fields)
+    for table in section.tables:
+        lines.append(" | ".join(table.headers))
+        lines.extend(" | ".join(row) for row in table.rows)
+    for block in section.code_blocks:
+        lines.extend((block.title, block.content))
+    return "\n".join(lines)
 
 
 def _sql_block(row: dict[str, Any], policy: HumanReportPolicy, label: str = "SQL") -> ReportCodeBlock | None:
@@ -800,6 +917,22 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
     for note in details.get("quality", []):
         if isinstance(note, str):
             quality.append({"collector": "Snapshot", "status": "NOTE", "impact": note})
+    if report.scenario == "slow":
+        top_sql_row = _top_sql_quality_row(details.get("top_sql"))
+        if top_sql_row is None:
+            top_sql_row = _top_sql_integration_quality_row(details.get("top_sql_integration"))
+        if top_sql_row is not None and top_sql_row["collector"] not in sampled:
+            quality.append(top_sql_row)
+        if report.instance.db_type.value == "mysql":
+            wait_status = details.get("wait_detail_status")
+            if isinstance(wait_status, str) and wait_status not in {"", "AVAILABLE"}:
+                wait_reason = details.get("wait_detail_reason")
+                quality.append({
+                    "collector": "current_wait_detail",
+                    "status": wait_status,
+                    "impact": _human(wait_reason) if wait_reason else
+                              "当前等待详情不可见；基础活动请求采集状态单独列示。",
+                })
     if not quality:
         quality = [{"collector": item, "status": "MISSING", "impact": "Required evidence unavailable"}
                    for item in incident.missing_evidence]
@@ -1072,7 +1205,13 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
 def _mysql_recent_statements_section(report: DiagnosticReport,
                                      details: dict[str, Any]) -> ReportSection | None:
     recent = _dict_rows(details.get("recent_statements"))
-    if report.instance.db_type.value != "mysql" or not recent:
+    if report.instance.db_type.value != "mysql":
+        return None
+    samples = [sample for sample in details.get("samples", [])
+               if isinstance(sample, dict)
+               and sample.get("collector", sample.get("source")) == "recent_statements"]
+    failed_sample = next((sample for sample in samples if sample.get("success") is False), None)
+    if not recent and not samples:
         return None
     fields: list[tuple[str, str]] = []
     blocks: list[ReportCodeBlock] = []
@@ -1082,16 +1221,41 @@ def _mysql_recent_statements_section(report: DiagnosticReport,
     else:
         elapsed_text = "未记录"
     fields.append(("采集耗时（毫秒）", elapsed_text))
+    if failed_sample is not None:
+        fields.append(("采集状态", "FAILED"))
+        error = failed_sample.get("error_message") or failed_sample.get("error_type")
+        fields.append(("采集说明", str(error or "最近执行 SQL 采集失败；核心 Slow 证据保持独立。")))
+    elif not recent:
+        fields.append(("采集状态", "COLLECTED"))
+        fields.append(("最近执行 SQL", "当前快照未发现可展示的最近执行 SQL。"))
     for target in recent[:5]:
-        session_id = target.get("session_id", "不可用")
-        fields.append((f"连接 {session_id} 状态", str(target.get("evidence_status", "UNKNOWN"))))
+        status = str(target.get("evidence_status", target.get("status", "UNKNOWN")))
+        if status == "NOT_APPLICABLE":
+            fields.append(("采集状态", "COLLECTED"))
+            fields.append(("最近执行 SQL", "当前快照未发现可展示的最近执行 SQL。"))
+            continue
+        if status == "NOT_COLLECTED_CORE_INCOMPLETE":
+            fields.append(("采集状态", "NOT_COLLECTED"))
+            fields.append(("最近执行 SQL", "核心证据不完整，因此本次未采集最近执行 SQL。"))
+            if target.get("reason"):
+                fields.append(("采集说明", str(target["reason"])))
+            continue
+        session_id = target.get("session_id")
+        status_label = (f"连接 {session_id} 最近 SQL 状态" if session_id is not None
+                        else "最近 SQL 状态")
+        fields.append((status_label, status))
+        if status in {"NO_HISTORY_ROWS", "THREAD_NOT_CURRENT"}:
+            fields.append(("最近执行 SQL", "当前快照未发现可展示的最近执行 SQL。"))
+            continue
         if target.get("limit_reached"):
-            fields.append((f"连接 {session_id} 采集上限",
+            fields.append((f"连接 {session_id} 采集上限" if session_id is not None else "采集上限",
                            "已达到每连接5条记录上限；是否还有更早事件未知"))
         elif target.get("truncated"):
-            fields.append((f"连接 {session_id} 采集上限", "存在未显示的历史记录"))
+            fields.append((f"连接 {session_id} 采集上限" if session_id is not None else "采集上限",
+                           "存在未显示的历史记录"))
         if target.get("reason"):
-            fields.append((f"连接 {session_id} 说明", str(target["reason"])))
+            fields.append((f"连接 {session_id} 说明" if session_id is not None else "最近 SQL 说明",
+                           str(target["reason"])))
         statements = target.get("statements", [])
         if not isinstance(statements, list):
             continue
@@ -1116,9 +1280,11 @@ def _mysql_recent_statements_section(report: DiagnosticReport,
                     clipped += "\n[SQL text omitted by 1000 character report limit.]"
                 blocks.append(ReportCodeBlock(title, clipped,
                                               language="sql", collapsed=True))
+    summary = ("最近执行 SQL；不保证属于当前事务，也不保证是持锁 SQL。SQL 文本已脱敏并折叠显示。"
+               if blocks else "该区域只反映最近 SQL 证据的独立采集结果；空结果不表示连接失败。")
     return ReportSection(
         "mysql-recent-statements", "Recent SQL Evidence",
-        summary="最近执行 SQL；不保证属于当前事务，也不保证是持锁 SQL。SQL 文本已脱敏并折叠显示。",
+        summary=summary,
         fields=tuple(fields), code_blocks=tuple(blocks))
 
 
@@ -1402,22 +1568,31 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
     """Create a bounded presentation model; plan XML is never embedded in HTML."""
     instance = report.instance
     details = getattr(report, "details", {})
-    metadata: tuple[tuple[str, str], ...] = (("Database ID", instance.id), ("Instance", instance.name),
-                ("Database Type", instance.db_type.value),
-                ("Version", _human(details.get("version", "UNKNOWN"))),
+    raw_version = details.get("version", "UNKNOWN")
+    version = (postgresql_version_label(raw_version)
+               if instance.db_type.value == "postgresql" else _human(raw_version))
+    metadata_items: list[tuple[str, str]] = [("Database ID", instance.id), ("Instance", instance.name),
+                ("Database Type", instance.db_type.value), ("Version", version),
                 ("Scenario", _label(report.scenario)), ("Generated At", _local_time(report.diagnosed_at)),
                 ("Environment", instance.environment or "UNKNOWN"),
                 ("Data Completeness", incident.data_completeness),
                 ("Capture Started", str(details.get("capture_started_at", "N/A"))),
                 ("Triage Completed", str(details.get("triage_completed_at", "N/A"))),
                 ("Capture Finished", str(details.get("capture_finished_at", "N/A"))),
-                ("Snapshot Consistency", str(details.get("snapshot_consistency", "BEST_EFFORT"))))
+                ("Snapshot Consistency", str(details.get("snapshot_consistency", "BEST_EFFORT")))]
+    if instance.db_type.value == "postgresql":
+        raw_version_num = details.get("server_version_num")
+        if raw_version_num is None:
+            raw_version_num = postgresql_server_version_num(raw_version)
+        if raw_version_num is not None:
+            metadata_items.append(("server_version_num (raw)", _human(raw_version_num)))
+    metadata: tuple[tuple[str, str], ...] = tuple(metadata_items)
     if report.scenario == "slow":
         sections = _slow_sections(report, incident, details, policy)
     elif report.scenario == "active-sql":
         sections = active_sql_sections(details.get("active_sql"))
     elif report.scenario == "top-sql":
-        top_sql_section = _top_sql_section(details.get("top_sql"))
+        top_sql_section = _top_sql_section(details.get("top_sql"), policy)
         sections = [top_sql_section] if top_sql_section is not None else []
     elif report.scenario == "memory-grant":
         sections = memory_grant_sections(details.get("memory_grant"))
@@ -1433,7 +1608,10 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
         sections = _disk_growth_sections(details)
         sections.insert(0, _recovery_section(incident, details, report.scenario,
                                              instance.db_type.value, report))
-    top_sql = None if report.scenario == "top-sql" else _top_sql_section(details.get("top_sql"))
+    top_sql = None if report.scenario == "top-sql" else _top_sql_section(
+        details.get("top_sql"), policy, integrated=report.scenario == "slow")
+    if top_sql is None and report.scenario == "slow":
+        top_sql = _top_sql_integration_section(details.get("top_sql_integration"))
     if top_sql is not None:
         sections.append(top_sql)
     findings = _finding_section(report)
@@ -1474,6 +1652,7 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
                "Identity recheck": "身份复核", "Finding": "发现", "Severity": "严重程度",
                "Recommendation": "建议", "Database ID": "数据库 ID", "Instance": "实例",
                "Database Type": "数据库类型", "Version": "版本", "Scenario": "诊断场景",
+               "server_version_num (raw)": "server_version_num（原始值）",
                "Generated At": "报告生成时间", "Environment": "环境", "Data Completeness": "证据完整性",
                "Capture Started": "采集开始", "Triage Completed": "初报完成", "Capture Finished": "采集结束",
                "Snapshot Consistency": "快照一致性", "Area": "资源类别", "Value": "观测值",

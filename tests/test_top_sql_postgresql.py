@@ -437,6 +437,62 @@ def test_postgresql_cli_default_routes_to_shared_json_and_html_top_sql(
     assert "SELECT " not in html
 
 
+def test_slow_top_sql_is_opt_in_and_appends_one_existing_collector_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    inventory.write_text(yaml.safe_dump({"databases": [{
+        "id": "pg-lab", "name": "PG Lab", "db_type": "postgresql", "host": "pg.invalid",
+        "port": 5432, "version_family": "16", "credential_alias": "monitor", "database": "postgres",
+        "environment": "development",
+    }]}), encoding="utf-8")
+    driver = FakeDriver()
+    driver.connection.results["top_sql_source"] = [_source()]
+    driver.connection.results["top_sql_info"] = [{"stats_reset": "2026-10-01T00:00:00+00:00", "dealloc": 0}]
+    driver.connection.results["top_sql"] = [_row("10.25", queryid=77)]
+    common = ["--inventory", str(inventory), "--sql-root", str(ROOT / "sql")]
+
+    default_report = tmp_path / "slow-default.html"
+    assert main([*common, "diagnose", "pg-lab", "slow", "--format", "json",
+                 "--report", str(default_report)],
+                provider=MemoryCredentialProvider(), driver=driver) == 0
+    default_payload = json.loads(capsys.readouterr().out)
+    assert "top_sql" not in default_payload["report"]["details"]
+    assert "top_sql" not in driver.connection.executed
+
+    before = len(driver.connection.executed)
+    report_path = tmp_path / "slow-with-top-sql.html"
+    assert main([*common, "diagnose", "pg-lab", "slow", "--include-top-sql",
+                 "--metric", "total_exec_time", "--top", "5", "--format", "json",
+                 "--report", str(report_path)],
+                provider=MemoryCredentialProvider(), driver=driver) == 0
+    payload = json.loads(capsys.readouterr().out)
+    executed = driver.connection.executed[before:]
+    top_sql_position = executed.index("top_sql_source")
+    core_positions = [executed.index(name) for name in
+                      ("active_sessions", "blocking", "transactions", "long_running")]
+    assert max(core_positions) < top_sql_position
+    assert executed.count("top_sql_source") == 1
+    assert executed.count("top_sql_info") == 1
+    assert executed.count("top_sql") == 1
+    top_sql = payload["report"]["details"]["top_sql"]
+    integrated_details = payload["report"]["details"]
+    default_details = default_payload["report"]["details"]
+    assert integrated_details["priority_candidates"] == default_details["priority_candidates"]
+    integrated_triage = dict(integrated_details["performance_triage"])
+    default_triage = dict(default_details["performance_triage"])
+    integrated_triage.pop("snapshot_time", None)
+    default_triage.pop("snapshot_time", None)
+    assert integrated_triage == default_triage
+    assert payload["success"] is True and default_payload["success"] is True
+    assert top_sql["ranking_metric"] == "total_exec_time"
+    assert top_sql["metric_semantics"] == "CUMULATIVE"
+    assert top_sql["items"][0]["sql_text_association"]["status"] == "UNMATCHED"
+    html = report_path.read_text(encoding="utf-8")
+    assert "Top SQL 排名反映数据库统计视图中的累计表现" in html
+    assert "queryid=77" in html and "CUMULATIVE" in html
+
+
 def test_pg_top_sql_one_result_drives_json_cli_and_offline_html() -> None:
     fake, collector = _adapter_with_results([_row("55.5", queryid=89)])
     top_result = collector.collect(INSTANCE)

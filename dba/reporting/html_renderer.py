@@ -54,6 +54,9 @@ class HtmlReportRenderer:
                     "READY": "clear", "WARNING": "caution", "PARTIAL": "caution",
                     "OPTIONAL_UNAVAILABLE": "caution", "TRUNCATED": "caution",
                     "UNKNOWN": "caution", "NOT_COLLECTED": "caution",
+                    "UNSUPPORTED": "caution", "UNAVAILABLE": "caution",
+                    "SOURCE_UNAVAILABLE": "caution", "SOURCE_NOT_CONFIGURED": "caution",
+                    "PERMISSION_DENIED": "danger", "COLLECTION_FAILED": "danger",
                     "IDENTITY_INCOMPLETE": "caution", "NOT_ASSESSED": "caution",
                 }.get(normalized)
                 escaped = (f'<span class="state-badge {badge_class}">{_escape(_label(str(value)))}</span>'
@@ -132,6 +135,8 @@ class HtmlReportRenderer:
     def render(self, model: ReportModel) -> str:
         if model.scenario == "slow":
             return self._render_slow(model)
+        if model.scenario == "top-sql":
+            return self._render_top_sql(model)
         incident = model.incident_summary
         cards = (
             ("状态", _label(incident.status)), ("主要问题", _label(incident.primary_problem)),
@@ -177,6 +182,70 @@ class HtmlReportRenderer:
         page = page.replace("{{BODY}}", body)
         return page + "\n"
 
+    def _render_top_sql(self, model: ReportModel) -> str:
+        """Render Top SQL as a statistics snapshot, not an incident assessment."""
+        metadata = dict(model.metadata)
+        section = next((item for item in model.sections if item.section_id == "top-sql"), None)
+        fields = dict(section.fields) if section is not None else {}
+
+        def value(*keys: str, default: str = "UNKNOWN") -> str:
+            return next((str(source[key]) for source in (fields, metadata)
+                         for key in keys if source.get(key) not in (None, "", "—")), default)
+
+        collection_status = value("Collection Status")
+        completeness = value("Completeness", "Data Completeness")
+        summary_items = (
+            ("数据库类型", value("Database Engine", "Database Type")),
+            ("数据库版本", value("Database Version", "Version")),
+            ("采集状态", collection_status),
+            ("证据完整性", completeness),
+            ("返回记录数", value("Returned Records", default="0")),
+            ("排序指标", value("Ranking Metric", "Metric Name")),
+            ("指标单位", value("Metric Unit")),
+            ("指标语义", value("Metric Semantics")),
+            ("统计范围", value("Metric Scope", "Collection Scope")),
+            ("采集范围", value("Collection Scope")),
+            ("数据来源", value("Evidence Source")),
+            ("采集时间", value("Collection Timestamp")),
+        )
+        status_class = ("collected" if collection_status == "COLLECTED" else
+                        "failed" if collection_status in {"FAILED", "PERMISSION_DENIED"} else
+                        "limited" if collection_status not in {"UNKNOWN", ""} else "unknown")
+        completeness_class = ("complete" if completeness == "COMPLETE" else
+                              "partial" if completeness == "PARTIAL" else "unknown")
+        cards: list[str] = []
+        for label, item in summary_items:
+            if label == "采集状态":
+                rendered = (f'<span class="top-sql-badge status-{status_class}">'
+                            f'{_escape(_label(item))}</span>')
+            elif label == "证据完整性":
+                rendered = (f'<span class="top-sql-badge completeness-{completeness_class}">'
+                            f'{_escape(_label(item))}</span>')
+            else:
+                display_value = (item if label == "指标语义" else
+                                 {"mysql": "MySQL", "postgresql": "PostgreSQL",
+                                  "sqlserver": "SQL Server", "oracle": "Oracle"}.get(item.lower(), item)
+                                 if label == "数据库类型" else _label(item))
+                rendered = _escape(display_value)
+            cards.append(f'<div class="summary-metric"><strong>{_escape(label)}</strong> '
+                         f'<span>{rendered}</span></div>')
+        summary = ("Top SQL 展示数据库统计视图中的排序结果；累计统计不代表当前故障根因。"
+                   if collection_status == "COLLECTED" else
+                   "Top SQL 采集状态与证据完整性分别展示；失败或不可见不会伪装成完整结果。")
+        summary_section = (
+            '<section id="summary" class="top-sql-summary"><div class="section-heading">'
+            f'<h2>Top SQL 统计摘要</h2><p>{_escape(summary)}</p></div>'
+            f'<div class="summary-metrics">{"".join(cards)}</div></section>')
+        report_sections = [item for item in model.sections if item.section_id != "collection-quality"]
+        rendered_sections = "".join(self._section(item) for item in report_sections)
+        toc = ''.join(f'<a href="#{_escape(item.section_id)}">{_escape(_label(item.title))}</a>'
+                      for item in (ReportSection("summary", "Top SQL Summary"), *report_sections))
+        body = self._fragment("report_body.html", TITLE=_escape(model.title), SUMMARY=summary_section,
+                              METADATA="", TOC=toc, SECTIONS=rendered_sections)
+        page = self._template("report.html").replace("{{PAGE_TITLE}}", _escape(model.title))
+        page = page.replace("{{BODY}}", body)
+        return page + "\n"
+
     def _render_slow(self, model: ReportModel) -> str:
         if any(section.section_id == "report-budget" for section in model.sections):
             # Evidence was already reduced by the shared policy. Keep the final shell
@@ -202,6 +271,16 @@ class HtmlReportRenderer:
         def meta_value(*keys: str, default: str = "UNKNOWN") -> str:
             return next((str(metadata[key]) for key in keys if metadata.get(key) not in (None, "")), default)
 
+        database_type = meta_value("Database Type", "数据库类型", default="UNKNOWN").lower()
+        blocked_count = pick(incident.impact, "blocked_requests", "blocked_sessions", "blocked_statements")
+        postgresql_clear_snapshot = (database_type == "postgresql" and status == "HEALTHY"
+                                     and blocked_count in (0, "0"))
+        status_display = "本次采样未发现异常" if postgresql_clear_snapshot else _label(status)
+        primary_problem_display = ("本次采样未发现异常" if postgresql_clear_snapshot
+                                   else _label(incident.primary_problem))
+        observed_now_display = ("当前未观测到阻塞" if postgresql_clear_snapshot
+                                else _label(incident.observed_now))
+
         impact = incident.impact
         timing = incident.timing
         metrics = (
@@ -221,7 +300,7 @@ class HtmlReportRenderer:
             f"采集：{meta_value('Capture Started', '采集开始', default='N/A')} — "
             f"{meta_value('Capture Finished', '采集结束', default='N/A')}",
             f"一致性：{meta_value('Snapshot Consistency', '快照一致性', default='UNKNOWN')}",
-            f"状态：{status} / {severity}；问题：{incident.primary_problem}；观测：{incident.observed_now}",
+            f"状态：{status_display} / {_label(severity)}；问题：{primary_problem_display}；观测：{observed_now_display}",
             *[f"影响 {key}：{value}" for key, value in incident.impact.items()],
             *[f"时间 {key}：{value}" for key, value in incident.timing.items()],
         ]
@@ -255,10 +334,10 @@ class HtmlReportRenderer:
         page = self._template("slow_report.html")
         values = {
             "PAGE_TITLE": _escape(model.title), "TITLE": _escape(model.title),
-            "STATUS": _escape(_label(status)), "SEVERITY": _escape(_label(severity)),
+            "STATUS": _escape(status_display), "SEVERITY": _escape(_label(severity)),
             "STATUS_CLASS": status_class,
-            "PRIMARY_PROBLEM": _escape(_label(incident.primary_problem)),
-            "OBSERVED_NOW": _escape(_label(incident.observed_now)),
+            "PRIMARY_PROBLEM": _escape(primary_problem_display),
+            "OBSERVED_NOW": _escape(observed_now_display),
             "COMPLETENESS": _escape(_label(incident.data_completeness)),
             "SNAPSHOT_CONSISTENCY": _escape(_label(meta_value(
                 "Snapshot Consistency", "快照一致性", default="UNKNOWN"))),
@@ -340,6 +419,12 @@ def _label(value: str) -> str:
         "NOT_APPLICABLE": "不适用", "PARTIAL": "部分可用", "INCOMPLETE": "不完整",
         "PENDING": "待采集", "IDENTITY_INCOMPLETE": "身份信息不完整",
         "REQUIRED_BEFORE_MANUAL_ACTION": "人工操作前必须重新核验",
+        "COLLECTED": "已采集", "PERMISSION_DENIED": "权限不足",
+        "UNSUPPORTED": "不支持", "UNAVAILABLE": "不可用",
+        "SOURCE_UNAVAILABLE": "数据来源不可用", "SOURCE_NOT_CONFIGURED": "未配置数据来源",
+        "COLLECTION_FAILED": "采集失败", "EMPTY": "无记录",
+        "server_version_num（原始值）": "server_version_num（原始值）",
+        "Top SQL Summary": "Top SQL 摘要",
     }
     if value in translations:
         return translations[value]

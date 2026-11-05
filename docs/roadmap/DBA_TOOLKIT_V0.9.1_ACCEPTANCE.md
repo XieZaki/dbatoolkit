@@ -1543,3 +1543,133 @@ All evidence below is `ISOLATED_OFFLINE_TEST`; no database or Docker endpoint wa
 `WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED**; this task deliberately used Fake Drivers and synthetic credential/update files only. No real database, Docker, production asset, real Inventory, real Credential Store, credential, or `local_config.py` was accessed. Package version remains `0.9.0`; no tag or GitHub Release was created. No commit or push occurred.
 
 The post-fix GitHub Actions run is **NOT_EXECUTED** because the user requires review before Commit and Push. Therefore `BUG-WINDOWS-CI-FAILURES-001` is `CODE_COMPLETE`, not `VERIFIED`. The next task is the user-approved commit/push followed by the Windows Actions rerun; after remote verification, resume the paused `PORTABLE-UPDATE-001` closeout rather than starting a new feature.
+
+## 48. Phase 2 Top SQL mainline recovery and integration scope audit — 2026-11-04
+
+### Baseline and authoritative task state
+
+The checkout is on branch `main` at `1c0274af1fea439ce93fa6e8abbb2a7134e8fe5f`, matching the user-specified baseline. No tracked modifications or staged changes were present before this documentation update. The seven existing untracked review/archive/diagnostic artifacts were retained without reading or changing them. Package version remains `0.9.0`.
+
+Backlog is authoritative. `V091-P2-TOPSQL-CONTRACT-001`, `V091-P2-TOPSQL-SQLSERVER-001`, `V091-P2-TOPSQL-POSTGRESQL-001`, `V091-P2-TOPSQL-MYSQL-001`, and `V091-P2-TOPSQL-ORACLE-001` are all `VERIFIED` within their respective recorded scopes. The four collectors do not imply every supported database version or metric has live E2E; the exact boundaries remain in Acceptance §§17, 19, 20, and 21. Thus SQL Server is not an unfinished Collector task and must not be reimplemented or repeated.
+
+The previous Progress pointer to `BUG-WINDOWS-CI-FAILURES-001` was stale relative to its own prior acceptance (code complete; remote Actions rerun pending), and deployment work is frozen by current user direction. Other existing Backlog items such as `V091-P5-WORKBENCH-001` and `SQL-REGISTRY-SAFETY-001` retain their recorded statuses; this scope recovery did not close, reopen, or modify them.
+
+### Current source reuse and actual gap
+
+- `dba/cli.py` has a standalone `diagnose ... top-sql` route that resolves the versioned Top SQL profile and invokes the existing SQL Server, PostgreSQL, MySQL, or Oracle Collector. It produces a `TopSQLResult` for one selected metric and requested Top N.
+- The existing `slow` route separately runs staged, bounded Slow/P0 collection and triage. It does not invoke a Top SQL Collector. Therefore the missing capability is orchestration into the comprehensive report, not another engine Collector, Adapter, or SQL Registry implementation.
+- The shared Presenter already accepts `details.top_sql` and renders the result as a bounded Top SQL section. It displays the metric contract and native identity; current Top SQL item/presenter paths do not include captured SQL text. Existing Slow SQL details remain separately bounded/redacted.
+- Existing roadmap sequencing requires explicit integration approval after all four engine collectors are verified. It also requires readable human CLI output and safe SQL summary/detail handling without expanding sensitive SQL collection by default.
+
+### Proposed next task
+
+`V091-P2-TOPSQL-INTEGRATION-001` is defined in Backlog as `BACKLOG`, awaiting user review of the integration scope. The proposal keeps Top SQL explicit opt-in; leaves default Slow collection and first triage timing unchanged; runs one selected native cumulative metric once through the existing reviewed route only after core Slow evidence is complete; preserves per-engine metric, source, identity, scope, completeness, and limitation semantics; and marks optional failures PARTIAL/INCONCLUSIVE without converting missing evidence to zero or suppressing the core diagnosis. It prohibits unsupported attribution of cache/digest/cursor rankings to current blockers, adds no SQL source/permission/configuration change, and keeps Top SQL output text-free. The human CLI should show a readable summary and safe detail state; SQL detail may use only bounded/redacted text already returned by Slow collectors and exactly matched to a Top SQL row by native identity. Similar SQL text or a hash alone is not an association; when the exact match is unavailable, report that state without another query.
+
+### Evidence and limits for this review
+
+This is a static documentation/source audit only. No tests, database, Docker, Inventory, credential provider, real credentials, or local lab configuration were accessed in this review. No Top SQL integration implementation or runtime verification is claimed; integration E2E is `NOT_EXECUTED`. Approval of the proposed scope is a prerequisite to changing product code. No product version, Git history, or deployment/CI file was changed.
+
+## 49. V091-P2-TOPSQL-INTEGRATION-001 — opt-in implementation and offline acceptance — 2026-11-04
+
+### Implementation
+
+- Added `dba diagnose <database_id> slow --include-top-sql`; the flag defaults off and is rejected on other scenarios. With the flag enabled, the existing version/profile resolution and one engine-specific Top SQL Collector call happen after the complete Slow core capture and after Slow priority/triage have been computed. The result is attached to the same report details used by JSON and the shared ReportModel/HTML renderer. Console output renders the Top SQL section from that ReportModel.
+- SQL Server, PostgreSQL, MySQL, and Oracle dispatch to their existing Collector classes and native default metrics. No Top SQL SQL source, Registry script, permission profile, or Collector implementation was changed. The standalone `top-sql` route retains its prior output shape.
+- Top SQL is a separate report section. Its warning identifies the ranking as cumulative database-statistics evidence, not a current root cause. Adding it does not alter Slow priority candidates, triage, `incomplete`, or `success`.
+- SQL text is attached only from Slow `active_requests`/`all_requests` rows when every required native statement identity field matches exactly, and, where a Top SQL plan identity exists, every plan identity field matches too. SQL Server correlation requires plan handle, query-plan hash, and plan generation; PostgreSQL requires query ID/database/user/top-level; MySQL requires digest/schema; Oracle requires SQL ID/child/instance and container when supplied. Duplicate matches, missing identity, identity mismatch, or truncated source text produce `UNMATCHED` with no SQL detail. Matched text is redacted and bounded by `HumanReportPolicy`.
+- Unsupported profiles, denied access, empty/partial results, and Collector exceptions retain their existing public collection statuses. A core-incomplete report records `NOT_COLLECTED` and makes no Top SQL call. Add-on failures do not convert successful core Slow evidence into a failed diagnosis.
+
+### Automated evidence
+
+- `ISOLATED_OFFLINE_TEST`: **PASS**. The Top SQL integration plus four Collector regression modules passed **170 tests**. These cover all four existing Collector routes, default no-call, incomplete-core no-call, exact identity matches and mismatches (including database/query/plan generation), truncation, long SQL redaction/bounds, permission/unsupported/empty/partial/failure statuses, and ReportModel CLI/HTML consistency. The PostgreSQL Fake Driver CLI integration verifies the collector runs after Slow core evidence, once, and leaves candidate/triage results unchanged (excluding their independent snapshot timestamps).
+- Slow and HTML regression selection passed **342 tests**. The full Windows-local pytest run passed **1240**, with **3 skipped** and no failures. No skip/xfail was added and no assertion or security check was relaxed.
+- Ruff repository-wide: **PASS**. Strict MyPy (`mypy dba`, 78 source files): **PASS**. `dba validate --json`: **PASS**, 4 configured Inventory entries, 118 SQL scripts, 0 warnings. `git diff --check`: **PASS**, with Git's LF-to-CRLF advisory notices only.
+- Simulated database-server E2E: **NOT_EXECUTED**. The CLI/Fake Driver integration is reported only as `ISOLATED_OFFLINE_TEST`, not as a database E2E. `WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED**; no single `environment=test` Inventory target was selected for a real connection. The explicitly required `dba validate --json` loaded the configured Inventory metadata and emitted only its aggregate instance count and warnings; no credential values were read, and no asset was selected for connection. No Docker or database was started or accessed.
+
+### Status and boundaries
+
+Backlog remains the status authority and keeps `V091-P2-TOPSQL-INTEGRATION-001` at `IN_PROGRESS` pending the scoped simulator/real-database E2E decision. Complete native identities are absent from some current Slow evidence, so those rows remain explicitly unmatched; no new query was added to force a text association. Software version remains `0.9.0`. No commit, push, tag, or release was created. The seven pre-existing untracked files were retained unchanged.
+
+## 50. V091-P2-TOPSQL-INTEGRATION-001 — scoped real E2E attempt and simulator safety review — 2026-11-04
+
+### Host, targets, and credential-session gate
+
+`WINDOWS_LOCAL_REAL_E2E` preflight confirmed a native Windows process (`Win32NT`, host `ZAKKY`, user SID recorded only in the local command output), PowerShell 7.6.5 x64, working directory `D:\DBA\DBAToolKit`, and the repository `.venv` Python 3.12.14 plus `.venv\Scripts\dba.exe`. Only the four user-named assets were inspected using read-only `dba show` metadata: `sqlserver2022` (SQL Server, `environment=test`, loopback:1433, configured family 2022), `mysql84` (MySQL, `environment=test`, loopback:3306, family 8.4), `pg16` (PostgreSQL, `environment=test`, loopback:5432, family 16), and `oraclefree` (Oracle, `environment=test`, loopback:1521, service `freepdb1`, family 26ai). No other Inventory assets were enumerated or selected.
+
+The read-only `dba credentials status --json` check returned `status=LOCKED`, `agent=STOPPED`. The configured aliases could not be served by an active credential session. No unlock, credential read, password prompt, connection attempt, or alternative credential source was used. This is a credential-session availability block, not a database login or database permission result.
+
+### Per-asset result
+
+| Asset | Connection / actual DB version | Slow core | Integrated Top SQL / metric | Native SQL association | CLI / JSON / HTML parity | Failure / permission evidence |
+|---|---|---|---|---|---|---|
+| `sqlserver2022` | **BLOCKED** before connection; actual server version **NOT_EXECUTED** (Inventory family is 2022) | **NOT_EXECUTED** | **NOT_EXECUTED**; metric values, units, and live semantics unavailable | **NOT_EXECUTED** | **NOT_EXECUTED** | Credential session `LOCKED` / agent `STOPPED`; no database permission check ran |
+| `mysql84` | **BLOCKED** before connection; actual server version **NOT_EXECUTED** (Inventory family is 8.4) | **NOT_EXECUTED** | **NOT_EXECUTED**; metric values, units, and live semantics unavailable | **NOT_EXECUTED** | **NOT_EXECUTED** | Credential session `LOCKED` / agent `STOPPED`; no database permission check ran |
+| `pg16` | **BLOCKED** before connection; actual server version **NOT_EXECUTED** (Inventory family is 16) | **NOT_EXECUTED** | **NOT_EXECUTED**; metric values, units, and live semantics unavailable | **NOT_EXECUTED** | **NOT_EXECUTED** | Credential session `LOCKED` / agent `STOPPED`; no database permission check ran |
+| `oraclefree` | **BLOCKED** before connection; actual server version **NOT_EXECUTED** (Inventory family is 26ai) | **NOT_EXECUTED** | **NOT_EXECUTED**; metric values, units, and live semantics unavailable | **NOT_EXECUTED** | **NOT_EXECUTED** | Credential session `LOCKED` / agent `STOPPED`; no database permission check ran |
+
+For every asset, the requested base Slow command, opt-in `slow --include-top-sql --top 10`, and independent `top-sql --top 10` were **NOT_EXECUTED** because the credential-session gate failed first. Consequently there is no live core-evidence comparison, report parity, identity-match result, Collector failure-isolation observation, or database permission conclusion. No database SQL ran; Toolkit writes, DDL, remediation, and database side effects were therefore **NOT_EXECUTED**, not inferred PASS.
+
+### Simulator static review
+
+The existing simulator documentation and script names support SQL Server, MySQL, PostgreSQL, and Oracle scenarios named ROOT, MIDDLE, LEAF, and SLOW. Static inspection found these are state-changing lab scripts: setup creates tables/data; simulations perform updates/inserts or transaction changes and synthesize row locks/waits or long sleeps; cleanup drops tables (and Oracle setup includes user/grant administration). They therefore violate this round's no-write/no-DDL/no-manufactured-blocker boundary. The scripts were **NOT_EXECUTED**; no local config or credential file was opened. This is static capability/safety evidence only, not simulator E2E.
+
+### Status
+
+Overall live database E2E is **BLOCKED** for all four selected assets at the credential-session gate. `V091-P2-TOPSQL-INTEGRATION-001` remains `IN_PROGRESS` in Backlog. Resume only after the already-authorized test credential session is available through the normal user-controlled process; no credential-store unlock was attempted. The previously accepted `ISOLATED_OFFLINE_TEST` evidence remains recorded separately in §49 and is not represented as live E2E. Version remains `0.9.0`; no commit, push, tag, or release occurred.
+
+## 51. V091-P2-TOPSQL-INTEGRATION-001 — continuation blocked at Credential Session IPC — 2026-11-04
+
+### Pre-connection gate
+
+The current PowerShell process reports native `Win32NT`, host `ZAKKY`, user `ZAKKY\xieji`, PowerShell 7.6.5 x64, working directory `D:\DBA\DBAToolKit`; the repository `.venv` Python and CLI executables exist. This confirms process facts but does not establish that this process can access the Credential Session Agent.
+
+The user reported that the session had been unlocked through the normal process. The required read-only `dba credentials status --json` check returned exit code 1 with `CredentialSessionUnavailable` and the sanitized message `Credential session pipe access was denied.` The session's current state therefore could not be confirmed by this process. I stopped before Inventory re-selection, credential resolution, or any database connection; this is not evidence of a bad password, database outage, or database permission denial. No credential was printed, no store was opened/unlocked, and no database SQL ran.
+
+CLI help was safe to inspect and confirms the independent route is `dba diagnose <database_id> top-sql [--top N]` (with optional `--metric`). The supplied integrated route is `dba diagnose <database_id> slow --include-top-sql --top 10`. Help inspection does not count as runtime E2E.
+
+### Four-asset result matrix
+
+The latest continuation performed no target-specific command because the required session gate failed first. The exact asset metadata last verified in §50 is not represented as a fresh connection check here.
+
+| Item | SQL Server (`sqlserver2022`) | MySQL (`mysql84`) | PostgreSQL (`pg16`) | Oracle (`oraclefree`) |
+|---|---|---|---|---|
+| Real connection | **BLOCKED** before connection | **BLOCKED** before connection | **BLOCKED** before connection | **BLOCKED** before connection |
+| Actual DB version | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** |
+| Slow Diagnose | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** |
+| Integrated Top SQL | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** |
+| Independent Top SQL | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** |
+| Metric semantics and SQL identity match | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** |
+| JSON / HTML parity | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** | **NOT_EXECUTED** |
+| Permission result | **NOT_EXECUTED**; no DB query | **NOT_EXECUTED**; no DB query | **NOT_EXECUTED**; no DB query | **NOT_EXECUTED**; no DB query |
+
+No SQL Server, MySQL, PostgreSQL, or Oracle command was launched; there is no per-database PASS/FAIL or `PERMISSION_DENIED` evidence. No natural blocker/slow-SQL scenario was inspected, so those cases remain **NOT_COVERED**. No new database, data, table, transaction, or lock was created. No offline tests were repeated.
+
+### Status and handoff
+
+Overall real database E2E remains **BLOCKED** before connection because this execution process cannot read Credential Session status. Per the Windows E2E rule, do not retry the same denied IPC from this context or inspect credential files. Backlog stays `IN_PROGRESS`; resume only in the normal Windows PowerShell process where the user's session reports `UNLOCKED`. Version remains `0.9.0`; no commit, push, tag, release, or Top SQL Delta work occurred.
+
+## 52. V091-P2-TOPSQL-INTEGRATION-001 — report presentation repair — 2026-11-05
+
+### Changes and evidence
+
+Presentation-only corrections were made in the report Presenter, HTML renderer/templates, and report display tests. MySQL Top SQL collection success is now separate from completeness/visibility; the Collection Quality row reports `PARTIAL` or `UNKNOWN` without promoting unknown evidence, and preserves the 214/15/15 statement-instrument counts and limitation reasons. MySQL recent-SQL empty/no-candidate output is distinct from a failed collector. PostgreSQL numeric version display is normalized to a readable major/minor (or legacy major/minor/patch) while the raw `server_version_num` remains visible. Slow-report IDs are unique and navigation anchors resolve. Standalone Top SQL has a statistics-specific summary; integrated Top SQL remains a separate evidence section whose quality does not alter Slow core completeness. MySQL current-wait visibility is reported separately from active-request collection, and a clear PostgreSQL snapshot is worded as a single-snapshot observation.
+
+`ISOLATED_OFFLINE_TEST`: `tests/test_html_reports.py`, `tests/test_top_sql_integration.py`, and `tests/test_top_sql_contract.py` — **96 passed**. Synthetic report models exercised MySQL/PostgreSQL Slow and independent Top SQL HTML generation, COMPLETE/PARTIAL/UNKNOWN distinctions, empty and failed recent-SQL states, version formatting, unique IDs/navigation, current-wait visibility, output self-containment, and unmatched SQL-text suppression. Ruff passed for the three changed reporting modules and report test file. Strict MyPy passed for the three reporting modules. `git diff --check` passed (Git emitted only existing LF-to-CRLF normalization notices).
+
+`WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED** for this presentation repair. No database connection, Inventory selection, credential resolution, Collector, Registry SQL, connection code, or database test data was accessed or modified. The four captured 2026-11-04 HTML reports remain unchanged evidence of the original presentation defect; this offline run does not claim that those live reports were regenerated. Section §51 remains the authoritative blocked live-E2E record, and Backlog remains `IN_PROGRESS`.
+
+### Final repository regression audit — 2026-11-05
+
+Full `.venv` pytest ran twice with existing opt-in system tests disabled to prevent real database access: each run reported **1263 passed, 1 failed, 3 skipped**. The repeated failure is `tests/test_portable_update.py::test_startup_failure_restores_program_and_keeps_user_files[...WindowsPowerShell...powershell.exe]`; in full-file and full-suite order it stops during the synthetic managed-MySQL-driver update path and the output lacks the expected `automatically`/`restored` phrase. The isolated case passed once. Its precise order-dependent cause is undetermined; it is outside this presentation-only repair and was not changed. Do not claim a green full suite.
+
+Full Ruff (`ruff check .`) passed. Project-configured Strict MyPy (`mypy dba`) passed for 78 source files. `git diff --check` passed with only line-ending normalization notices. No corresponding JSON/model file exists for the four named 2026-11-04 HTML reports, so no HTML regeneration was performed; unrelated historical JSON files were not substituted.
+
+The worktree already contained the §49 opt-in Top SQL integration changes when this final audit began, including the `dba/cli.py` call-through and untracked `dba/top_sql_integration.py`; this audit did not change them. The full diff therefore includes approved collection orchestration that calls the existing four collectors once when opted in. No Collector implementation, SQL Registry query, database connection/authentication, permission, Inventory, or Credential Store file is in the tracked diff. Static inspection of the existing integration helper found no database write statement or direct SQL execution.
+
+### Portable Update failure follow-up — 2026-11-05
+
+`ISOLATED_OFFLINE_TEST`: pytest collection confirmed the Windows PowerShell 5.1 startup-failure case follows all collected items in `test_performance_triage.py`, the three tests in `test_permissions.py`, and the first 12 collected items in `test_portable_update.py`. The exact test passed alone (1 passed); the Portable Update module passed (27 passed); the nearest predecessor-file combination (`test_performance_triage.py`, `test_permissions.py`, and `test_portable_update.py`) passed (47 passed). A subsequent full suite passed: **1264 passed, 3 skipped, 0 failed**. This run did not reproduce the two failures recorded above.
+
+The earlier failing runs' original child-process stdout/stderr was not retained. Read-only inspection of their surviving synthetic pytest artifacts shows the installed manifest returned to `0.9.0`, the application entry file hash matches the original installed copy, the MySQL active driver remains at its original `1.0.0` identity, and the program backup plus staged failed-program quarantine exist. An instrumented successful Windows PowerShell 5.1 reproduction captured the expected `prior program was restored` message in stderr and exit code 1. This confirms restoration in the retained failure artifacts and the current reproduction, but it does not establish why the earlier assertion at `tests/test_portable_update.py:389` did not find its expected phrase.
+
+Root cause remains **UNCONFIRMED**. No test assertion, updater script, or product code was changed; no skip/xfail was added. Preserve the earlier failure records and investigate further if the same failure recurs with child stdout/stderr captured. No database, Inventory, or credential was accessed.

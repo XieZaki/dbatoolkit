@@ -3,17 +3,17 @@
 ## Current position
 
 ```text
-CURRENT_PHASE: Deployment stabilization (BUG-WINDOWS-CI-FAILURES-001; parent PORTABLE-UPDATE-001 paused)
-CURRENT_TASK: BUG-WINDOWS-CI-FAILURES-001 — CODE_COMPLETE; five Windows Actions failure classes fixed and final scoped ACL/tzdata/Portable Update acceptance passed, remote Actions rerun pending, 2026-11-04
+CURRENT_PHASE: Phase 2 — Top SQL comprehensive-diagnosis integration
+CURRENT_TASK: V091-P2-TOPSQL-INTEGRATION-001 — IN_PROGRESS; report presentation checks pass; the prior full-suite Windows PowerShell Update failure did not recur in the follow-up full run (1264 passed, 3 skipped), but its root cause remains unconfirmed; live E2E remains BLOCKED before DB access by Credential Session IPC status denial, 2026-11-05
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.0
-BASE_HEAD_FOR_CURRENT_CHECKPOINT: 6ff0fba0f7b629b5fb347c6c5fdad515b618b471
-CURRENT_TASK_DELIVERY: Acceptance §47 records the 198-failure classification, CRLF-exact Fake Driver fixtures, strict SQLite Owner initialization, module-independent .NET SHA256, tzdata dependency, example-Inventory test isolation, Windows-local ACL evidence, and full regression. The 2026-11-04 follow-up independently checks Owner/DACL and revalidates tzdata plus update rejection/recovery in Windows PowerShell 5.1 and PowerShell 7 without rerunning full pytest. No production safety check was relaxed. PORTABLE-UPDATE-001 and OFFLINE-RUNTIME-001 remain E2E_PENDING; Roadmap order and version are unchanged.
-LAST_COMPLETED_TASK: PERMISSION-PREFLIGHT-001 — conditionally closed; canonical status DONE in Backlog.
-NEXT_READY_TASK: Post-fix GitHub Actions rerun for BUG-WINDOWS-CI-FAILURES-001 after user-approved commit/push; then resume PORTABLE-UPDATE-001. Do not start another Backlog task.
-WAITING_FOR_USER_REVIEW: YES — review the CI fix and local acceptance before commit/push.
-WAITING_FOR_USER_ACTION: Approve Commit and Push so the Windows Actions rerun can provide remote verification. GitHub Release/tag/version changes remain out of scope.
-FOLLOWING_ORDER: Roadmap order unchanged; no other Backlog task started.
+BASE_HEAD_FOR_CURRENT_CHECKPOINT: 1c0274af1fea439ce93fa6e8abbb2a7134e8fe5f
+CURRENT_TASK_DELIVERY: Acceptance §49 records implementation and offline evidence. Acceptance §50 records the prior locked-session attempt. Acceptance §51 records the Credential Session IPC denial and no-connection stop. Acceptance §52 records report presentation repair and the initial full-suite result; its “Portable Update failure follow-up” subsection records the later single/module/nearest-predecessor tests and full-suite result (1264 passed, 3 skipped), while noting that the earlier output assertion failure remains unexplained. Neither changes §51's live-E2E status or Backlog state.
+LAST_COMPLETED_TASK: V091-P2-TOPSQL-ORACLE-001 — VERIFIED within the Oracle Free 26ai metrics/scenarios recorded in Acceptance §21.
+NEXT_READY_TASK: Resume scoped real-database E2E for V091-P2-TOPSQL-INTEGRATION-001 from the user's normal Windows PowerShell session where Credential Session status is readable and UNLOCKED; do not unlock the encrypted credential store or start Top SQL Delta. Do not repeat or reopen the four verified Collector tasks.
+WAITING_FOR_USER_REVIEW: NO — implementation is user-approved.
+WAITING_FOR_USER_ACTION: Run the provided commands in the normal Windows PowerShell session that owns the Credential Session, or provide that authorized execution context; no credential unlock or DB connection was attempted.
+FOLLOWING_ORDER: Four independent Top SQL collectors are verified within their recorded scopes. Packaging, Update, offline deployment, GitHub Actions and Release work remain frozen by user direction. Existing unrelated Backlog statuses remain unchanged.
 ```
 
 ### BUG-WINDOWS-CI-FAILURES-001 — code-complete local acceptance — 2026-11-03
@@ -160,10 +160,12 @@ New Bugs must be registered in the Backlog with `bug_id`, `parent_task_id`, `pha
 3. Run `git status --short` and `git log -1 --oneline`; preserve user files and record any HEAD drift.
 4. Resume only the task explicitly approved by the user. Oracle and SQL Server evidence is scoped to exact lab/version cells in Acceptance; open optional permissions and old-version gaps do not block Phase 1 triage.
 5. `V091-P0-PLAN-003` is verified for its recorded SQL Server lab scope. The approved OS credential provider works without unlocking the encrypted store. Do not use the administrator test-driver identity in Toolkit. Phase 0 is closed; do not modify lab infrastructure for Phase 1 without need and scope.
-6. Phase 1 `V091-P1-TRIAGE-001` and Phase 2 design/contract tasks are VERIFIED in Backlog for their documented scopes. The user-approved contract work does not authorize an engine Collector; select and approve one existing engine task before implementation.
+6. Phase 1 `V091-P1-TRIAGE-001`, Phase 2 design/contract tasks, and all four Phase 2 Top SQL engine collectors are VERIFIED in Backlog for their documented scopes. Do not repeat collector work. `V091-P2-TOPSQL-INTEGRATION-001` is IN_PROGRESS under the user's approval.
 7. Update task status only in Backlog, add actual evidence only to Acceptance, update this pointer, report the next task, and stop.
 
-## Current task summary
+## Historical task summary
+
+The entries below are chronological evidence. Current task state is maintained only in Backlog and the pointer at the top of this file.
 
 - `PLAN-PC-001` offline Oracle cached-plan MVP (2026-10-25; HEAD unchanged): added version-routed 11gR2 and 12c+ `V$SQL` identity / `V$SQL_PLAN` node queries, dedicated validated bind methods, strict child/instance/container/plan-hash association, a 500-operator complete-tree limit, Oracle CLI/JSON/HTML reporting, and a direct `V_$SQL_PLAN` permission requirement. Focused tests: 86 passed; full pytest: 1011 passed, 2 skipped; Ruff, strict MyPy, `dba validate` (119 SQL scripts), and `git diff --check` passed. No database or Docker was accessed. `PLAN-PC-001` remains `E2E_PENDING`; see Acceptance §22. Next task is separately authorized Oracle Free 26ai E2E.
 

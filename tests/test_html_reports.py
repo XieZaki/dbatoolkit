@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,7 @@ from dba.incident import build_incident_summary
 from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.reporting.presenters import _local_time
 from dba.slow import SlowReport
+from dba.top_sql_report import TopSQLDiagnosticReport
 
 
 def _report() -> SlowReport:
@@ -64,6 +66,64 @@ def _report() -> SlowReport:
                     ("active_sessions", "active_requests", "blocking", "transactions", "connections")],
     }
     return SlowReport(instance, datetime(2026, 10, 17, tzinfo=timezone.utc), "slow", findings, details)
+
+
+def _top_sql_payload(database_type: DatabaseType = DatabaseType.MYSQL, *,
+                     completeness: str = "PARTIAL", visibility: str = "PARTIAL",
+                     association_status: str = "UNMATCHED") -> dict[str, object]:
+    engine = database_type.value
+    identity_fields: dict[str, object] = ({"digest": "digest-001", "schema_name": "app"}
+        if database_type is DatabaseType.MYSQL else
+        {"queryid": 8107, "dbid": 16384, "userid": 10, "toplevel": True})
+    identity = {"database_engine": engine, "kind": "STATEMENT", "fields": identity_fields}
+    return {
+        "database_engine": engine,
+        "database_version": "16.15 (Debian 16.15-1)" if database_type is DatabaseType.POSTGRESQL else "8.4.11",
+        "collection_status": "COLLECTED", "completeness": completeness,
+        "data_visibility": visibility, "profile_id": f"{engine}_top_sql",
+        "collection_timestamp": "2026-11-04T23:58:13+00:00",
+        "ranking_metric": "total_exec_time" if database_type is DatabaseType.POSTGRESQL else "sum_timer_wait",
+        "ranking_direction": "DESCENDING", "metric_name": "total_exec_time" if database_type is DatabaseType.POSTGRESQL else "sum_timer_wait",
+        "metric_unit": "milliseconds" if database_type is DatabaseType.POSTGRESQL else "picoseconds",
+        "metric_semantics": "CUMULATIVE", "metric_scope": "SQL_STATEMENT",
+        "collection_scope": "INSTANCE", "evidence_source": "pg_stat_statements" if database_type is DatabaseType.POSTGRESQL else "performance_schema.events_statements_summary_by_digest",
+        "limitations": ["COUNTER_EPOCH_UNKNOWN", "SOURCE_COVERAGE_INCOMPLETE"]
+        if completeness == "PARTIAL" else [],
+        "source_metadata": {"statement_instrument_count": 214,
+                            "statement_instrument_disabled_count": 15,
+                            "statement_instrument_untimed_count": 15}
+        if database_type is DatabaseType.MYSQL else {},
+        "items": [{"rank": 1, "metric_value": 9876, "sql_identity": identity,
+                   "sql_text_association": {"status": association_status,
+                                            "sql_text": "MUST_NOT_BE_SHOWN"}}],
+    }
+
+
+def _top_sql_report(database_type: DatabaseType = DatabaseType.MYSQL, *,
+                    completeness: str = "PARTIAL", visibility: str = "PARTIAL") -> TopSQLDiagnosticReport:
+    instance = DatabaseInstance("synthetic-top-sql", "Synthetic Top SQL", database_type,
+                                "localhost", 1, "synthetic-monitor", environment="test")
+    details: dict[str, object] = {"version": "160015" if database_type is DatabaseType.POSTGRESQL else "8.4.11",
+                                  "top_sql": _top_sql_payload(database_type,
+                                      completeness=completeness, visibility=visibility)}
+    return TopSQLDiagnosticReport(instance, datetime(2026, 11, 4, tzinfo=timezone.utc),
+                                  "top-sql", (), details)
+
+
+class _HTMLReferences(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: list[str] = []
+        self.fragments: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        identifier = values.get("id")
+        if identifier:
+            self.ids.append(identifier)
+        href = values.get("href")
+        if href and href.startswith("#"):
+            self.fragments.append(href[1:])
 
 
 def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() -> None:
@@ -422,3 +482,223 @@ def test_report_filename_timestamp_and_collision(monkeypatch: pytest.MonkeyPatch
     assert _diagnostic_report_path("sqlserver2022", "slow", Path("reports/custom.md")) == Path(
         "reports/custom.html"
     )
+
+
+def test_mysql_top_sql_quality_distinguishes_collection_from_partial_completeness() -> None:
+    report = replace(_report(), instance=DatabaseInstance(
+        "mysql-test", "MySQL", DatabaseType.MYSQL, "localhost", 3306,
+        "synthetic-monitor", environment="test"))
+    report.details["top_sql"] = _top_sql_payload()
+    model = build_report_model(report, build_incident_summary(report))
+    quality = next(section for section in model.sections if section.section_id == "collection-quality")
+    rows = {row[0]: row for row in quality.tables[0].rows}
+
+    assert rows["mysql_top_sql"][1] == "PARTIAL"
+    assert "Collection status=COLLECTED" in rows["mysql_top_sql"][2]
+    assert "completeness=PARTIAL" in rows["mysql_top_sql"][2]
+    assert "COUNTER_EPOCH_UNKNOWN" in rows["mysql_top_sql"][2]
+    assert "SOURCE_COVERAGE_INCOMPLETE" in rows["mysql_top_sql"][2]
+    top_sql = next(section for section in model.sections if section.section_id == "top-sql")
+    top_sql_fields = dict(top_sql.fields)
+    assert top_sql_fields["Database Engine"] == "MySQL"
+    source_metadata = top_sql_fields["Source Metadata"]
+    assert "Statement Instrument Count: 214" in source_metadata
+    assert "Statement Instrument Disabled Count: 15" in source_metadata
+    assert "Statement Instrument Untimed Count: 15" in source_metadata
+    assert model.incident_summary.data_completeness == "COMPLETE"
+
+
+@pytest.mark.parametrize(("completeness", "visibility", "expected"), [
+    ("COMPLETE", "COMPLETE", "完整"),
+    ("UNKNOWN", "UNKNOWN", "未知"),
+    ("COMPLETE", "UNKNOWN", "未知"),
+])
+def test_top_sql_quality_never_promotes_unknown_to_complete(
+        completeness: str, visibility: str, expected: str) -> None:
+    report = replace(_report(), instance=DatabaseInstance(
+        "mysql-test", "MySQL", DatabaseType.MYSQL, "localhost", 3306,
+        "synthetic-monitor", environment="test"))
+    report.details["top_sql"] = _top_sql_payload(
+        completeness=completeness, visibility=visibility)
+    model = build_report_model(report, build_incident_summary(report))
+    quality = next(section for section in model.sections if section.section_id == "collection-quality")
+    row = next(row for row in quality.tables[0].rows if row[0] == "mysql_top_sql")
+    assert row[1] == expected
+
+
+def test_top_sql_completeness_does_not_raise_incomplete_slow_core() -> None:
+    report = replace(_report(), instance=DatabaseInstance(
+        "mysql-test", "MySQL", DatabaseType.MYSQL, "localhost", 3306,
+        "synthetic-monitor", environment="test"))
+    report.details["incomplete"] = True
+    report.details["samples"] = [
+        {**sample, "success": False} if sample["collector"] == "active_requests" else sample
+        for sample in report.details["samples"]]
+    report.details["top_sql"] = _top_sql_payload(completeness="COMPLETE", visibility="COMPLETE")
+    model = build_report_model(report, build_incident_summary(report))
+    quality = next(section for section in model.sections if section.section_id == "collection-quality")
+    row = next(row for row in quality.tables[0].rows if row[0] == "mysql_top_sql")
+    assert row[1] == "完整"
+    assert model.incident_summary.data_completeness != "COMPLETE"
+
+
+def test_mysql_recent_sql_empty_and_failed_states_are_distinct() -> None:
+    empty = replace(_report(), instance=DatabaseInstance(
+        "mysql-test", "MySQL", DatabaseType.MYSQL, "localhost", 3306,
+        "synthetic-monitor", environment="test"))
+    empty.details["recent_statements"] = [{
+        "status": "NOT_APPLICABLE",
+        "reason": "No confirmed root blocker or idle transaction candidate.",
+    }]
+    empty_model = build_report_model(empty, build_incident_summary(empty))
+    empty_section = next(section for section in empty_model.sections
+                         if section.section_id == "mysql-recent-statements")
+    empty_text = " ".join(value for _, value in empty_section.fields)
+    assert "当前快照未发现可展示的最近执行 SQL" in empty_text
+    assert "连接 不可用 状态" not in empty_text
+    assert "连接不可用" not in empty_text
+
+    empty_result = replace(_report(), instance=empty.instance)
+    empty_result.details["samples"] = [*empty_result.details["samples"], {
+        "collector": "recent_statements", "success": True, "truncated": False, "row_count": 0,
+    }]
+    empty_result.details["recent_statements"] = []
+    empty_result_model = build_report_model(empty_result, build_incident_summary(empty_result))
+    empty_result_section = next(section for section in empty_result_model.sections
+                                if section.section_id == "mysql-recent-statements")
+    assert dict(empty_result_section.fields)["采集状态"] == "COLLECTED"
+    assert "当前快照未发现可展示的最近执行 SQL" in dict(empty_result_section.fields)["最近执行 SQL"]
+
+    failed = replace(_report(), instance=empty.instance)
+    failed.details["samples"] = [*failed.details["samples"], {
+        "collector": "recent_statements", "success": False,
+        "error_type": "QueryFailed", "error_message": "statement history collection failed",
+    }]
+    failed.details["recent_statements"] = [{
+        "session_id": 36, "evidence_status": "QUERY_FAILED", "statements": [],
+        "reason": "Recent statement history query failed; see sanitized collection evidence.",
+    }]
+    failed_model = build_report_model(failed, build_incident_summary(failed))
+    failed_section = next(section for section in failed_model.sections
+                          if section.section_id == "mysql-recent-statements")
+    failed_fields = dict(failed_section.fields)
+    assert failed_fields["采集状态"] == "FAILED"
+    assert failed_fields["连接 36 最近 SQL 状态"] == "QUERY_FAILED"
+    assert "当前快照未发现可展示的最近执行 SQL" not in " ".join(failed_fields.values())
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    (160015, "16.15"), ("160015", "16.15"), (100000, "10.0"),
+    (100001, "10.1"), (90624, "9.6.24"), ("90624", "9.6.24"),
+    ("9.6.24", "9.6.24"), ("16.15 (Debian 16.15-1)", "16.15"),
+])
+def test_postgresql_version_display_supports_legacy_and_modern_formats(
+        value: object, expected: str) -> None:
+    from dba.reporting.normalizers import postgresql_version_label
+
+    assert postgresql_version_label(value) == expected
+
+
+def test_postgresql_slow_version_is_readable_and_retains_raw_server_version_num() -> None:
+    report = replace(_report(), instance=DatabaseInstance(
+        "pg-test", "PostgreSQL", DatabaseType.POSTGRESQL, "localhost", 5432,
+        "synthetic-monitor", environment="test"))
+    report.details.update(version="160015", server_version_num=160015)
+    model = build_report_model(report, build_incident_summary(report))
+    metadata = dict(model.metadata)
+    assert metadata["版本"] == "16.15"
+    assert metadata["server_version_num（原始值）"] == "160015"
+    page = HtmlReportRenderer().render(model)
+    assert "16.15" in page and "160015" in page
+
+
+@pytest.mark.parametrize("database_type", [DatabaseType.MYSQL, DatabaseType.POSTGRESQL])
+def test_slow_html_ids_are_unique_and_navigation_fragments_resolve(database_type: DatabaseType) -> None:
+    report = replace(_report(), instance=DatabaseInstance(
+        "synthetic", "Synthetic", database_type, "localhost", 1,
+        "synthetic-monitor", environment="test"))
+    page = HtmlReportRenderer().render(build_report_model(
+        report, build_incident_summary(report, "reports/synthetic.html")))
+    parser = _HTMLReferences()
+    parser.feed(page)
+
+    assert len(parser.ids) == len(set(parser.ids))
+    assert parser.ids.count("collection-quality") == 1
+    assert "collection-quality-panel" in parser.ids
+    assert set(parser.fragments).issubset(set(parser.ids))
+    assert 'href="#collection-quality"' in page
+
+
+def test_independent_top_sql_report_uses_statistics_summary_and_keeps_native_identity() -> None:
+    report = _top_sql_report(DatabaseType.POSTGRESQL, completeness="PARTIAL", visibility="PARTIAL")
+    page = HtmlReportRenderer().render(build_report_model(report, build_incident_summary(report)))
+
+    for expected in ("数据库类型", "PostgreSQL", "数据库版本", "16.15", "采集状态",
+                     "证据完整性", "部分可用", "返回记录数", "排序指标", "指标单位",
+                     "CUMULATIVE", "统计范围", "数据来源", "采集时间", "queryid=8107"):
+        assert expected in page
+    for inappropriate in ("严重程度", "主要问题", "当前观测", "采集开始", "初报完成", "N/A"):
+        assert inappropriate not in page
+    assert "MUST_NOT_BE_SHOWN" not in page
+    assert "http://" not in page and "https://" not in page
+
+    complete_report = _top_sql_report(DatabaseType.MYSQL, completeness="COMPLETE", visibility="COMPLETE")
+    complete_page = HtmlReportRenderer().render(build_report_model(
+        complete_report, build_incident_summary(complete_report)))
+    assert "证据完整性" in complete_page and "完整" in complete_page
+    assert "部分可用" not in complete_page
+
+
+def test_mysql_wait_detail_unavailable_does_not_mark_active_requests_failed() -> None:
+    report = replace(_report(), instance=DatabaseInstance(
+        "mysql-test", "MySQL", DatabaseType.MYSQL, "localhost", 3306,
+        "synthetic-monitor", environment="test"))
+    report.details["wait_detail_status"] = "UNAVAILABLE"
+    report.details["wait_detail_reason"] = (
+        "events_waits_current consumer is disabled; fallback intentionally projects NULL.")
+    model = build_report_model(report, build_incident_summary(report))
+    quality = next(section for section in model.sections if section.section_id == "collection-quality")
+    rows = {row[0]: row for row in quality.tables[0].rows}
+    assert rows["active_requests"][1] == "完整"
+    assert rows["current_wait_detail"][1] == "UNAVAILABLE"
+    assert "intentionally projects NULL" in rows["current_wait_detail"][2]
+
+
+def test_postgresql_healthy_slow_html_describes_only_this_snapshot() -> None:
+    report = replace(_report(), instance=DatabaseInstance(
+        "pg-test", "PostgreSQL", DatabaseType.POSTGRESQL, "localhost", 5432,
+        "synthetic-monitor", environment="test"), findings=())
+    report.details.update(version="160015", server_version_num=160015,
+                          concurrency={"active_requests": 0, "blocked_requests": 0},
+                          roots=[], blocking_graph={"roots": [], "children": {}, "anomalies": []},
+                          all_requests=[], long_running=[], transactions=[])
+    summary = build_incident_summary(report)
+    assert summary.status == "HEALTHY"
+    page = HtmlReportRenderer().render(build_report_model(report, summary))
+    assert "本次采样未发现异常" in page
+    assert "当前未观测到阻塞" in page
+    assert "健康 · 提示" not in page
+
+    abnormal = replace(report, findings=_report().findings)
+    abnormal_summary = build_incident_summary(abnormal)
+    abnormal_page = HtmlReportRenderer().render(build_report_model(abnormal, abnormal_summary))
+    assert abnormal_summary.status == "DEGRADED"
+    assert "本次采样未发现异常" not in abnormal_page
+    assert "当前未观测到阻塞" not in abnormal_page
+
+
+@pytest.mark.parametrize(("database_type", "scenario"), [
+    (DatabaseType.MYSQL, "slow"), (DatabaseType.MYSQL, "top-sql"),
+    (DatabaseType.POSTGRESQL, "slow"), (DatabaseType.POSTGRESQL, "top-sql"),
+])
+def test_four_mysql_postgresql_report_variants_generate_self_contained_html(
+        database_type: DatabaseType, scenario: str) -> None:
+    report = (_top_sql_report(database_type) if scenario == "top-sql" else
+              replace(_report(), instance=DatabaseInstance(
+                  f"{database_type.value}-test", database_type.value, database_type,
+                  "localhost", 1, "synthetic-monitor", environment="test")))
+    model = build_report_model(report, build_incident_summary(report))
+    page = HtmlReportRenderer().render(model)
+    assert "<html lang=\"zh-CN\">" in page
+    assert "<script src=\"http" not in page
+    assert '<link rel="stylesheet" href="http' not in page

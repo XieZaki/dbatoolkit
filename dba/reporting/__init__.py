@@ -9,8 +9,8 @@ from dba.reporting.model import (
                                  ReportSection,
                                  ReportTable,
 )
-from dba.reporting.presenters import build_report_model, render_bounded
+from dba.reporting.presenters import build_report_model, render_bounded, render_report_section_text
 
 __all__ = ["DEFAULT_HUMAN_REPORT_POLICY", "HtmlReportRenderer", "HumanReportPolicy",
            "ReportCodeBlock", "ReportModel", "ReportSection", "ReportTable",
-           "build_report_model", "render_bounded"]
+           "build_report_model", "render_bounded", "render_report_section_text"]

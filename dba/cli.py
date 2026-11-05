@@ -83,7 +83,12 @@ from dba.presentation import (
 from dba.registry import SqlScriptRegistry
 from dba.replication import diagnose_replication
 from dba.replication_collectors import validate_replication_profiles
-from dba.reporting import HtmlReportRenderer, build_report_model, render_bounded
+from dba.reporting import (
+    HtmlReportRenderer,
+    build_report_model,
+    render_bounded,
+    render_report_section_text,
+)
 from dba.runtime import RuntimeStatus, database_runtime_status, doctor, runtime_info
 from dba.settings import (
     MySQLSettings,
@@ -114,6 +119,7 @@ from dba.top_sql_collectors import (
     PostgreSQLTopSQLCollector,
     SQLServerTopSQLCollector,
 )
+from dba.top_sql_integration import collect_slow_top_sql
 from dba.top_sql_profiles import validate_top_sql_profiles
 from dba.top_sql_report import TopSQLDiagnosticReport
 from dba.versioning import (
@@ -412,6 +418,8 @@ def main(
     diagnose.add_argument("--top", type=int, default=10, help="Top SQL row limit (1-100)")
     diagnose.add_argument("--sort", choices=("cpu", "logical-reads", "elapsed"), default="cpu",
                           help="Active SQL primary CLI ranking (HTML always includes all three rankings)")
+    diagnose.add_argument("--include-top-sql", action="store_true",
+                          help="After complete Slow core evidence, append one cumulative Top SQL snapshot")
     diagnose.add_argument("--report", type=Path, help="Output HTML report file")
     diagnose.add_argument("--format", choices=("console", "json"), default="console",
                           help=argparse.SUPPRESS)
@@ -865,6 +873,10 @@ def main(
                 if args.scenario in {"top-sql", "active-sql"} and (
                         type(args.top) is not int or not 1 <= args.top <= TOP_LIMIT):
                     raise ToolkitError("InvalidTopN", f"Top SQL row limit must be between 1 and {TOP_LIMIT}.")
+                if args.include_top_sql and args.scenario != "slow":
+                    raise ToolkitError("InvalidArgument", "--include-top-sql is available only with diagnose slow.")
+                if args.include_top_sql and (type(args.top) is not int or not 1 <= args.top <= TOP_LIMIT):
+                    raise ToolkitError("InvalidTopN", f"Top SQL row limit must be between 1 and {TOP_LIMIT}.")
             if driver is None:
                 runtime = database_runtime_status(instance.db_type)
                 if runtime.get("status") not in {
@@ -1193,6 +1205,17 @@ def main(
                                                "supplemental_pending": False})
                         final_triage = build_performance_triage(report)
                         cast(Any, report).details["performance_triage"] = final_triage
+                        top_sql_integration = collect_slow_top_sql(
+                            adapter, cast(Any, report).details,
+                            enabled=args.include_top_sql,
+                            core_complete=core_complete,
+                            metric=args.metric,
+                            top_n=args.top,
+                        )
+                        if top_sql_integration is not None:
+                            cast(Any, report).details["top_sql_integration"] = top_sql_integration
+                            if isinstance(top_sql_integration.get("top_sql"), dict):
+                                cast(Any, report).details["top_sql"] = top_sql_integration["top_sql"]
                         if (args.format == "console" and not args.json and not args.quiet
                                 and _triage_summary_fingerprint(final_candidates, final_triage)
                                 != emergency_triage_fingerprint):
@@ -1459,6 +1482,11 @@ def main(
                     elif args.scenario == "plan" and instance.db_type == DatabaseType.ORACLE:
                         print(render_oracle_plan_human(report, str(report_path)))
                     elif args.scenario in {"slow", "disk-growth"}:
+                        if args.scenario == "slow" and args.include_top_sql and not args.quiet:
+                            section = next((item for item in model.sections
+                                            if item.section_id == "top-sql"), None)
+                            if section is not None:
+                                print(render_report_section_text(section), flush=True)
                         if args.quiet:
                             print(f"{'READY' if output.get('success') else 'PARTIAL'}  {report_path}", flush=True)
                         else:
