@@ -135,10 +135,11 @@ jobs:
       - name: Obtain pinned CPython embeddable runtime
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $runtime = 'dist/portable-build-inputs/python-3.13.17-embed-amd64.zip'
           New-Item -ItemType Directory -Path (Split-Path -Parent $runtime) -Force | Out-Null
-          Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip' -OutFile $runtime
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download the pinned CPython runtime.' }
+          Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip' -OutFile $runtime -ErrorAction Stop
+          if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) { throw 'Pinned CPython runtime download did not create the expected file.' }
           $hash = (Get-FileHash -LiteralPath $runtime -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38') { throw 'Pinned CPython runtime hash mismatch.' }
 
