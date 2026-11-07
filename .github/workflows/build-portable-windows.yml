@@ -67,7 +67,9 @@ jobs:
               $releaseTag = '${{ inputs.release_tag }}'
               if ($releaseTag -ne "v$projectVersion") { throw 'Manual Release tag does not match the project package version.' }
             }
-            git fetch --no-tags origin "refs/tags/$releaseTag:refs/tags/$releaseTag"
+            $tagRef = "refs/tags/$releaseTag"
+            $tagRefSpec = "${tagRef}:${tagRef}"
+            git fetch --no-tags origin $tagRefSpec
             if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the requested existing Release tag.' }
             $tagCommit = git rev-parse "$releaseTag^{commit}"
             if ($LASTEXITCODE -ne 0 -or -not $tagCommit) { throw 'Requested Release tag does not resolve to a commit.' }
