@@ -11,10 +11,14 @@ on:
         required: false
         type: string
       publish_release:
-        description: 'Publish only when this workflow is manually run against a matching vX.Y.Z tag'
+        description: 'Publish an existing matching tag after its build and asset checks succeed'
         required: false
         default: false
         type: boolean
+      release_tag:
+        description: 'Existing vX.Y.Z tag to publish when dispatching from main'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -27,6 +31,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -44,13 +49,28 @@ jobs:
           $projectVersion = [regex]::Match((Get-Content pyproject.toml -Raw), '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
           $sourceVersion = [regex]::Match((Get-Content dba/__init__.py -Raw), '(?m)^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
           if (-not $projectVersion -or $projectVersion -ne $sourceVersion) { throw 'Project package version sources disagree.' }
+          $releaseTag = ''
           if ($env:GITHUB_REF -like 'refs/tags/*') {
-            $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+            $releaseTag = $env:GITHUB_REF_NAME
+            $tagVersion = $releaseTag -replace '^v', ''
             if ($tagVersion -ne $projectVersion) { throw 'Release tag does not match the project package version.' }
+          }
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and '${{ inputs.publish_release }}' -eq 'true' -and
+              $env:GITHUB_REF -notlike 'refs/tags/*') {
+            if ($env:GITHUB_REF -ne 'refs/heads/main') { throw 'Manual Release dispatch is allowed only from main.' }
+            $releaseTag = '${{ inputs.release_tag }}'
+            if ($releaseTag -ne "v$projectVersion") { throw 'Manual Release tag does not match the project package version.' }
+            git fetch --no-tags origin "refs/tags/$releaseTag:refs/tags/$releaseTag"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the requested existing Release tag.' }
+            $tagCommit = git rev-parse "$releaseTag^{commit}"
+            if ($LASTEXITCODE -ne 0 -or -not $tagCommit) { throw 'Requested Release tag does not resolve to a commit.' }
+            git diff --quiet $tagCommit $env:GITHUB_SHA -- . ':!.github/workflows/build-portable-windows.yml'
+            if ($LASTEXITCODE -ne 0) { throw 'Manual Release source differs from the tagged source outside this workflow file.' }
           }
           $requested = '${{ inputs.version }}'
           if ($requested -and $requested -ne $projectVersion) { throw 'Requested build version does not match the project version.' }
           "version=$projectVersion" >> $env:GITHUB_OUTPUT
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
 
       - name: Install test and quality tools
         shell: pwsh
@@ -146,7 +166,9 @@ jobs:
           retention-days: 14
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish_release == true)
+    if: >-
+      (startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release == true && needs.build.outputs.release_tag != '')
     needs: build
     runs-on: windows-latest
     permissions:
@@ -161,7 +183,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.build.outputs.release_tag }}
           generate_release_notes: true
           draft: true
           fail_on_unmatched_files: true
@@ -180,7 +202,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $version = '${{ needs.build.outputs.version }}'
-          $tag = '${{ github.ref_name }}'
+          $tag = '${{ needs.build.outputs.release_tag }}'
           $fullName = "DBAToolkit-$version-Windows-x64-Full.zip"
           $updateName = "DBAToolkit-$version-Windows-x64-Update.zip"
           $sumsName = "DBAToolkit-$version-SHA256SUMS.txt"
