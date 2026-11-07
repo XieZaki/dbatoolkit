@@ -476,3 +476,130 @@ The dependency plan, authoritative task states and acceptance criteria are in Ba
 The routed families are SQL Server 2008 R2 through 2022; the query intentionally avoids later-only DMV columns. SQL Server 2025 has an explicit `UNKNOWN` route and is not executable until its profile is reviewed. Permission routes use `VIEW SERVER STATE` through 2019 and `VIEW SERVER PERFORMANCE STATE` for 2022+, with no broad fallback grant. Worker/elapsed time are nominally microseconds but have millisecond accuracy; physical-read counters are not operating-system device I/O. Counters are scoped to cached plan/statement lifetime and may reset at recompile, cache eviction or restart. These limitations are exposed in the result. The product-facing command is `dba diagnose <database_id> top-sql --metric <metric> --top <1-100>`; SQL text is intentionally omitted from console, JSON and HTML output.
 
 Automation validates route/permission shape, legacy field compatibility, bound metric/Top-N parameters, per-statement native identity, units, average values, incomplete text/identity, truncation, empty cache and shared CLI/JSON/HTML rendering. Live SQL Server 2022 E2E remains pending when the approved local lab cannot be identity-checked/reached; see Acceptance §17. No older-version E2E is implied.
+
+## 18. Root-cause and instance-resource attribution supplement (2026-11-07)
+
+> This supplement extends the historical design below; it does not rewrite earlier implementation snapshots or claim that the proposed resource collectors/findings are implemented. Current task state is owned by docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md; exact implementation and E2E claims remain in Acceptance.
+
+### 18.1 Design decision and evidence scopes
+
+The 27-second example exposes a product gap: the current report can show elapsed duration and session identity, but elapsed duration alone cannot explain why the request took that long. The next design must keep three evidence scopes separate:
+
+1. **SQL/request scope:** one current request or one database-native statement identity; elapsed, CPU, reads, wait/block state, execution plan, memory grant/workarea or spill evidence only when the source provides it.
+2. **Database/instance scope:** engine-wide or database-wide waits, scheduler/worker queues, memory/workarea pressure, file I/O and other cumulative resource counters. These describe the instance/database, not an individual SQL unless an exact native association exists.
+3. **Host/storage scope:** operating-system CPU scheduling, physical memory pressure, device queue/latency and infrastructure telemetry. These are not consistently available from database SQL. Oracle exposes some platform-dependent OS observations through database views, but that is not a universal host-monitoring interface.
+
+No observation may be silently promoted from a broader scope to SQL scope. A database-wide wait total, instance CPU figure, file latency average or host metric may provide context; it is not automatically the cause of a selected statement.
+
+### 18.2 What elapsed time can and cannot establish
+
+- Elapsed time is wall-clock/request duration within the source's own timing semantics. It establishes that the request was observed as long-running; it does not identify the bottleneck.
+- SQL CPU is work consumed by the request or statement, not proof that the host or database scheduler was saturated. Oracle database elapsed/CPU counters and parallel execution semantics must not be equated with a simple wall-clock decomposition.
+- A current wait field is a point-in-time state. It is not necessarily the total wait accumulated during the request. Cumulative wait summaries may span instance uptime or a reset epoch and must not be attributed to one current request without exact identity and time evidence.
+- Logical reads, shared-block reads, buffer gets, rows examined, and physical device reads are different quantities. Do not relabel one as another.
+- Database file I/O counters can support database-file workload/latency analysis. They do not independently prove storage-device saturation, a hypervisor issue, or an array problem.
+- A memory grant, allocated memory, buffer/cache size, temporary file, or spill signal has a specific engine scope. None alone proves host memory exhaustion.
+- Session count or concurrency alone does not prove resource contention. Look for actual queues, waits, worker/scheduler pressure, lock/latch contention or other direct evidence.
+- Do not add or subtract metrics from different sources, identities, scopes or windows to fabricate an elapsed-time breakdown. Parallel work can also make database CPU time exceed wall-clock duration.
+
+For the supplied report example, the observed elapsed duration is a fact; the root cause remains unconfirmed. The MySQL events_waits_current consumer being disabled means current wait-detail evidence is unavailable in that collection. It does not mean that no wait occurred. The report must state the limitation and must not change the consumer or server configuration.
+
+### 18.3 Root-cause categories and verdicts
+
+Findings may overlap; the Analyzer must not force every slow request into one exclusive bucket.
+
+| Candidate category | Evidence needed before a causal claim | Common false conclusion to prevent |
+|---|---|---|
+| Plan/access path/cardinality/operator | Exact SQL/plan identity; available plan operators and estimates; actual rows/spill only when the source genuinely exposes them; supporting runtime workload evidence | A scan or sort in an estimated/cached plan automatically caused the observed duration |
+| CPU scheduling/resource pressure | SQL CPU or worker evidence plus instance scheduler/queue/wait indicators; host CPU/run-queue evidence when the claim is specifically host saturation | High SQL CPU or high concurrency alone proves CPU saturation |
+| Memory/workarea/spill | Request/workarea grant or execution spill evidence, relevant instance memory/workarea pressure, and compatible timing/scope | Large memory allocation or a temporary file alone proves insufficient physical RAM |
+| I/O wait/latency/throughput | SQL/request I/O evidence where supported, matching file/database I/O counters or waits, and host/device evidence for a physical-device saturation claim | Logical reads or one I/O wait name proves the disk subsystem is saturated |
+| Lock/latch/serialization | Identity-bound blocking edge, lock/latch wait, resource and transaction evidence in the same observation window | Any long request or generic wait is a lock problem |
+| Worker/connection/concurrency queue | Direct worker/scheduler/connection queue or capacity evidence, matching active workload and relevant waits | A high session count alone proves the instance is overloaded |
+| Client/network/external dependency | Explicit client, socket, external-call or network evidence with compatible identity/time scope | Database elapsed time alone proves a database engine bottleneck |
+
+Proposed finding verdicts:
+
+- **CONFIRMED**: direct, identity-bound evidence demonstrates the mechanism for the selected request or incident within the stated observation window.
+- **HIGH_CONFIDENCE**: multiple independent, temporally compatible signals support the same explanation and no material counter-evidence is present; remaining uncertainty is stated.
+- **SUSPECTED**: a plausible signal exists, but identity, timing, scope or corroboration is incomplete.
+- **INSUFFICIENT**: available evidence cannot discriminate among the candidate causes.
+
+A report may contain multiple findings with different verdicts. Do not create a universal health score or a numeric confidence percentage without a separately validated statistical model. A wait name, Top-N rank, elapsed threshold or single cumulative counter must never produce CONFIRMED by itself.
+
+### 18.4 Shared observation and finding contract
+
+The proposed collector-neutral resource observation must preserve:
+
+| Field | Requirement |
+|---|---|
+| Engine/version/Profile | Exact database engine, detected version and selected Version-Aware Profile |
+| Scope | REQUEST, SESSION, SQL_STATEMENT, DATABASE, INSTANCE, FILE, or explicitly supported HOST |
+| Native identity | Engine-native request/session/statement/instance/file key; never use SQL text as the identity |
+| Metric | Native metric name, nullable value, unit and documented meaning |
+| Semantics | CURRENT, CUMULATIVE, INTERVAL_DELTA, or explicitly supported HISTORICAL |
+| Observation window | Sample start/end, observation time, actual elapsed seconds and whether the result is a best-effort snapshot |
+| Source and quality | Reviewed source reference, visibility/completeness, permission/configuration state, truncation and failure reason |
+| Epoch/limitations | Reset, restart, cache eviction, digest loss, consumer/instrument state, platform/version limitation and other known caveats |
+
+The proposed diagnostic finding must reference observations rather than copy or reinterpret their raw values. It should contain a cause category, verdict, affected subject and scope, supporting evidence references, counter-evidence, missing evidence, concise explanation, and next safe check. Findings and observations are additive; unavailable values remain unavailable rather than zero.
+
+For current requests, preserve the engine-native identity and generation fields already defined by the Top SQL/Slow contracts. Examples include SQL Server session/request/start identity and statement offsets; PostgreSQL PID plus backend start and query identity where available; MySQL PROCESSLIST_ID, Performance Schema THREAD_ID/EVENT_ID and digest as distinct keys; Oracle INST_ID, SID/SERIAL#, SQL_ID/CHILD_NUMBER and CON_ID where available. These are examples of identity dimensions, not a new cross-engine key. A cumulative statement row must not be attached to a current session by SQL text or a hash alone.
+
+### 18.5 Four-engine candidate resource sources
+
+The following are **candidate source families for design and version review**, not authorization to implement or proof that every field is available in every target version.
+
+| Engine | Candidate database-native evidence | Scope and limitations that must remain visible |
+|---|---|---|
+| SQL Server 2008 R2+ | Current request/waits from existing request sources; instance waits and scheduler queues from sys.dm_os_wait_stats / sys.dm_os_schedulers; memory grants and memory clerks from sys.dm_exec_query_memory_grants / sys.dm_os_memory_clerks; file I/O counters from sys.dm_io_virtual_file_stats | Wait/file counters are cumulative or point-in-time according to the source; wait stats exclude currently active waits. File counters describe database files, not device saturation. Version-specific DMV columns and permission gates must be reviewed; 2022+ performance-state permission differs from older families. |
+| PostgreSQL 14+ | Current backend/wait from pg_stat_activity; database counters from pg_stat_database; optional preconfigured pg_stat_statements; PG16+ pg_stat_io | pg_stat_io is not a per-query CPU/I/O attribution source. track_io_timing is off by default on documented versions and can add overhead; Toolkit must not enable it. Temp blocks/files can indicate temporary I/O, not prove host memory pressure. No per-query CPU metric is inferred where the source does not provide one. |
+| MySQL 5.7 and 8.0+ | Existing current statement/wait routes; optional Performance Schema wait summaries, file_summary_by_instance, memory summaries, global status and digest summaries | Visibility depends on version, instruments, consumers and permissions. A disabled consumer/instrument is NOT_CONFIGURED/PARTIAL, not an empty/healthy result. File wait summaries are database-instrumented counters, not direct device telemetry. Memory allocation summaries do not equal host memory pressure; no per-statement CPU metric is invented. |
+| Oracle 11gR2+ | V$SESSION current waits; V$SYSTEM_EVENT / V$SYSSTAT instance counters; platform-dependent V$OSSTAT; V$PGASTAT and workarea evidence; V$IOSTAT_FILE / V$FILESTAT file I/O | Preserve instance and container scope (INST_ID, CON_ID) where available. V$OSSTAT coverage varies by operating-system platform. Cumulative counters need reset/startup semantics. Do not introduce AWR/ASH/Diagnostics/Tuning Pack dependencies; use exact version-specific direct-view permissions. RAC-wide GV$ is not implied. |
+
+Each source requires official documentation review for the exact supported version family, native metric meaning, reset/epoch behavior, permission, query cost, and whether it can be safely exposed by the existing Profile/Registry path. No engine is selected as the first resource-context implementation by this design.
+
+### 18.6 Host evidence and collection boundary
+
+The current product remains an offline, database-connection-based, read-only diagnostic tool. This supplement does not add SSH, remote PowerShell, remote shell, a host agent, background service, continuous sampling, cloud telemetry, or a new host credential type. Database-exposed OS statistics may be used where the engine provides them and the exact platform/version supports them.
+
+If a conclusion requires host CPU saturation, physical-memory pressure, storage queue depth, device latency or hypervisor/array telemetry that the database source cannot prove, the result remains INSUFFICIENT and names the required external evidence (for example, an owner-provided OS/monitoring sample). Any future host integration is a separate design and explicit approval; it must not weaken the existing connection, credential or production-safety boundaries.
+
+### 18.7 Correlation and sampling rules
+
+- Preserve SQL-level, session-level, database-level, instance-level and host-level scopes in every observation and report.
+- Correlate current requests only with exact native identity and overlapping observation time. A cumulative Top SQL candidate can prioritize investigation but does not prove it was the currently slow request.
+- Use one bounded best-effort snapshot by default. A two-sample delta is explicit opt-in, serialized, time-bounded, identity/epoch matched and reported with the actual interval. It is not a trend or causal proof.
+- Keep current wait, cumulative wait, file counters, cache/digest counters, and historical time buckets distinct.
+- Missing permissions, disabled consumers, unsupported fields, unavailable host data, timeout, truncation, reset, eviction and ambiguous identity are separate quality limitations. One unavailable metric must not erase independent successful evidence.
+
+### 18.8 DBA-facing report requirements
+
+The report should answer, in this order:
+
+1. **What was observed?** SQL/request identity, elapsed duration, sample time/window, database and observed impact.
+2. **What is confirmed?** Only facts directly supported by collected evidence.
+3. **What may explain it?** One or more candidate findings with verdict, supporting evidence and counter-evidence.
+4. **What cannot yet be determined?** Missing/disabled source, insufficient identity, wrong scope, absent host/device evidence, or incomplete window.
+5. **What should the DBA check next?** A short, low-risk, read-only diagnostic step tied to the missing evidence.
+
+Internal Collector IDs, Registry script paths, raw enum names and serialization paths are technical evidence, not primary DBA-facing prose. Human-facing labels should be localized and explain the operational meaning. Keep raw technical values and source identifiers available in the expandable deep-evidence layer. Do not render a root-cause conclusion from the template itself; the template only presents the Analyzer's structured finding.
+
+### 18.9 Dependency and acceptance gates
+
+1. Preserve the four verified Top SQL collectors and their exact Acceptance scopes. Do not rebuild them.
+2. Resume the existing V091-P2-TOPSQL-INTEGRATION-001 only when its recorded authorized-Windows/credential/asset gate is cleared; it remains the existing integration task, not a new Collector task.
+3. The root-cause design is recorded by V091-P2-ROOT-CAUSE-DESIGN-001. The next proposed implementation-only design gate is V091-P2-RESOURCE-CONTEXT-CONTRACT-001: shared typed contract and fixtures, with no engine SQL.
+4. Only after the shared contract is separately approved should one engine-specific resource source be selected based on safe test availability and operational value. Do not pre-authorize a four-engine batch or create duplicate collectors.
+5. Deep Plan work uses exact SQL identity and pre-existing read-only evidence; actual runtime rows/spills are reported only when truly supplied by the source. Never execute captured SQL or use EXPLAIN ANALYZE to manufacture evidence.
+6. The HTML workbench may display only accepted Analyzer findings. Synthetic parity does not replace real report generation and real database E2E.
+
+Acceptance must cover native scope/identity, metric units and semantics, sample timing, reset/eviction, permissions/configuration visibility, query cost/bounds, timeout/truncation, disabled optional sources, incomplete evidence, CLI/JSON/HTML parity, redaction and strict read-only behavior. Every engine/version result is recorded separately; no feature is promoted across the product target by inference.
+
+### 18.10 Primary technical references
+
+- Microsoft Learn: [sys.dm_os_wait_stats](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql?view=sql-server-ver17), [sys.dm_exec_query_memory_grants](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-exec-query-memory-grants-transact-sql?view=sql-server-ver17), [sys.dm_io_virtual_file_stats](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-io-virtual-file-stats-transact-sql?view=sql-server-ver15), and [SQL Server OS-related DMVs](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sql-server-operating-system-related-dynamic-management-views-transact-sql?view=sql-server-ver17).
+- PostgreSQL: [monitoring statistics](https://www.postgresql.org/docs/16/monitoring-stats.html), [runtime statistics settings](https://www.postgresql.org/docs/17/runtime-config-statistics.html), and [pg_stat_statements](https://www.postgresql.org/docs/16/pgstatstatements.html).
+- MySQL 8.4: [Performance Schema table reference](https://dev.mysql.com/doc/refman/8.4/en/performance-schema-table-reference.html), [summary tables](https://dev.mysql.com/doc/refman/8.4/en/performance-schema-summary-tables.html), and [file I/O summary tables](https://dev.mysql.com/doc/refman/8.4/en/performance-schema-file-summary-tables.html).
+- Oracle 26ai: [V$OSSTAT](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/V-OSSTAT.html), [V$SYSSTAT](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/V-SYSSTAT.html), and [V$PGASTAT](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/V-PGASTAT.html).
+

@@ -144,7 +144,7 @@ No default dual sampling, historical monitoring, universal health score, async c
 
 ### Objective
 
-Identify long-running, high-frequency short, high cumulative CPU, high logical-read, genuinely supported physical-read, high-wait, and blocking-victim SQL without reducing all cases to elapsed time.
+Identify abnormal SQL by current elapsed time, frequency, cumulative/interval CPU and I/O evidence where genuinely supported, waits, and blocking role; correlate those statement-level observations with separately scoped database/instance resource context so the Toolkit can explain likely performance mechanisms without reducing all cases to elapsed time.
 
 ### Scope
 
@@ -157,6 +157,13 @@ Identify long-running, high-frequency short, high cumulative CPU, high logical-r
 - Distinguish source capabilities: current request, cache-resident cumulative statistics, optional database statement statistics, and explicitly sampled interval deltas. A missing metric remains unavailable, never zero.
 - SQL Server current-request Active SQL ranking from `sys.dm_exec_requests` is a separate `CURRENT` snapshot capability from cache-resident cumulative `sys.dm_exec_query_stats` Top SQL. It does not change or satisfy the four-engine cumulative Top SQL collector sequence, and it is not comprehensive-diagnosis integration.
 - Keep MySQL recent statement history separate from digest rankings; keep database/instance I/O statistics separate from SQL attribution; do not require Query Store, extensions, or premium diagnostics packs.
+- Treat SQL/request evidence, database/instance resource observations, and host/storage-device evidence as different scopes. A broader-scope observation may provide context, but it must not be relabeled as a per-SQL metric.
+- Correlate a current request with other evidence only through exact engine-native identity and compatible observation windows. SQL text similarity, a query hash alone, or a database-wide counter is not sufficient to prove causality.
+- Distinguish SQL resource consumption from resource saturation: high SQL CPU is not proof of instance CPU saturation; logical reads are not physical device reads; a database file wait/latency metric is not by itself proof of a saturated storage device; memory allocation or a memory grant is not proof of host memory exhaustion.
+- Classify CPU scheduling pressure, memory/workarea pressure and spill, I/O waits/latency, lock/latch contention, and worker/connection queues as separate candidate causes. Each finding must cite supporting evidence, counter-evidence, scope, time, collection quality, and missing evidence.
+- Root-cause findings are multi-label and evidence graded (CONFIRMED, HIGH_CONFIDENCE, SUSPECTED, INSUFFICIENT); no universal score, single forced cause, or automatic remediation is produced. A wait event is a diagnostic signal, not a root cause by name alone.
+- Instance resource sources are opt-in/low-cost and database-native where possible. Cumulative wait/file/resource counters require an explicit bounded delta before being described as a rate or current pressure. One snapshot remains best-effort, not a trend.
+- Host CPU, OS memory, and storage-device saturation are not uniformly observable through database SQL. No SSH/remote shell, host agent, background telemetry, or server configuration change is introduced by this phase. Without an accepted host evidence source, those conclusions remain INSUFFICIENT and the report names the external evidence needed.
 
 ### Entry criteria
 
@@ -164,14 +171,16 @@ Phase 1 conclusions and evidence semantics are accepted. First build the databas
 
 ### Exit criteria
 
-At least one explicitly supported database distinguishes a long current request, a high-frequency short statement, and a lock-wait victim using correct metric semantics. Each database is accepted independently.
+At least one explicitly supported database distinguishes a long current request, a high-frequency short statement, and a lock-wait victim using correct metric semantics, and exposes at least one correctly scoped database/instance resource context source. Findings distinguish observed workload consumption from demonstrated resource pressure; missing host/device evidence cannot produce a confirmed host-level bottleneck. Each database is accepted independently.
 
 ### Implementation order
 
 1. `V091-P2-TOPSQL-CONTRACT-001`: shared metric/evidence contract, quality states, and serialization fixtures; no database SQL.
 2. Implement and verify the four independent engine collectors (`V091-P2-TOPSQL-SQLSERVER-001`, `...-POSTGRESQL-001`, `...-MYSQL-001`, `...-ORACLE-001`) one at a time; the sequence remains SQL Server, PostgreSQL, MySQL, then Oracle. Backlog is the sole source of task state; sequence position does not imply live verification outside the exact version/scope recorded in Acceptance.
 3. Only after all four engine collectors are verified, define and approve the separate `V091-P2-TOPSQL-INTEGRATION-001` task to integrate them into the comprehensive diagnosis flow. Per-engine collector tasks do not modify that flow.
-4. `V091-P2-TOPSQL-DELTA-001`: opt-in bounded two-sample deltas only after at least one cumulative engine source is verified; this does not authorize a daemon or default double-sampling.
+4. After Top SQL integration is accepted, separately authorize `V091-P2-RESOURCE-CONTEXT-CONTRACT-001` for the shared database/instance resource-observation and evidence-graded finding contract plus fixtures; no engine SQL is included in this task.
+5. Only after the shared resource contract is accepted, select one engine-specific resource source at a time based on safe test availability and operational value. Do not start a four-engine batch or duplicate existing collectors.
+6. `V091-P2-TOPSQL-DELTA-001`: opt-in bounded two-sample deltas only after at least one cumulative engine source is verified; this does not authorize a daemon or default double-sampling.
 
 The user's sequencing decision is explicit: complete all four Top SQL collectors before comprehensive-diagnosis integration. Do not create a duplicate integration Task ID before that gate is met.
 
@@ -190,6 +199,9 @@ Explain why a selected abnormal SQL may be slow using an identity-bound, pre-exi
 - MySQL may investigate only safe named-connection evidence for verified versions and supported active statements.
 - PostgreSQL keeps Plan unsupported unless a separately approved pre-existing source is available; never run `EXPLAIN (ANALYZE)` on captured SQL.
 - Query Store is a separate optional source only when already enabled and populated; Toolkit does not configure or force plans.
+- Plan evidence is one dimension of root-cause analysis, not a substitute for wait/resource evidence. A scan, sort, estimate mismatch, or plan-shape pattern is a candidate explanation until the selected SQL identity and runtime evidence support it.
+- Actual rows, runtime spills, and per-execution resource usage are displayed only when a pre-existing source actually supplies them and exact identity association is proven; an estimated/cached plan must not be presented as an actual execution plan.
+- Do not execute captured business SQL or use EXPLAIN ANALYZE to manufacture runtime evidence. Do not generate unverified index, hint, parameter, or forcing commands.
 
 ### Entry criteria
 
@@ -230,10 +242,12 @@ Improve navigation and incident-response clarity after core evidence is stable, 
 
 ### Scope
 
-- First layer: conclusion and priority investigation targets.
-- Second layer: SQL, transaction, wait, plan, and impact evidence.
-- Third layer: full bounded technical evidence, quality, version, and permission context.
-- Reuse ReportModel, presenters, renderer, inline CSS, offline resources, and report budgets.
+- First layer: a concise Chinese conclusion, observed duration/scope, what is confirmed versus suspected, the highest-priority investigation target, and the next safe check. If the evidence cannot explain the duration, say so plainly instead of inventing a cause.
+- Second layer: correlated SQL/request, transaction/blocking, wait, plan, and database/instance resource evidence; every claim links to its evidence and preserves native scope/time semantics.
+- Third layer: full bounded technical evidence, source/identity details, metric units and windows, completeness/visibility, version/Profile, permission and reset/eviction context. Internal Collector names, Registry paths, and raw status keys belong in this technical layer, not as the primary DBA-facing explanation.
+- Reuse ReportModel, presenters, renderer, inline CSS, offline resources, and report budgets; do not build a second report framework or put diagnosis logic in HTML templates.
+- CLI, JSON, and HTML must agree on the same findings and uncertainty. Localize human-facing states and descriptions while retaining raw technical values in expandable details.
+- Do not render a root-cause badge or recommendation unless the Analyzer supplies an evidence-backed finding. UNKNOWN/PARTIAL/unavailable evidence must explain what was not observed and why.
 - No trend chart without historical data; no forced cross-database field parity.
 
 ### Entry and exit criteria
@@ -252,4 +266,4 @@ Deferral is not cancellation. These items remain in the Backlog with explicit re
 
 ## 13. Explicit exclusions
 
-No Web UI, microservice, telemetry, online dependency, remote profile/SQL download, cloud analysis API, automatic updater, database-side installation, arbitrary SQL shell, automatic remediation, or commercial-license-dependent default diagnostic source is part of this roadmap.
+No Web UI, microservice, continuous telemetry, online dependency, remote profile/SQL download, cloud analysis API, automatic updater, database-side installation, arbitrary SQL shell, automatic remediation, remote OS shell/SSH probe, host agent, or commercial-license-dependent default diagnostic source is part of this roadmap. Any future host-evidence integration requires a separate explicit design and approval.
