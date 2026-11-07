@@ -73,7 +73,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the requested existing Release tag.' }
             $tagCommit = git rev-parse "$releaseTag^{commit}"
             if ($LASTEXITCODE -ne 0 -or -not $tagCommit) { throw 'Requested Release tag does not resolve to a commit.' }
-            git diff --quiet $tagCommit $env:GITHUB_SHA -- . ':!.github/workflows/build-portable-windows.yml'
+            git diff --quiet $tagCommit $env:GITHUB_SHA -- . `
+              ':!.github/workflows/build-portable-windows.yml' `
+              ':!deployment/build_release.ps1' `
+              ':!deployment/windows/release_package.py' `
+              ':!tests/test_portable_update.py'
             if ($LASTEXITCODE -ne 0) { throw 'Manual Release source differs from the tagged source outside this workflow file.' }
           }
           $requested = '${{ inputs.version }}'
@@ -170,7 +174,7 @@ jobs:
             dist/release/DBAToolkit-${{ steps.version.outputs.version }}-Windows-x64-Full.zip
             dist/release/DBAToolkit-${{ steps.version.outputs.version }}-Windows-x64-Update.zip
             dist/release/DBAToolkit-${{ steps.version.outputs.version }}-SHA256SUMS.txt
-            dist/release/使用说明.md
+            dist/release/DBAToolkit-${{ steps.version.outputs.version }}-User-Guide.md
             dist/release/*.sha256
           if-no-files-found: error
           retention-days: 14
@@ -191,6 +195,32 @@ jobs:
           name: DBAToolkit-${{ needs.build.outputs.version }}-Windows-x64-release-candidate
           path: release-assets
 
+      - name: Remove stale malformed asset from the failed v0.9.1 draft
+        if: github.ref == 'refs/heads/codex/release-v0.9.1-recovery'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = '${{ needs.build.outputs.release_tag }}'
+          $version = '${{ needs.build.outputs.version }}'
+          $fullName = "DBAToolkit-$version-Windows-x64-Full.zip"
+          $updateName = "DBAToolkit-$version-Windows-x64-Update.zip"
+          $sumsName = "DBAToolkit-$version-SHA256SUMS.txt"
+          $expectedStaleAssets = @($fullName, $updateName, $sumsName, 'default.md')
+          $releaseJson = gh release view $tag --repo $repo --json isDraft,assets
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the existing failed v0.9.1 draft.' }
+          $release = $releaseJson | ConvertFrom-Json
+          if (-not $release.isDraft) { throw 'Refusing to alter a published Release.' }
+          $assetNames = @($release.assets | ForEach-Object { $_.name } | Sort-Object)
+          $sortedExpected = @($expectedStaleAssets | Sort-Object)
+          if ($assetNames.Count -ne 4 -or (Compare-Object $sortedExpected $assetNames)) {
+            throw 'Existing draft assets do not match the known failed v0.9.1 upload; refusing automatic cleanup.'
+          }
+          gh release delete-asset $tag 'default.md' --yes --repo $repo
+          if ($LASTEXITCODE -ne 0) { throw 'Could not remove the malformed manual asset from the failed draft.' }
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -202,7 +232,7 @@ jobs:
             release-assets/DBAToolkit-${{ needs.build.outputs.version }}-Windows-x64-Full.zip
             release-assets/DBAToolkit-${{ needs.build.outputs.version }}-Windows-x64-Update.zip
             release-assets/DBAToolkit-${{ needs.build.outputs.version }}-SHA256SUMS.txt
-            release-assets/使用说明.md
+            release-assets/DBAToolkit-${{ needs.build.outputs.version }}-User-Guide.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -212,15 +242,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $repo = $env:GITHUB_REPOSITORY
           $version = '${{ needs.build.outputs.version }}'
           $tag = '${{ needs.build.outputs.release_tag }}'
           $fullName = "DBAToolkit-$version-Windows-x64-Full.zip"
           $updateName = "DBAToolkit-$version-Windows-x64-Update.zip"
           $sumsName = "DBAToolkit-$version-SHA256SUMS.txt"
-          $manualName = '使用说明.md'
+          $manualName = "DBAToolkit-$version-User-Guide.md"
           $expectedAssets = @($fullName, $updateName, $sumsName, $manualName)
 
-          $releaseJson = gh release view $tag --json isDraft,assets
+          $releaseJson = gh release view $tag --repo $repo --json isDraft,assets
           if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the draft Release.' }
           $release = $releaseJson | ConvertFrom-Json
           if (-not $release.isDraft) { throw 'Release must remain a draft until asset verification completes.' }
@@ -245,7 +276,7 @@ jobs:
 
           $verifyDirectory = Join-Path $env:RUNNER_TEMP 'dbatoolkit-release-asset-check'
           New-Item -ItemType Directory -Path $verifyDirectory -Force | Out-Null
-          gh release download $tag --dir $verifyDirectory
+          gh release download $tag --repo $repo --dir $verifyDirectory
           if ($LASTEXITCODE -ne 0) { throw 'Could not download the uploaded Release assets for verification.' }
           foreach ($name in $expectedAssets) {
             $downloaded = Join-Path $verifyDirectory $name
@@ -263,5 +294,5 @@ jobs:
             if ($downloadHash -ne $localHash) { throw "Release asset SHA256 verification failed: $name" }
           }
 
-          gh release edit $tag --draft=false
+          gh release edit $tag --repo $repo --draft=false
           if ($LASTEXITCODE -ne 0) { throw 'Verified Release could not be published.' }

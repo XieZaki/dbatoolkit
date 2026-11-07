@@ -262,7 +262,7 @@ def test_release_verification_requires_full_update_and_standalone_chinese_manual
                 archive.write(path, path.relative_to(full_root).as_posix())
     update_zip = release / "DBAToolkit-0.9.0-Windows-x64-Update.zip"
     create_update(full_root, update_zip, "synthetic-release")
-    manual = release / "使用说明.md"
+    manual = release / "DBAToolkit-0.9.0-User-Guide.md"
     shutil.copy2(PROJECT_ROOT / "使用说明.md", manual)
     sums = release / "DBAToolkit-0.9.0-SHA256SUMS.txt"
     artifacts = (full_zip, update_zip, manual)

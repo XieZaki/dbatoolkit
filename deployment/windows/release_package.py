@@ -360,7 +360,7 @@ def _verify_full_archive(path: Path, version: str) -> None:
 def verify_release(directory: Path, version: str) -> dict[str, Any]:
     full = directory / f"DBAToolkit-{version}-Windows-x64-Full.zip"
     update = directory / f"DBAToolkit-{version}-Windows-x64-Update.zip"
-    manual = directory / "使用说明.md"
+    manual = directory / f"DBAToolkit-{version}-User-Guide.md"
     sums = directory / f"DBAToolkit-{version}-SHA256SUMS.txt"
     for path in (full, update, manual, sums):
         if not path.is_file():

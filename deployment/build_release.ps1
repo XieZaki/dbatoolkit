@@ -27,7 +27,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Update release package build failed.' }
 
 $fullZip = Join-Path $outputPath ("DBAToolkit-$Version-Windows-x64-Full.zip")
 $updateZip = Join-Path $outputPath ("DBAToolkit-$Version-Windows-x64-Update.zip")
-$manual = Join-Path $outputPath '使用说明.md'
+$manualName = "DBAToolkit-$Version-User-Guide.md"
+$manual = Join-Path $outputPath $manualName
 $manualSource = Join-Path $projectRoot '使用说明.md'
 if (-not (Test-Path -LiteralPath $manualSource -PathType Leaf)) { throw 'Chinese quick-start manual is missing.' }
 Copy-Item -LiteralPath $manualSource -Destination $manual
