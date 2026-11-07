@@ -178,7 +178,9 @@ At least one explicitly supported database distinguishes a long current request,
 1. `V091-P2-TOPSQL-CONTRACT-001`: shared metric/evidence contract, quality states, and serialization fixtures; no database SQL.
 2. Implement and verify the four independent engine collectors (`V091-P2-TOPSQL-SQLSERVER-001`, `...-POSTGRESQL-001`, `...-MYSQL-001`, `...-ORACLE-001`) one at a time; the sequence remains SQL Server, PostgreSQL, MySQL, then Oracle. Backlog is the sole source of task state; sequence position does not imply live verification outside the exact version/scope recorded in Acceptance.
 3. Only after all four engine collectors are verified, define and approve the separate `V091-P2-TOPSQL-INTEGRATION-001` task to integrate them into the comprehensive diagnosis flow. Per-engine collector tasks do not modify that flow.
-4. `V091-P2-TOPSQL-DELTA-001`: opt-in bounded two-sample deltas only after at least one cumulative engine source is verified; this does not authorize a daemon or default double-sampling.
+4. After Top SQL integration is accepted, separately authorize `V091-P2-RESOURCE-CONTEXT-CONTRACT-001` for the shared database/instance resource-observation and evidence-graded finding contract plus fixtures; no engine SQL is included in this task.
+5. Only after the shared resource contract is accepted, select one engine-specific resource source at a time based on safe test availability and operational value. Do not start a four-engine batch or duplicate existing collectors.
+6. `V091-P2-TOPSQL-DELTA-001`: opt-in bounded two-sample deltas only after at least one cumulative engine source is verified; this does not authorize a daemon or default double-sampling.
 
 The user's sequencing decision is explicit: complete all four Top SQL collectors before comprehensive-diagnosis integration. Do not create a duplicate integration Task ID before that gate is met.
 
