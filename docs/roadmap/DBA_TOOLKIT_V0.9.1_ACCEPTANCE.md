@@ -1828,3 +1828,43 @@ The scoped fix validates the journal's private DACL, accepts the Administrators 
 ### Release boundary
 
 The local candidate build is not the public release. GitHub Actions and uploaded Release asset verification are pending the authorized commit, push, and `v0.9.1` tag. Cross-version Update on a disposable host without Python remains unverified, so `PORTABLE-UPDATE-001` remains `E2E_PENDING`. `V091-P5-WORKBENCH-001` remains `IN_PROGRESS`; four-database real report generation and real-report JSON/HTML parity remain `NOT_EXECUTED`. No database, Docker, Inventory, Credential Store, or credential was accessed in this work.
+
+## 60. V0.9.1 GitHub Release publication and workflow repair — 2026-11-07
+
+The user authorized the `0.9.1` release, including normal commit, push, tag, and publication. The existing tag `v0.9.1` was not moved or recreated. The recovery workflow checked that product source remained equivalent to the tagged release while allowing only the release workflow and its packaging/test helpers to differ. Main commit `790c0196cb8ecce2e21725dec65d0a452f6b9047` contains the release repairs. Recovery Actions run [#14](https://github.com/XieZaki/dbatoolkit/actions/runs/42345786728) built and published the existing tag. The public [v0.9.1 Release](https://github.com/XieZaki/DBAToolKit/releases/tag/v0.9.1) is marked Latest and exposes exactly four custom assets.
+
+### Evidence-based failure analysis
+
+- The first tagged workflow stopped in the pinned CPython step because it tested `$LASTEXITCODE` after `Invoke-WebRequest`. That PowerShell cmdlet does not set the native-process exit code. The faulty guard could therefore reject a successful download before the file existence and SHA256 checks; the observed evidence does not establish a network download or hash failure. The workflow now uses terminating web-request errors, checks the downloaded file, and validates its SHA256. The successful run completed this step.
+- Recovery run [#10](https://github.com/XieZaki/dbatoolkit/actions/runs/42344241929) failed before tests because PowerShell expanded a duplicated tag path into `refs/tags//tags/v0.9.1`. The workflow now builds an explicit `refs/tags/v0.9.1:refs/tags/v0.9.1` refspec. The later source/tag gate passed.
+- Recovery run [#11](https://github.com/XieZaki/dbatoolkit/actions/runs/42344441499) built the packages and uploaded a draft, then failed when `gh release view` had no repository context because the publish job did not check out source. The verifier now passes the explicit repository to `gh release view`, `gh release download`, and `gh release edit`.
+- The earlier action upload represented the Chinese-named manual as `default.md`; this was visible in the failed draft asset list. The external asset now uses the ASCII name `DBAToolkit-0.9.1-User-Guide.md` while retaining Chinese content. Before retrying, the workflow checked the existing draft was still a draft and contained exactly the known four-asset set, then removed only `default.md`. The action uploaded the corrected name and the verifier confirmed the exact four-asset set.
+- The failures above were workflow guard/refspec/repository-context/asset-name problems. Run #14 completed Windows pytest, Ruff, strict MyPy, dependency wheelhouse preparation, pinned runtime SHA256 verification, Full/Update packaging, candidate upload, Release upload, downloaded-asset size/hash verification, and publication. There is no evidence of a dependency download, runtime SHA256, Full/Update build, artifact transfer, or GitHub token permission failure in the successful run. The earlier Windows pytest ACL/fixture failures and their scoped repairs remain documented in §§46–47; they did not recur in run #14.
+
+| Release stage | Observed evidence |
+|---|---|
+| Windows pytest | Earlier failures are separately recorded in §§46–47; run #14 passed 1325 tests with 2 skipped. |
+| Ruff / Strict MyPy | Run #14 passed both; MyPy reported 78 source files. |
+| Locked dependencies | Wheelhouse preparation completed successfully in run #14. |
+| CPython runtime download / SHA256 | Initial failure was the PowerShell exit-code guard, not an evidenced network or hash mismatch; run #14 passed the pinned runtime step. |
+| Full / Update build | Both packages and the local manifest validation completed successfully. |
+| Workflow artifact transfer | Candidate artifact upload and publish-job download both succeeded. |
+| Release creation / asset upload | The earlier run created a draft and uploaded files before the later verifier failed. Run #14 uploaded the corrected assets and passed verification. |
+| GitHub token / permissions | Publish job had `contents: write`; its cleanup, upload, remote download, and publish operations succeeded. No permission failure was observed. |
+
+### Published artifacts and verification
+
+Run #14 reported `1325 passed, 2 skipped`, Ruff `All checks passed!`, and strict MyPy success for 78 source files. Full, Update, and the Chinese manual were built, the pinned runtime hash was checked, and the uploaded assets were downloaded and compared against their declared sizes and SHA256 values before the Release was made public.
+
+| Published asset | Size | SHA256 |
+|---|---:|---|
+| `DBAToolkit-0.9.1-Windows-x64-Full.zip` | 98,072,636 bytes | `662680268ae3e5f8ef24bd4bdae2fb7b2e376cb140f691613eb6c1ae87c080cf` |
+| `DBAToolkit-0.9.1-Windows-x64-Update.zip` | 44,513,423 bytes | `c8a9f5170661ca693931f0125feb96acf1cc2a259d66f6f9234661cbdea091bc` |
+| `DBAToolkit-0.9.1-User-Guide.md` | 2,990 bytes | `e5f6943a5e15f0af88869c37a4b657f7a500c5b9758bd544801c560e08cdc981` |
+| `DBAToolkit-0.9.1-SHA256SUMS.txt` | 310 bytes | Downloaded size and SHA256 matched the build output before publication. |
+
+The four uploaded names matched exactly; remote asset sizes and SHA256 checks passed before the workflow changed the Release from draft to public. A separate local rebuild with the corrected ASCII manual filename passed `verify_release.ps1`; its local hashes differ because that candidate has a different build ID and is not the published artifact. The public Release page independently shows all four assets and marks the release Latest.
+
+### Remaining acceptance limits
+
+`PORTABLE-UPDATE-001` remains `E2E_PENDING` in Backlog because the formal cross-version Update transition on a disposable Windows host without Python remains unverified. `V091-P5-WORKBENCH-001` remains `IN_PROGRESS`; four-database real report generation and JSON/HTML parity on real reports are still `NOT_EXECUTED`. `OFFLINE-RUNTIME-001` still lacks acceptance on a genuinely Python-absent host and with a physically disconnected network. `WINDOWS_LOCAL_REAL_E2E`: **NOT EXECUTED**. No database, Docker, Inventory, Credential Store, or credential was accessed; no database permission was changed and no unverified database version was claimed.

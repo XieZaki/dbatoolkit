@@ -4,16 +4,16 @@
 
 ```text
 CURRENT_PHASE: V0.9.1 release preparation and publication
-CURRENT_TASK: PORTABLE-UPDATE-001 — E2E_PENDING; local 0.9.1 tests and Full/Update candidate package verification recorded in Acceptance §59; GitHub Actions/Release pending
+CURRENT_TASK: PORTABLE-UPDATE-001 — E2E_PENDING; v0.9.1 public Release and remote asset hash verification recorded in Acceptance §60; formal cross-version Update remains unverified
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.1
 BASE_HEAD_FOR_CURRENT_CHECKPOINT: af3474558f28a236a1912435f0d133df1f61bbcc
-CURRENT_TASK_DELIVERY: Full pytest 1324 passed, 3 skipped; Ruff, strict MyPy (78 files), `dba validate` (4 example instances, 118 SQL scripts, 0 warnings), deployment and inline workflow PowerShell parsing, diff check, local Full/Update archive validation, and extracted portable smoke checks passed. No DB E2E.
-LAST_COMPLETED_TASK: SQL-REGISTRY-SAFETY-001 — VERIFIED in Backlog; Acceptance §58 records its final offline audit. Formal user acceptance remains separate.
-NEXT_READY_TASK: Finish GitHub Actions build and 0.9.1 Release asset verification; then retain `PORTABLE-UPDATE-001` as E2E_PENDING if formal cross-version Update acceptance remains outstanding. V091-P5-WORKBENCH-001 remains IN_PROGRESS for real four-database report generation and real-report JSON/HTML parity; database host/session gates were not exercised. Do not start Top SQL Delta.
+CURRENT_TASK_DELIVERY: GitHub Actions run #14 (`42345786728`) passed Windows pytest (1325 passed, 2 skipped), Ruff, strict MyPy (78 source files), pinned CPython runtime SHA256 validation, Full/Update construction, and remote four-asset size/SHA256 verification. Public Release `v0.9.1` is published. Local 0.9.1 verification, `dba validate`, PowerShell parsing, and package smoke evidence are recorded in Acceptance §59–60. No DB E2E.
+LAST_COMPLETED_TASK: `BUG-WINDOWS-CI-FAILURES-001` — VERIFIED in Backlog; post-fix Actions evidence is in Acceptance §60. `SQL-REGISTRY-SAFETY-001` remains VERIFIED in Backlog; its final offline audit is in Acceptance §58.
+NEXT_READY_TASK: Continue `PORTABLE-UPDATE-001` formal cross-version Update acceptance on a disposable Python-absent Windows host when available; current release publication is complete but the task remains E2E_PENDING. `V091-P5-WORKBENCH-001` remains IN_PROGRESS for real four-database report generation and real-report JSON/HTML parity; no DB host/session gate was exercised. Do not start Top SQL Delta.
 WAITING_FOR_USER_REVIEW: NO — the user authorized 0.9.1 version change, commit, push, tag, and Release in this request.
 WAITING_FOR_USER_ACTION: None. No database, Inventory, Credential Store, credential, or Docker was accessed in local validation.
-FOLLOWING_ORDER: Preserve existing Oracle, SQL Registry, Top SQL, and P5 evidence. Release is not complete until the tagged Actions build, draft asset size/hash checks, and public Release verification succeed.
+FOLLOWING_ORDER: Preserve existing Oracle, SQL Registry, Top SQL, and P5 evidence. The v0.9.1 Actions build, remote asset checks, and public Release verification succeeded; remaining E2E acceptance is tracked in the owning Backlog rows.
 ```
 
 ### BUG-WINDOWS-CI-FAILURES-001 — code-complete local acceptance — 2026-11-03

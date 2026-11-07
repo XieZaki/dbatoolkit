@@ -1,6 +1,6 @@
 # Windows Full 与 Update 便携包
 
-Full 与 Update 包均附带中文操作文档。请先阅读根目录的 `使用说明.md`；完整手册、驱动指南、升级指南和故障排查指南位于 `docs/`。GitHub Release 还会单独附上中文快速入门，并将其 SHA256 列入校验清单。
+Full 与 Update 包均附带中文操作文档。请先阅读根目录的 `使用说明.md`；完整手册、驱动指南、升级指南和故障排查指南位于 `docs/`。GitHub Release 还会单独附上内容为中文的 `DBAToolkit-<版本>-User-Guide.md` 快速入门，并将其 SHA256 列入校验清单。
 
 当前源码及软件包版本为 `0.9.1`。`0.9.0` Full ZIP 是安装基线。`0.9.1` Release 提供 Full ZIP、自包含 Update ZIP、SHA256SUMS 校验清单和独立中文快速入门。Update ZIP 包含完整目标程序、Runtime、SQL、模板和默认驱动载荷，不依赖中间 Update。更新器支持从清单指定的最低版本 `0.9.0` 直接升级。
 
