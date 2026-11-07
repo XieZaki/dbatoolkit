@@ -2,7 +2,7 @@ name: Build Windows Full and Update packages
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/release-v0.9.1-recovery]
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -55,11 +55,18 @@ jobs:
             $tagVersion = $releaseTag -replace '^v', ''
             if ($tagVersion -ne $projectVersion) { throw 'Release tag does not match the project package version.' }
           }
-          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and '${{ inputs.publish_release }}' -eq 'true' -and
-              $env:GITHUB_REF -notlike 'refs/tags/*') {
-            if ($env:GITHUB_REF -ne 'refs/heads/main') { throw 'Manual Release dispatch is allowed only from main.' }
-            $releaseTag = '${{ inputs.release_tag }}'
-            if ($releaseTag -ne "v$projectVersion") { throw 'Manual Release tag does not match the project package version.' }
+          $recoveryPush = $env:GITHUB_EVENT_NAME -eq 'push' -and
+              $env:GITHUB_REF -eq 'refs/heads/codex/release-v0.9.1-recovery'
+          $manualRecovery = $env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and
+              '${{ inputs.publish_release }}' -eq 'true' -and $env:GITHUB_REF -notlike 'refs/tags/*'
+          if ($recoveryPush -or $manualRecovery) {
+            if ($recoveryPush) {
+              $releaseTag = "v$projectVersion"
+            } else {
+              if ($env:GITHUB_REF -ne 'refs/heads/main') { throw 'Manual Release dispatch is allowed only from main.' }
+              $releaseTag = '${{ inputs.release_tag }}'
+              if ($releaseTag -ne "v$projectVersion") { throw 'Manual Release tag does not match the project package version.' }
+            }
             git fetch --no-tags origin "refs/tags/$releaseTag:refs/tags/$releaseTag"
             if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the requested existing Release tag.' }
             $tagCommit = git rev-parse "$releaseTag^{commit}"
@@ -169,6 +176,7 @@ jobs:
   publish:
     if: >-
       (startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/codex/release-v0.9.1-recovery' && needs.build.outputs.release_tag != '') ||
       (github.event_name == 'workflow_dispatch' && inputs.publish_release == true && needs.build.outputs.release_tag != '')
     needs: build
     runs-on: windows-latest
