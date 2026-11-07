@@ -411,7 +411,7 @@ def test_cli_unsupported_database(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert result == 1
     payload = json.loads(capsys.readouterr().out)
     assert (
-        payload["error_type"] == "NotImplemented" and "Not implemented" in payload["error_message"]
+        payload["error_type"] == "NotImplemented" and "尚未实现" in payload["error_message"]
     )
 
 

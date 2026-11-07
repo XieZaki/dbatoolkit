@@ -91,7 +91,7 @@ def test_incomplete_evidence_never_surfaces_termination_command() -> None:
     assert value.missing_evidence
     assert value.recovery_actions == ()
     human = render_incident_summary(value)
-    assert "Reason: evidence incomplete" in human
+    assert "原因：证据不完整。" in human
     assert "KILL 11" not in human
     unavailable = build_incident_summary(report(incomplete=True))
     assert unavailable.observed_now == "UNKNOWN"
@@ -132,7 +132,7 @@ def test_long_running_without_blocking_does_not_recommend_termination() -> None:
     assert value.primary_problem == "LONG_RUNNING_SQL"
     assert value.recovery_actions == ()
     text = render_incident_summary(value)
-    assert "No session termination recommended" in text
+    assert "当前证据不支持建议终止会话。" in text
     assert "KILL" not in text
 
 
@@ -143,8 +143,8 @@ def test_healthy_and_verbose_presentations_share_summary_domain() -> None:
     normal = render_incident_summary(value)
     verbose = render_incident_summary(value, verbose=True)
     assert "Top SQL" not in normal and "Session Source" not in normal
-    assert "Collector Summary" in verbose
-    assert "Detailed Report" in normal
+    assert "采集器摘要" in verbose
+    assert "详细报告" in normal
     payload = render_json(value)
     assert '"status": "HEALTHY"' in payload
     assert asdict(value)["report_path"] == "reports/healthy.md"

@@ -344,12 +344,12 @@ def test_memory_grant_only_report_is_not_a_health_assessment() -> None:
 
     assert incident.status == "UNKNOWN" and incident.observed_now == "NOT_ASSESSED"
     assert incident.immediate_action is None
-    assert "Waiting for Memory Grant" in html and "Granted Memory" in html
-    assert "Requested (KB)" in html and "Granted (KB)" in html and "Used (KB)" in html
+    assert "等待 Memory Grant" in html and "已授予的内存" in html
+    assert "请求内存（KB）" in html and "已授予内存（KB）" in html and "已用内存（KB）" in html
     assert "RESOURCE_SEMAPHORE" in html
-    assert "12.500 ms (client end-to-end)" in html
-    assert "10.000 ms (client end-to-end)" in html
-    assert "server-side SQL execution duration is not separately measured" in html
+    assert "12.500 毫秒（客户端端到端）" in html
+    assert "10.000 毫秒（客户端端到端）" in html
+    assert "不单独表示服务器端 SQL 执行耗时" in html
     assert "Overall database health: NOT ASSESSED" not in html  # only human CLI includes this banner
 
 
@@ -386,7 +386,7 @@ def test_memory_grant_cli_wires_json_and_html(
     assert "monitor-alias" not in json_output
     assert report_path.is_file()
     html = report_path.read_text(encoding="utf-8")
-    assert "Waiting for Memory Grant" in html and "Granted Memory" in html
+    assert "等待 Memory Grant" in html and "已授予的内存" in html
     assert "4096" in html and "2048" in html
     assert driver.connection.executed.count("memory_grant_waiting") == 1
     assert driver.connection.executed.count("memory_grant_granted") == 1

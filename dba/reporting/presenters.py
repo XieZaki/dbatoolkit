@@ -21,45 +21,18 @@ from dba.reporting.model import (
     ReportTable,
 )
 from dba.reporting.normalizers import (
+    display_finding,
+    display_label,
+    display_message,
+    display_quality_impact,
+    display_report_summary,
+    display_report_value,
     postgresql_server_version_num,
     postgresql_version_label,
+    report_model_label,
+    report_model_value,
     sqlserver_transaction_label,
 )
-
-_VALUE_LABELS = {
-    "TRANSACTION_LOG": "事务日志", "WAL": "WAL", "BINLOG": "Binlog",
-    "REDO": "Redo", "ARCHIVE": "归档", "FRA": "FRA", "UNDO": "Undo",
-    "TEMP": "临时空间", "DATA": "数据文件", "TABLE": "表", "INDEX": "索引",
-    "ROOT_BLOCKER": "根阻塞", "IDLE_OPEN_TRANSACTION": "未结束事务",
-    "BLOCKED_VICTIM": "被阻塞会话", "LONG_RUNNING_SQL": "长运行 SQL",
-    "ACTIVE_WAIT": "主动等待语句",
-    "TERMINATE_SESSION": "终止会话参考", "CANCEL_QUERY": "取消查询参考",
-    "ACTIVE": "活动", "COMPLETE": "完整", "CRITICAL": "严重",
-    "INFO": "提示", "WARNING": "警告", "HIGH": "高", "UNKNOWN": "未知",
-    "RECHECK_REQUIRED": "需要重新核验", "VERIFIED": "事务关联已核验",
-    "VERIFIED_AT_SAMPLE": "采样时核验通过",
-    "AMBIGUOUS": "身份存在冲突", "IDENTITY_INCOMPLETE": "身份信息不完整",
-}
-_FINDING_LABELS = {
-    "SQLSERVER_DATAFILE_NEAR_LIMIT": "SQL Server 数据文件接近容量上限",
-    "SQLSERVER_TEMPDB_HIGH_USAGE": "SQL Server TempDB 使用率较高",
-    "SQLSERVER_LOG_HIGH_USAGE": "SQL Server 事务日志使用率较高",
-    "SQLSERVER_LOG_REUSE_BLOCKED": "SQL Server 事务日志复用受阻",
-    "SQLSERVER_OLD_ACTIVE_TRANSACTION": "SQL Server 存在长期活动事务",
-    "PG_WAL_RETENTION_SLOT": "PostgreSQL 复制槽保留 WAL",
-    "PG_ARCHIVE_FAILURE": "PostgreSQL WAL 归档失败线索",
-    "PG_LONG_TRANSACTION": "PostgreSQL 存在长期事务",
-    "BINLOG_TOTAL_SIZE_HIGH": "MySQL Binlog 总量较大",
-    "REPLICA_RELAY_LOG_RISK": "MySQL 复制中继日志风险",
-    "LONG_TRANSACTION": "MySQL 存在长期事务",
-    "ORACLE_UNDO_HIGH_USAGE": "Oracle Undo 使用率较高",
-    "ORACLE_TEMP_HIGH_USAGE": "Oracle 临时空间使用率较高",
-    "ORACLE_TABLESPACE_HIGH_USAGE": "Oracle 表空间使用率较高",
-    "ORACLE_FRA_HIGH_USAGE": "Oracle FRA 使用率较高",
-    "ORACLE_FLASHBACK_HIGH_USAGE": "Oracle Flashback 日志使用率较高",
-    "ORACLE_ARCHIVE_DEST_FAILURE": "Oracle 归档目标异常",
-    "ORACLE_ARCHIVE_ACCUMULATION": "Oracle 归档量较大",
-}
 
 
 def _local_time(value: Any) -> str:
@@ -84,20 +57,20 @@ def _human(value: Any) -> str:
     if value is None:
         return "—"
     if isinstance(value, bool):
-        return "YES" if value else "NO"
+        return str(report_model_value(value))
     if isinstance(value, datetime):
         return _local_time(value)
     if isinstance(value, dict):
         return "; ".join(f"{_label(str(key))}: {_human(item)}" for key, item in value.items())
     if isinstance(value, (tuple, list, set)):
         return ", ".join(_human(item) for item in value) if value else "—"
-    if isinstance(value, str) and value in _VALUE_LABELS:
-        return _VALUE_LABELS[value]
+    if isinstance(value, str):
+        value = report_model_value(value)
     return str(redact(value))
 
 
 def _label(value: str) -> str:
-    return " ".join(part.capitalize() for part in value.replace("_", " ").split())
+    return report_model_label(value)
 
 
 def _duration_ms(value: Any) -> str:
@@ -224,9 +197,9 @@ def _top_sql_section(value: Any,
                 if type(plan_hash) is not int or plan_hash <= 0:
                     plan_hash = None
                 native += f"{', ' if native else ''}plan_hash_value={_human(plan_hash)}"
-            identity_text = f"{identity.get('database_engine', 'UNKNOWN')}:{native or 'identity unavailable'}"[:256]
+            identity_text = f"{identity.get('database_engine', 'UNKNOWN')}:{native or '身份不可用'}"[:256]
         else:
-            identity_text = "identity unavailable"
+            identity_text = "身份不可用"
         association = item.get("sql_text_association") if integrated else None
         association_status = (association.get("status") if isinstance(association, dict)
                               else "NOT_ATTEMPTED")
@@ -236,8 +209,10 @@ def _top_sql_section(value: Any,
             sql_text = association.get("sql_text")
             if isinstance(sql_text, str) and sql_text:
                 clipped = sql_text[:policy.max_sql_chars]
+                if len(sql_text) > policy.max_sql_chars:
+                    clipped += "\n[SQL 文本因人工报告长度上限而省略。]"
                 code_blocks.append(ReportCodeBlock(
-                    f"Top SQL rank {item.get('rank')} — exactly matched Slow SQL",
+                    f"Top SQL 排名 {item.get('rank')} — 与慢 SQL 精确匹配",
                     str(redact(clipped)), "sql", True))
     headers = (("Rank", "SQL identity", "Metric value", "SQL text association") if integrated else
                ("Rank", "SQL identity", "Metric value"))
@@ -280,11 +255,11 @@ def _top_sql_quality_row(value: Any, collector: str | None = None) -> dict[str, 
         status = collection_status
     engine = payload.get("database_engine")
     name = collector or (f"{engine}_top_sql" if isinstance(engine, str) else "top_sql")
-    impact = (f"Collection status={collection_status}; completeness={completeness}; "
-              f"data visibility={visibility}.")
+    impact = (f"采集状态={_human(collection_status)}；证据完整性={_human(completeness)}；"
+              f"数据可见性={_human(visibility)}。")
     limitations = payload.get("limitations")
     if limitations:
-        impact += f" Limitations: {_human(limitations)}."
+        impact += f"限制原因：{_human(limitations)}。"
     return {"collector": name, "status": status, "impact": impact}
 
 
@@ -294,7 +269,7 @@ def _top_sql_integration_quality_row(value: Any) -> dict[str, str] | None:
     raw_status = value.get("status")
     if not isinstance(raw_status, str):
         return None
-    impact = value.get("reason") or value.get("error_type") or "Top SQL was not collected."
+    impact = value.get("reason") or value.get("error_type") or "未采集 Top SQL。"
     return {"collector": "top_sql", "status": raw_status, "impact": _human(impact)}
 
 
@@ -306,19 +281,19 @@ def _top_sql_integration_section(value: Any) -> ReportSection | None:
         return None
     reason = value.get("reason")
     error_type = value.get("error_type")
-    fields = [("Collection status", status)]
-    for key, label in (("database_engine", "Database type"),
-                       ("database_version", "Database version"),
-                       ("ranking_metric", "Metric")):
+    fields = [("采集状态", _human(status))]
+    for key, label in (("database_engine", "数据库类型"),
+                       ("database_version", "数据库版本"),
+                       ("ranking_metric", "指标")):
         if isinstance(value.get(key), str):
             fields.append((label, value[key][:128]))
     if isinstance(reason, str):
-        fields.append(("Reason", reason))
+        fields.append(("原因", str(display_message(reason))))
     if isinstance(error_type, str):
-        fields.append(("Error type", error_type[:128]))
+        fields.append(("错误类型", error_type[:128]))
     summary = ("Top SQL 作为附加证据未采集；Slow 核心证据保持原样。"
                if status == "NOT_COLLECTED" else
-               "Top SQL Collector ERROR（FAILED）；Slow 核心诊断不受影响。"
+               "Top SQL 采集器返回错误；慢 SQL 核心诊断不受影响。"
                if status == "FAILED" else
                "Top SQL 附加采集未成功；Slow 核心诊断不受影响。")
     return ReportSection("top-sql", "Top SQL", summary=summary, fields=tuple(fields))
@@ -326,15 +301,23 @@ def _top_sql_integration_section(value: Any) -> ReportSection | None:
 
 def render_report_section_text(section: ReportSection) -> str:
     """Render one already-bounded ReportModel section for the CLI console."""
-    lines = [section.title]
+    lines = [display_label(section.title)]
     if section.summary:
-        lines.append(section.summary)
-    lines.extend(f"{label}: {value}" for label, value in section.fields)
+        lines.append(display_report_summary(section.summary))
+    lines.extend(f"{display_label(label)}: {display_report_value(label, value)}"
+                 for label, value in section.fields)
     for table in section.tables:
-        lines.append(" | ".join(table.headers))
-        lines.extend(" | ".join(row) for row in table.rows)
+        lines.append(" | ".join(display_label(header) for header in table.headers))
+        for row in table.rows:
+            lines.append(" | ".join(
+                display_quality_impact(value)
+                if section.section_id == "collection-quality"
+                and index < len(table.headers) and table.headers[index] == "Impact" else
+                display_report_value(table.headers[index], value)
+                if index < len(table.headers) else value
+                for index, value in enumerate(row)))
     for block in section.code_blocks:
-        lines.extend((block.title, block.content))
+        lines.extend((display_label(block.title), block.content))
     return "\n".join(lines)
 
 
@@ -344,10 +327,10 @@ def _sql_block(row: dict[str, Any], policy: HumanReportPolicy, label: str = "SQL
         return None
     clipped = sql[:policy.max_sql_chars]
     is_truncated = clipped != sql or bool(_first(row, "sql_text_truncated", "query_truncated"))
-    title = f"Session {_session_id(row) or 'UNKNOWN'} {label}"
+    title = f"会话 {_session_id(row) or '未知'} {label}"
     if is_truncated:
-        title += " (truncated)"
-        clipped += "\n[SQL text omitted by human report limit.]" if len(sql) > policy.max_sql_chars else ""
+        title += "（已截断）"
+        clipped += "\n[SQL 文本因人工报告长度上限而省略。]" if len(sql) > policy.max_sql_chars else ""
     return ReportCodeBlock(title, str(redact(clipped)), "sql", True)
 
 
@@ -934,7 +917,7 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
                               "当前等待详情不可见；基础活动请求采集状态单独列示。",
                 })
     if not quality:
-        quality = [{"collector": item, "status": "MISSING", "impact": "Required evidence unavailable"}
+        quality = [{"collector": item, "status": "MISSING", "impact": "必需证据不可用"}
                    for item in incident.missing_evidence]
     table = _table(quality, (("Collector", ("collector",)), ("Status", ("status",)),
                              ("Impact", ("impact",))))
@@ -957,7 +940,7 @@ def _finding_section(report: DiagnosticReport) -> ReportSection | None:
         return None
     rows = []
     for item in findings:
-        title = _FINDING_LABELS.get(item.title, item.title.replace("_", " ").title())
+        title = display_finding(item.title)
         evidence_ref = "Root Blockers" if "BLOCK" in item.title else \
                        "Transaction Analysis" if "TRANSACTION" in item.title else \
                        "Request Runtime" if item.session else "Diagnostic Summary"
@@ -1075,10 +1058,10 @@ def _slow_sections(report: DiagnosticReport, incident: IncidentSummary,
             ("Evidence source / time / integrity", ("evidence",)),
             ("Uncertainty", ("uncertainty",)),
         ))
-        triage_summary = (f"Snapshot {triage.get('snapshot_time') or 'unknown'}; "
-                          f"overall status {triage.get('status', 'UNKNOWN')}; "
-                          f"root cause {triage.get('root_cause_status', 'NOT_ESTABLISHED')}. "
-                          "A review rank is not a confirmed root cause.")
+        triage_summary = (f"快照时间：{triage.get('snapshot_time') or '未知'}；"
+                          f"总体状态：{_human(triage.get('status', 'UNKNOWN'))}；"
+                          f"根因状态：{_human(triage.get('root_cause_status', 'NOT_ESTABLISHED'))}。"
+                          "核查排序不等于已确认根因。")
         sections.append(ReportSection(
             "performance-triage", "Performance Triage", summary=triage_summary,
             fields=tuple(("Evidence limitation", _human(reason))
@@ -1378,12 +1361,12 @@ def _plan_sections(details: dict[str, Any], plan_artifact: str | None,
         if value is not None:
             rendered = _human(value)
             if label == "Statement" and len(rendered) > policy.max_sql_chars:
-                rendered = rendered[:policy.max_sql_chars] + " [statement omitted by report limit]"
+                rendered = rendered[:policy.max_sql_chars] + " [语句因报告长度上限而省略]"
             summary_fields.append((label, rendered))
     if details.get("plan_available") is False:
         sections.append(ReportSection(
             "plan-availability", "Execution Plan Availability", severity="WARNING",
-            summary=str(details.get("note") or "Execution plan unavailable; no plan evidence was returned.")))
+            summary=str(display_message(details.get("note") or "Execution plan unavailable; no plan evidence was returned."))))
     if summary_fields:
         sections.append(ReportSection("plan-summary", "Execution Plan Summary",
                                       fields=tuple(summary_fields)))
@@ -1435,7 +1418,7 @@ def _plan_sections(details: dict[str, Any], plan_artifact: str | None,
                                       tables=(table,) if table else ()))
     if plan_artifact:
         sections.append(ReportSection("plan-artifact", "Raw Execution Plan",
-                                      summary="Open the SQLPLAN artifact with SQL Server Management Studio.",
+                                      summary="请使用 SQL Server Management Studio 打开 SQLPLAN 计划文件。",
                                       fields=(("Artifact", plan_artifact),)))
     return sections
 
@@ -1458,8 +1441,8 @@ def _oracle_plan_sections(details: dict[str, Any], policy: HumanReportPolicy) ->
     sections = [ReportSection("oracle-plan-identity", "Oracle Cached Plan Identity", fields=fields)]
     note_rows: list[dict[str, Any]] = [{"item": "Estimate semantics", "value": details.get("statistics_note")},
                  {"item": "Adaptive plan", "value": details.get("adaptive_plan_note")},
-                 {"item": "Cursor generation", "value": "Current shared-pool identity only; load generation is not captured."},
-                 {"item": "Plan source", "value": "Current V$SQL_PLAN cache rows; no business SQL execution or EXPLAIN."}]
+                 {"item": "Cursor generation", "value": "仅能确认当前共享池中的游标身份；未采集载入代次。"},
+                 {"item": "Plan source", "value": "证据来自当前 V$SQL_PLAN 缓存记录；未执行业务 SQL 或 EXPLAIN。"}]
     note_rows.extend({"item": "Limitation", "value": item}
                      for item in details.get("limitations", []) if isinstance(item, str))
     notes = _table(note_rows, (("Item", ("item",)), ("Details", ("value",))))
@@ -1468,7 +1451,7 @@ def _oracle_plan_sections(details: dict[str, Any], policy: HumanReportPolicy) ->
                                       severity="WARNING", tables=(notes,)))
     if details.get("plan_available") is False:
         sections.append(ReportSection("oracle-plan-availability", "Cached Plan Availability",
-            severity="WARNING", summary=str(details.get("note") or "A complete cached plan is unavailable.")))
+            severity="WARNING", summary=str(display_message(details.get("note") or "A complete cached plan is unavailable."))))
     nodes = _dict_rows(details.get("top_operators"))
     shown = nodes[:500]
     rows = [{"id": row.get("id"), "parent": row.get("parent_id"), "depth": row.get("depth"),
@@ -1530,7 +1513,7 @@ def _replication_sections(report: DiagnosticReport, policy: HumanReportPolicy) -
                                  ("Unit", ("unit",)), ("Severity", ("severity",)),
                                  ("Source", ("source",)), ("Interpretation", ("note",))))
     sections.append(ReportSection("replication-lag", "Transport, Apply / Replay and Lag",
-                                  summary=("Not applicable because replication is not configured."
+                                  summary=("未配置复制，不适用。"
                                            if getattr(getattr(report, "summary", None), "status", None)
                                            == "NOT_CONFIGURED" and not lags
                                            else _omitted(len(lags), len(visible_lags), "lag metrics")),
@@ -1542,7 +1525,7 @@ def _replication_sections(report: DiagnosticReport, policy: HumanReportPolicy) -
                                   tables=(backlog_table,) if backlog_table else ()))
     visible_issues = issues[:policy.max_replication_rows]
     issue_rows = [{"code": item.code, "severity": item.severity,
-                   "candidate": "Candidate" if item.candidate else "Evidence",
+                   "candidate": "候选" if item.candidate else "证据",
                    "message": item.message,
                    "vendor_message": item.vendor_message or "—"} for item in visible_issues]
     issue_table = _table(issue_rows, (("Issue", ("code",)), ("Severity", ("severity",)),
@@ -1552,12 +1535,12 @@ def _replication_sections(report: DiagnosticReport, policy: HumanReportPolicy) -
                                   summary=_omitted(len(issues), len(visible_issues), "issues"),
                                   tables=(issue_table,) if issue_table else ()))
     actions_rows = [{"recommendation": item.message,
-                     "approval": "DBA review required" if item.requires_dba_review else "No"}
+                     "approval": "需要 DBA 复核" if item.requires_dba_review else "否"}
                     for item in actions[:policy.max_replication_rows]]
     actions_table = _table(actions_rows, (("Recommended DBA Action", ("recommendation",)),
                                          ("Review", ("approval",))))
     sections.append(ReportSection("replication-actions", "Recommended Actions",
-                                  summary="Toolkit Executed: NO. No automatic failover, promotion, restart, reset, or repair.",
+                                  summary="Toolkit 未执行操作；不会自动切换、提升、重启、重置或修复。",
                                   tables=(actions_table,) if actions_table else ()))
     return sections
 
@@ -1618,55 +1601,6 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
     if findings:
         sections.append(findings)
     sections.append(_quality_section(report, incident, details))
-    titles = {
-        "Immediate Recovery": "人工处置参考", "Root Cause Candidate": "现场诊断结论",
-        "Root Blockers": "根阻塞", "Blocking Analysis": "锁与阻塞链",
-        "Session Identity": "会话身份与来源", "Request Runtime": "请求运行信息",
-        "Workload Summary": "当前数据库状态", "Wait Analysis": "等待分析",
-        "Appendix — Other Sessions": "其他会话（附录）", "Transaction Analysis": "长期未提交事务",
-        "Execution Plan Follow-up": "执行计划后续检查", "Collection Quality": "证据完整性",
-        "Findings and Recommendations": "诊断发现与建议", "Database Space": "数据文件与表空间",
-        "Transaction Log": "事务日志与保留证据", "Other Storage Evidence": "空间与日志证据",
-        "Diagnostic Context": "未获取的证据与诊断上下文", "Priority Review Candidates": "优先核查对象",
-        "Blocked Victims": "被阻塞会话", "Active Wait Statements": "主动等待语句",
-        "Transaction Identity Quality": "事务身份质量",
-        "Top SQL": "Top SQL 资源排序",
-        "SQL Ordered by CPU Time": "按 CPU 时间排序的当前 SQL",
-        "SQL Ordered by Logical Reads": "按逻辑读排序的当前 SQL",
-        "SQL Ordered by Elapsed Time": "按运行耗时排序的当前 SQL",
-        "SQL Text": "SQL 文本",
-    }
-    headers = {"Rank": "排序", "Session": "会话", "Type": "类型", "Reason": "入选原因",
-               "User": "用户", "Host": "主机", "Client IP": "客户端 IP", "Database": "数据库",
-               "Application": "应用", "State": "状态",
-               "Runtime seconds": "运行秒数", "Transaction age seconds": "事务时长秒",
-               "SQL identity": "SQL 标识", "Transaction identity": "事务标识", "Login time": "登录时间",
-               "Blocked session count": "影响会话数", "Evidence timestamp": "证据时间",
-               "Identity quality": "身份信息质量", "Identity reuse note": "会话 ID 复用提示",
-               "MySQL connection ID": "MySQL 连接 ID",
-               "Performance Schema THREAD_ID": "Performance Schema THREAD_ID",
-               "Request Runtime": "当前请求时长", "Wait Detail": "等待详情",
-               "Direct Blocker": "直接阻塞者", "Root Blocker": "根阻塞者",
-               "Interpretation": "说明",
-               "Transaction Identity Quality": "事务身份质量",
-               "Identity recheck": "身份复核", "Finding": "发现", "Severity": "严重程度",
-               "Recommendation": "建议", "Database ID": "数据库 ID", "Instance": "实例",
-               "Database Type": "数据库类型", "Version": "版本", "Scenario": "诊断场景",
-               "server_version_num (raw)": "server_version_num（原始值）",
-               "Generated At": "报告生成时间", "Environment": "环境", "Data Completeness": "证据完整性",
-               "Capture Started": "采集开始", "Triage Completed": "初报完成", "Capture Finished": "采集结束",
-               "Snapshot Consistency": "快照一致性", "Area": "资源类别", "Value": "观测值",
-               "Item": "条目", "Observed": "观测值"}
-    headers.update({"SQL identity": "SQL 原生身份", "Metric value": "指标值",
-                    "SQL Ref": "SQL 引用", "Session ID": "会话 ID", "Request ID": "请求 ID",
-                    "CPU Time": "CPU 时间", "Logical Reads": "逻辑读", "Elapsed Time": "运行耗时",
-                    "Wait": "等待", "Wait Time (ms)": "等待时长（毫秒）",
-                    "Blocking Session": "阻塞会话"})
-    sections = [replace(section, title=titles.get(section.title, section.title),
-                        tables=tuple(ReportTable(tuple(headers.get(h, h) for h in table.headers), table.rows,
-                                                 getattr(table, "cell_links", ()), table.row_states)
-                                     for table in section.tables)) for section in sections]
-    metadata = tuple((headers.get(key, key), value) for key, value in metadata)
     return ReportModel("数据库应急诊断报告", metadata, incident, tuple(sections), report.scenario)
 
 
@@ -1709,12 +1643,11 @@ def _dropped_evidence(sections: tuple[ReportSection, ...], dropped_ids: set[str]
         if section.section_id not in dropped_ids:
             continue
         displayed = sum(len(table.rows) for table in section.tables)
-        match = re.search(r"Total (\d+) · Displayed (\d+) · Omitted (\d+)", section.summary)
+        match = re.search(r"共(\d+)条，显示(\d+)条，省略(\d+)条。", section.summary)
         total = int(match.group(1)) if match else displayed
         blocks = len(section.code_blocks)
-        details.append(f"{section.title}: total {total}, displayed 0, omitted {total} rows, "
-                       f"{blocks} text blocks omitted")
-    return "; ".join(details) or "No complete section was omitted."
+        details.append(f"{display_label(section.title)}：共 {total} 行，显示 0 行，省略 {total} 行，另省略 {blocks} 个文本块")
+    return "；".join(details) or "未省略完整报告区块。"
 
 
 def render_bounded(model: ReportModel, render: Callable[[ReportModel], str],
@@ -1727,9 +1660,9 @@ def render_bounded(model: ReportModel, render: Callable[[ReportModel], str],
     sections = tuple(_map_section(section, max_chars=max(256, policy.max_sql_chars // 2), drop_sql=True)
                      for section in model.sections if section.section_id not in soft_drop)
     notice = ReportSection("report-budget", "Report Evidence Limit",
-                           summary="Report evidence was reduced to stay within the human report size budget. "
+                           summary="报告内容已按人工报告大小上限收敛。"
                                    + _dropped_evidence(model.sections, soft_drop)
-                                   + " See --json for structured diagnostic data.")
+                                   + "结构化诊断数据请使用 --json 查看。")
     compact = replace(model, sections=(sections[0], notice, *sections[1:]) if sections else (notice,))
     page = render(compact)
     if len(page.encode("utf-8")) <= policy.hard_report_bytes:
@@ -1743,9 +1676,9 @@ def render_bounded(model: ReportModel, render: Callable[[ReportModel], str],
     hard_dropped = {section.section_id for section in compact.sections
                     if section.section_id not in critical_ids}
     hard_notice = ReportSection("report-budget", "Report Evidence Limit",
-                                summary="Report evidence was reduced because the human report size limit "
-                                        "was reached. " + _dropped_evidence(compact.sections, hard_dropped)
-                                        + " Use --json for structured diagnostic data.")
+                                summary="报告达到大小上限，已收敛部分证据内容。"
+                                        + _dropped_evidence(compact.sections, hard_dropped)
+                                        + "结构化诊断数据请使用 --json 查看。")
     hard = replace(compact, sections=tuple(section for section in hard_sections
                                            if section.section_id != "report-budget") + (hard_notice,))
     page = render(hard)
@@ -1765,7 +1698,7 @@ def render_bounded(model: ReportModel, render: Callable[[ReportModel], str],
         if len(page.encode("utf-8")) <= policy.hard_report_bytes:
             return page
         char_limit //= 2
-    emergency = replace(hard, title="DBA Toolkit Diagnostic Report", metadata=(),
+    emergency = replace(hard, title="DBA Toolkit 诊断报告", metadata=(),
                         incident_summary=_bounded_incident(hard.incident_summary, 64),
                         sections=tuple(_map_section(section, max_chars=64, drop_sql=True)
                                        for section in hard.sections

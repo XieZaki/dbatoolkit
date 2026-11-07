@@ -21,12 +21,20 @@ from dba.oracle_collectors import (
     LongRunningCollector,
 )
 from dba.oracle_identity import OraclePrincipal
-from dba.oracle_slow import blocking_graph, build_slow_report
+from dba.oracle_slow import (
+    blocking_graph,
+    build_slow_phase_report,
+    build_slow_report,
+    collect_slow_phase,
+    diagnose_slow,
+)
 from dba.oracle_slow_reporter import render_markdown
 from dba.presentation import render_emergency_triage, render_json
 from dba.registry import SqlScriptRegistry
 from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.settings import OracleSettings
+from dba.slow_profiles import emergency_collectors_for_adapter
+from dba.versioning import resolve_profile_for_adapter
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -304,6 +312,112 @@ def _result(name: str, rows: list[dict[str, Any]]) -> CollectorResult:
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
     return CollectorResult("oracle-test", name, now, now, 1.0, tuple(rows), len(rows), False, True)
+
+
+def _connected_oracle_slow_adapter() -> tuple[OracleAdapter, FakeDriver]:
+    adapter, driver = adapter_for_test()
+    adapter.instance = replace(adapter.instance, version_family="19c")
+    adapter.connect()
+    profile, _ = resolve_profile_for_adapter(adapter, "slow")
+    adapter.slow_profile = profile
+    return adapter, driver
+
+
+def _assert_oracle_query_error(sample: dict[str, Any]) -> None:
+    assert sample["success"] is False
+    assert sample["error_type"] == "QueryDenied"
+    assert "ORA-01031" in sample["error_message"]
+    assert "insufficient privileges" in sample["error_message"]
+    assert sample["database_error"]["vendor_code"] == "ORA-01031"
+
+
+def test_oracle_slow_required_collector_failure_preserves_original_error_and_closes() -> None:
+    adapter, driver = _connected_oracle_slow_adapter()
+    driver.connection.fail["active_sessions"] = RuntimeError(
+        "ORA-01031: insufficient privileges"
+    )
+    try:
+        with pytest.raises(ToolkitError) as caught:
+            diagnose_slow(adapter)
+        assert caught.value.error_type == "QueryDenied"
+        assert "ORA-01031" in str(caught.value)
+        assert isinstance(caught.value.database_error, dict)
+        assert caught.value.database_error["vendor_code"] == "ORA-01031"
+        assert driver.connection.closed
+        assert adapter._ready is False
+    finally:
+        adapter.disconnect()
+
+
+def test_oracle_slow_optional_collector_failure_keeps_report_after_close() -> None:
+    adapter, driver = _connected_oracle_slow_adapter()
+    driver.connection.fail["previous_sql"] = RuntimeError(
+        "ORA-01031: insufficient privileges"
+    )
+    try:
+        report = diagnose_slow(adapter)
+        assert driver.connection.closed
+        assert adapter._ready is False
+        sample = next(item for item in report.details["samples"]
+                      if item["collector"] == "previous_sql")
+        _assert_oracle_query_error(sample)
+        assert report.details["incomplete"] is False
+        assert report.details["data_visibility"] == "PARTIAL"
+    finally:
+        adapter.disconnect()
+
+
+def test_oracle_staged_required_failure_keeps_error_in_emergency_report_after_close() -> None:
+    adapter, driver = _connected_oracle_slow_adapter()
+    driver.connection.fail["active_sessions"] = RuntimeError(
+        "ORA-01031: insufficient privileges"
+    )
+    try:
+        names = emergency_collectors_for_adapter(adapter)
+        results = collect_slow_phase(adapter, names)
+        assert driver.connection.closed
+        assert adapter._ready is False
+        report = build_slow_phase_report(adapter, results, emergency=True)
+        sample = next(item for item in report.details["samples"]
+                      if item["collector"] == "active_sessions")
+        _assert_oracle_query_error(sample)
+        assert report.details["incomplete"] is True
+        assert report.details["data_visibility"] == "PARTIAL"
+    finally:
+        adapter.disconnect()
+
+
+def test_oracle_staged_optional_failure_keeps_final_report_after_close() -> None:
+    adapter, driver = _connected_oracle_slow_adapter()
+    try:
+        names = emergency_collectors_for_adapter(adapter)
+        results = collect_slow_phase(adapter, names)
+        assert all(result.success for result in results)
+        emergency_report = build_slow_phase_report(adapter, results, emergency=True)
+        assert emergency_report.details["emergency_evidence_complete"] is True
+        driver.connection.fail["previous_sql"] = RuntimeError(
+            "ORA-01031: insufficient privileges"
+        )
+        results = collect_slow_phase(adapter, ("previous_sql",), results)
+        assert driver.connection.closed
+        assert adapter._ready is False
+        interim_report = build_slow_phase_report(adapter, results, emergency=True)
+        assert interim_report.details["emergency_evidence_complete"] is True
+        calls_after_failure = len(driver.connection.calls)
+        results = collect_slow_phase(
+            adapter,
+            ("active_sessions", "active_requests", "transactions", "blocking", "previous_sql"),
+            results,
+        )
+        assert len(driver.connection.calls) == calls_after_failure
+        report = build_slow_phase_report(adapter, results, emergency=False)
+        sample = next(item for item in report.details["samples"]
+                      if item["collector"] == "previous_sql")
+        _assert_oracle_query_error(sample)
+        assert report.details["incomplete"] is False
+        assert report.details["data_visibility"] == "PARTIAL"
+    finally:
+        adapter.disconnect()
 
 
 def test_blocking_rac_cycles_and_missing_root() -> None:

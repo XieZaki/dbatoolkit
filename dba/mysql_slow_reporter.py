@@ -7,6 +7,7 @@ from typing import Any
 
 from dba.mysql_slow import MySQLSlowReport
 from dba.reporters import _safe
+from dba.reporting.normalizers import display_label, display_message
 
 _ANSI_ESCAPE = re.compile(
     r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|[@-_])"
@@ -33,7 +34,7 @@ def _elapsed_display(elapsed_ms: object) -> str:
 
 
 def _view(value: Any) -> str:
-    return "unavailable" if value is None or value == [] else _safe(
+    return "不可用" if value is None or value == [] else _safe(
         json.dumps(value, ensure_ascii=False, default=str))
 
 
@@ -109,11 +110,11 @@ def render_recent_statements(rows: list[dict[str, Any]] | tuple[dict[str, Any], 
         if not isinstance(target, dict):
             continue
         pid = target.get("session_id", "未知")
-        status = target.get("evidence_status", "UNKNOWN")
+        status = display_label(str(target.get("evidence_status", "UNKNOWN")))
         lines.append(f"\n连接 {pid}｜状态：{status}")
         reason = target.get("reason")
         if isinstance(reason, str):
-            lines.append("原因：" + _safe(reason))
+            lines.append("原因：" + _safe(display_message(reason)))
         if target.get("limit_reached"):
             lines.append("已达到每连接5条展示上限；是否还有更早事件未知。")
         elif target.get("truncated"):

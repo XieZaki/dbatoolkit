@@ -1673,3 +1673,158 @@ The worktree already contained the §49 opt-in Top SQL integration changes when 
 The earlier failing runs' original child-process stdout/stderr was not retained. Read-only inspection of their surviving synthetic pytest artifacts shows the installed manifest returned to `0.9.0`, the application entry file hash matches the original installed copy, the MySQL active driver remains at its original `1.0.0` identity, and the program backup plus staged failed-program quarantine exist. An instrumented successful Windows PowerShell 5.1 reproduction captured the expected `prior program was restored` message in stderr and exit code 1. This confirms restoration in the retained failure artifacts and the current reproduction, but it does not establish why the earlier assertion at `tests/test_portable_update.py:389` did not find its expected phrase.
 
 Root cause remains **UNCONFIRMED**. No test assertion, updater script, or product code was changed; no skip/xfail was added. Preserve the earlier failure records and investigate further if the same failure recurs with child stdout/stderr captured. No database, Inventory, or credential was accessed.
+
+## 53. V091-P2-TOPSQL-INTEGRATION-001 — SQL Server/Oracle E2E stopped at host-context gate — 2026-11-05
+
+### Pre-connection gate and evidence
+
+NOT_EXECUTED for WINDOWS_LOCAL_REAL_E2E. The current process reported PowerShell 7.6.5 Core with an executable under the Codex runtime; the project working directory and .venv paths were present, but that does not establish the authorized Windows host context. Get-CimInstance Win32_OperatingSystem failed with “cannot access CIM resources”, so the host identity/OS could not be verified under the project rule.
+
+The host gate failed before reading Credential Session status or either selected Inventory asset. Current Credential Session, sqlserver2022/oraclefree host/port/environment, connection checks, and all database scenarios are therefore NOT_EXECUTED. No credential file or value was read. No database connection or query was attempted. Historical SQL Server 10054/08001 and Oracle ORA-12514 reports were not retried and are not current-HEAD results.
+
+Only offline CLI help was inspected. It confirms the integrated route dba diagnose <database_id> slow --include-top-sql --top 10 and independent route dba diagnose <database_id> top-sql --top 10; top-level dba top-sql is not a valid command.
+
+| Item | SQL Server (sqlserver2022) | Oracle (oraclefree) |
+|---|---|---|
+| Authorized Windows host and project .venv | BLOCKED — host context not established | BLOCKED — host context not established |
+| Credential Session / asset environment | NOT_EXECUTED | NOT_EXECUTED |
+| Connection and actual DB version | NOT_EXECUTED | NOT_EXECUTED |
+| Slow baseline | NOT_EXECUTED | NOT_EXECUTED |
+| Slow + Top SQL integration | NOT_EXECUTED | NOT_EXECUTED |
+| Independent Top SQL | NOT_EXECUTED | NOT_EXECUTED |
+| Native identity association / ambiguity | NOT_EXECUTED | NOT_EXECUTED |
+| CLI / JSON / HTML parity | NOT_EXECUTED | NOT_EXECUTED |
+
+The user-provided MySQL 8.4.11 and PostgreSQL 16.15 results were not repeated; their 10-row collections and UNMATCHED identity associations remain as previously reported evidence. No SQL-text matching rule was changed. No tests were run because no code changed and the requested real-DB checks could not safely start. Version remains 0.9.0; no commit, push, tag, release, database write, permission change, or Top SQL Delta work occurred.
+
+### Status
+
+Backlog is BLOCKED, not VERIFIED, pending execution from the authorized Windows host after Credential Session = UNLOCKED and confirmation that each selected asset is environment=test. No current-HEAD SQL Server or Oracle real-E2E pass is claimed.
+
+## 54. Oracle Slow Collector error preservation — 2026-11-06
+
+`ISOLATED_OFFLINE_TEST`: four Fake Driver regressions cover ordinary Slow required and optional Collector failures, plus staged Slow required and optional failures after the Oracle Adapter closes its connection. Before the fix, the ordinary required-Collector case retained its original `QueryDenied`/`ORA-01031`, while the other three cases reproduced a later `PreflightRequired` masking the Collector error. After the fix, all four preserve the original Collector result or error and report metadata from the snapshot captured while the connection was valid. Existing error cleanup and readiness guards remain enabled.
+
+Final targeted Oracle/report suite (`tests/test_oracle.py`, `tests/test_oracle_plan.py`, `tests/test_top_sql_oracle.py`, `tests/test_slow_profiles.py`, `tests/test_html_reports.py`): **157 passed**. Ruff passed for the changed source and test; strict MyPy passed for all 78 `dba` source files; `git diff --check` passed with Git line-ending advisory notices. No Collector SQL, Registry, connection lifecycle, permissions, Inventory, or Credential Store code was changed.
+
+`WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED**. No database, Docker, Inventory asset, Credential Session, or credential was accessed. This offline regression is not Oracle database E2E and does not change the parent `V091-P2-TOPSQL-INTEGRATION-001` status: Backlog remains `BLOCKED`, not `VERIFIED`, pending the authorized Windows host gate and required live evidence.
+
+## 55. V091-P5-WORKBENCH-001 — inline interaction regression checkpoint — 2026-11-06
+
+The existing Slow Diagnose HTML tests checked report content, escaping, responsive CSS, and keyboard-oriented markup but did not execute the inline interaction script. Added `tests/test_slow_report_interactions.py`. It reads the production `slow_report.html` template, extracts its inline JavaScript, and runs that exact script in Node's built-in `vm` with a minimal synthetic DOM. The test verifies search filtering and the no-results state, expand/collapse labels and accessibility state, print-time expansion and restoration of the prior search/detail state, and clipboard fallback while keeping copied content as text marked “未执行”. No third-party browser or Python dependency was added, and the product template was not changed.
+
+`ISOLATED_OFFLINE_TEST`: `tests/test_slow_report_interactions.py` and `tests/test_html_reports.py` passed **50 tests**. Ruff passed on the new test. Strict MyPy passed for **78 `dba` source files** and the new test file. `git diff --check` passed; Git emitted only its existing LF-to-CRLF working-copy advisories for previously modified files. The initial pytest attempt failed before test setup because the sandbox-managed Windows Temp path denied directory creation. The same focused suite was rerun with `.tmp/pytest-temp-p5-workbench-20261106` as basetemp and passed. No test was skipped or weakened.
+
+The requested narrow-width visual review was attempted through the managed browser, but opening the local workspace file returned `ERR_BLOCKED_BY_ADMINISTRATOR`; no CSS or page layout loaded. This attempted route is superseded by the local-browser evidence in §56. At that checkpoint, 320px/414px visual behavior remained **NOT_EXECUTED**. No database, Docker, Credential Session, Inventory, Credential Store, or credential was accessed. `WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED** for the integrated report; four-database report rendering and JSON/HTML parity remain outstanding. Backlog remains `IN_PROGRESS` pending the remaining scoped acceptance.
+
+## 56. V091-P5-WORKBENCH-001 — local Chrome narrow-viewport visual acceptance — 2026-11-06
+
+### Browser and sample
+
+Rendered the existing self-contained Slow Report HTML template through the installed local Google Chrome **157.0.8103.38** at **320×844** and **414×844** CSS viewport sizes. The sample is synthetic and reproducible from `tests/test_html_reports.py::_report()`, rendered into `.tmp/p5-visual-sample-20261106-e/index.html`; it contains no real database report or credentials. Python's standard-library `http.server` served only that directory's single `index.html`, bound to `127.0.0.1:8312` for the run. Chrome DevTools Protocol set and verified each CSS viewport; the screenshot pixel dimensions also match each requested viewport.
+
+### Visual and interaction results
+
+| Check | 320×844 | 414×844 |
+|---|---|---|
+| `window.innerWidth` / `document.documentElement.scrollWidth` | 320 / 320; no page horizontal overflow | 414 / 414; no page horizontal overflow |
+| Page title and toolbar | Title readable; all three toolbar buttons visible within x=10…310 | Title readable; all three toolbar buttons visible within x=10…404 |
+| Navigation | Seven links; `overflow-x:auto`, max `scrollLeft=239`; last link reached and fully visible | Seven links; `overflow-x:auto`, max `scrollLeft=145`; last link reached and fully visible |
+| Core diagnosis evidence | Root session 57 and blocked sessions 59/67 present; no overlap or off-screen page element | Root session 57 and blocked sessions 59/67 present; no overlap or off-screen page element |
+| Tables | Eleven table wrappers use local horizontal scrolling (276px wrapper for 650px table); page width remains 320px | Eleven table wrappers use local horizontal scrolling (370px wrapper for 650px table); page width remains 414px |
+| SQL / code blocks | Six sample blocks (8–48 characters) use `pre-wrap` / `overflow-wrap:anywhere`; each `scrollWidth` equals `clientWidth` | Same; no code-block width overflow |
+| Evidence expand/collapse | All 16 expandable details open and close through the page control; expanded evidence screenshot reviewed | Same |
+| Search | `57` returns 1 of 4 displayed rows; no-match query shows 0/4 and the empty-state message | Same |
+| Remaining layout | Main panels stay within 10px side gutters; no unexpected overlap or out-of-bounds element | Main panels stay within 10px side gutters; no unexpected overlap or out-of-bounds element |
+
+The page-level width check intentionally distinguishes the horizontally scrollable navigation and table containers from document overflow. Their content remains reachable within those containers. Buttons, title, core diagnosis, evidence sections, search field, matching row, and empty-search state were visually inspected in Chrome screenshots. No responsive defect was found, so no CSS/template change or additional regression test was needed.
+
+The reusable synthetic fixture contains no unusually long SQL or string value. The observed wrapping applies to the six included snippets; extreme-length content was not stress-tested.
+
+### Screenshot and audit evidence
+
+The 22 viewport-sized screenshots and structured DOM audit are local, ignored artifacts under `.tmp/p5-visual-evidence-20261106-r8/`; they are not report outputs or source changes. `dom-audit.json` records the browser version, exact viewport metrics, link reachability, button bounds, section bounds, table/SQL overflow behavior, core evidence, and interaction results. For each width, screenshots cover `page-top`, `summary`, `root-assessment`, `blocking-chain`, `manual-action`, `evidence`, `collection-quality-panel`, `session-appendix`, `evidence-expanded`, `search-match`, and `search-no-results`.
+
+### Scope and remaining acceptance
+
+This was local browser visual verification only. No database connection or SQL ran; no credential, Inventory, permission, Credential Store, or Docker state was read or changed; no dependency was installed. `WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED**. Four-database real report generation and parity against real reports remain **NOT_EXECUTED**; the offline synthetic parity checkpoint is recorded in §57. No Top SQL Delta work was started. Backlog remains `IN_PROGRESS`; this visual checkpoint does not close P5.
+
+## 57. V091-P5-WORKBENCH-001 — four-engine offline JSON/HTML report parity — 2026-11-06
+
+### Same-snapshot report paths
+
+The tests reuse the existing `SlowReport` fixture from `tests/test_html_reports.py::_report()`, the production `TopSQLResult` contract, `associate_slow_sql_text`, the CLI JSON redaction/serialization path (`asdict` → `_redact_diagnostic_json` → `render_json`), and the shared HTML path (`build_report_model` → `render_bounded(HtmlReportRenderer.render)`). JSON and HTML are generated from the same in-memory `SlowReport` snapshot and incident summary. No second report model or fixture schema was introduced.
+
+### Four-engine status matrix
+
+`ISOLATED_OFFLINE_TEST`: `tests/test_slow_report_json_html_parity.py` passed **25 cases**: 16 engine/state parity cases, four long-content boundary cases, four sparse/missing-field cases, and one long-string URI-redaction regression. The combined focused report regression run passed **124 tests**.
+
+| Database | Metric / unit | Metric scope / collection scope | Complete + matched | Partial + unmatched | Collected, no rows | Collector failed |
+|---|---|---|---|---|---|---|
+| SQL Server | `total_cpu_time` / microseconds | `SQL_STATEMENT` / `INSTANCE` | PASS | PASS | PASS | PASS |
+| MySQL | `sum_timer_wait` / milliseconds | `DIGEST` / `INSTANCE` | PASS | PASS | PASS | PASS |
+| PostgreSQL | `total_exec_time` / milliseconds | `SQL_STATEMENT` / `INSTANCE` | PASS | PASS | PASS | PASS |
+| Oracle | `cpu_time` / microseconds | `CHILD_CURSOR` / `DATABASE` | PASS | PASS | PASS | PASS |
+
+All four engines preserve `CUMULATIVE` metric semantics. The JSON and HTML top-SQL fields agree on engine/version, collection status, completeness, data visibility, record count, metric name/unit/semantics/scopes, limitations, and SQL-text association. The collection-quality row also reports `PARTIAL` for partial Top SQL and `FAILED` for failed collection; partial data is not promoted to complete. A complete empty collection remains `COLLECTED`, reports zero rows, and renders the no-record message rather than a connection failure. A failed collection remains `FAILED` with unknown completeness, unavailable visibility, and `COLLECTION_FAILED`; it does not change the Slow report success/core incident summary.
+
+For every engine, one exact native identity match attaches its SQL text and the HTML code block matches the JSON association content. A source row missing one required identity field remains `UNMATCHED`; its candidate SQL is absent from the Top SQL association and from the generated report JSON/HTML. The Slow core status, severity, primary problem, root-cause candidate, data completeness, and overall success remain equal to the same fixture without Top SQL.
+
+### Boundary coverage and fixes
+
+- **Long SQL:** a multiline SQL value exceeding the 16,384-character human-report limit remains bounded in both formats and carries the same omission marker. This caught and fixed a Presenter defect where HTML's second truncation removed the marker already present in JSON.
+- **Long identifiers:** 40,000-character native identity values remain intact in structured JSON; HTML displays at most the 100-character native identity value and remains below the configured report-size limit.
+- **Special characters and SQL safety:** `<script>`, ampersands, quotes, and multiline SQL are escaped in HTML source while preserving their literal text in the rendered code block. Unrendered SQL tail content is omitted.
+- **Empty/missing fields:** empty result sets and snapshots without optional `source_metadata` or `database_error` remain renderable. Missing native identity fields prevent a SQL-text association.
+- **Redaction performance:** a 40,000-character ordinary identifier followed by two credential-bearing URI values is handled without regex backtracking; both URI user-info values remain `[REDACTED]`, while a URI without a password is preserved.
+
+The URI redactor in `dba/logging.py` now scans for `://` delimiters instead of applying a backtracking scheme regex to every position in arbitrary text. This keeps the existing URI credential-redaction behavior while making long JSON identity values practical. `dba/reporting/presenters.py` now preserves the SQL omission marker when the HTML report applies its own content limit. No Collector, SQL Registry, permission, connection, or database code changed.
+
+Focused regression command covered the new parity tests, `tests/test_top_sql_contract.py`, `tests/test_top_sql_integration.py`, `tests/test_html_reports.py`, the logging-redaction regression, and the secret-form safety test: **124 passed**. Ruff passed on both changed modules and the new test file. Strict MyPy passed for **79 source/test files**. `git diff --check` passed with the existing LF-to-CRLF working-copy advisories. A local `tests` namespace alias was used for pytest because an installed `tests` package otherwise shadows this repository's namespace during collection; no dependency was installed.
+
+`WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED**. These are synthetic offline report snapshots, not evidence that any database was contacted or that captured real reports were regenerated. Real SQL Server, MySQL, PostgreSQL, and Oracle report generation and JSON/HTML parity on those real reports remain outstanding. Product version remains `0.9.0`; no commit, push, tag, or release occurred. Backlog remains `IN_PROGRESS`; P5 is not closed by this offline parity result.
+
+
+## 58. SQL-REGISTRY-SAFETY-001 — final static safety audit — 2026-11-07
+
+Final audit rechecked Registry loading and execution authorization, the four adapters, read-only checks, metadata budgets, query timeouts, bounded fetch, and cleanup paths. The static checker and runtime digest revalidation remain additional safeguards: execution still requires a Registry-issued reviewed script for the target database, and the database monitor account must remain least-privileged. Static SQL checks are not a proof against every vendor function or server-side workload.
+
+The audit confirmed coverage for modifying statements, multi-statement input, PostgreSQL session-state mutation and advisory locks, PostgreSQL/MySQL locking reads, SQL Server locking hints and sequence allocation, query timeout configuration, row and decoded-result-byte caps, digest/source/metadata mutation, and adapter cleanup. The tests also model MySQL streaming cursor close draining remaining rows; when a streaming result is truncated or fails, the MySQL adapter now closes its connection before closing that cursor. This preserves the fetch bound under the PyMySQL unbuffered-cursor cleanup behavior.
+
+A final parser probe found one actual bypass: the scanner treated any `--` as a MySQL line comment, although MySQL requires whitespace or a control character after the second dash. Consequently `SELECT 1--x; SELECT 2` was accepted by the scanner. `dba/security.py` now applies that MySQL-specific rule; the same multi-statement input is rejected, while `-- ` comments remain supported. SQL Server `#temp` identifiers are also parsed using their database context and cannot hide a following statement. MySQL's comment rule is documented in the [MySQL 8.4 comments reference](https://dev.mysql.com/doc/refman/8.4/en/comments.html); the rejected row-lock forms and SQL Server locking hints are documented in the [PostgreSQL SELECT reference](https://www.postgresql.org/docs/17/sql-select.html) and [SQL Server table hints reference](https://learn.microsoft.com/en-us/sql/t-sql/queries/hints-transact-sql-table?view=sql-server-ver16).
+
+`ISOLATED_OFFLINE_TEST`: `tests/test_toolkit.py` passed **88 tests**, including Registry size/duplicate-key/digest checks and dangerous SQL/parser regressions. The four-adapter timeout, Registry authorization, cleanup, bounded-fetch, and MySQL streaming truncation selection passed **26 tests** (`191 deselected`). Direct offline validation accepted **118 reviewed Registry scripts**. Ruff passed on the changed Registry/security/adapter/test files; strict MyPy passed for **78 source files**. The first pytest invocation could not create fixtures under the managed Windows TEMP path; rerunning with the existing project-local `.venv/test-tmp` completed successfully. `git diff --check` is recorded after this evidence update.
+
+`WINDOWS_LOCAL_REAL_E2E`: **NOT EXECUTED**. No database, Docker, Inventory, Credential Store, or credential was accessed. No permission was changed and no KILL/terminate/cancel operation was issued. No version, commit, push, tag, or release was changed. The decoded-byte limit remains post-fetch/materialization and does not bound server work or wire bytes; MySQL `read_timeout` remains a socket-read timeout rather than a full-query wall-clock deadline. Backlog status is `VERIFIED`, pending formal user acceptance for `DONE`.
+
+## 59. V0.9.1 Chinese presentation and release candidate — 2026-11-07
+
+The user explicitly authorized the `0.9.0` to `0.9.1` product version change and a normal commit, push, tag, and GitHub Release in this request. The source version is synchronized in `pyproject.toml`, `dba/__init__.py`, portable build defaults, README, and release/update instructions. MongoDB DB-GPT, MCP, and Agent integration remain outside scope.
+
+### Chinese presentation and report changes
+
+Added a shared human-display mapping in `dba/reporting/normalizers.py` and reused it in terminal presentation, JSON human-readable message fields, HTML Presenter/Renderer output, statuses, report metadata, and fixed error guidance. Internal enums remain machine-readable in JSON. Native database names and identities, SQL, paths, protocol terms, and vendor error evidence are retained. The slow report keeps its diagnostic conclusion and source evidence while presenting localized headings, statuses, labels, search/interaction controls, and quality reasons. `tests/test_chinese_presentation.py` checks CLI help/errors, the slow report, four-engine synthetic report states, retained native terms, and untranslated UI phrases.
+
+`ISOLATED_OFFLINE_TEST`: the complete suite passed **1324 tests**, with **3 skipped** and **0 failures**. The focused Chinese display and Slow Report interaction/parity run passed **29 tests**. Ruff passed; strict MyPy passed for **78 source files**; `dba validate --json` reported success, four example instances, 118 SQL scripts, and no warnings. All deployment PowerShell scripts and the seven inline workflow PowerShell blocks parsed successfully. `git diff --check` passed (Git emitted only its LF-to-CRLF working-copy notices).
+
+### Prior GitHub Actions failure evidence
+
+The latest historical workflow run available before this release attempt is [Actions run 42054877407](https://github.com/XieZaki/DBAToolKit/actions/runs/42054877407), at source `af3474558f28a236a1912435f0d133df1f61bbcc`. Its Windows pytest step reported **1263 passed, 2 skipped, 3 failed**. The three failures were the SQLite credential-store ACL cases `test_sqlite_private_acl_covers_database_directory_and_journal`, `test_product_concurrent_saves`, and `test_product_crash_recovery[before-73-False]`. The observed failure was that the hosted Windows runner's elevated token created a transient SQLite `-journal` with `BUILTIN\Administrators` as Owner; the owner validator allowed only the current user or SYSTEM, so the credential store rejected the journal despite its validated private DACL. This was a Windows pytest/SQLite ACL failure, not a Ruff/MyPy, dependency download, runtime download/hash, Full/Update build, artifact, Release creation/upload, or token failure: those later jobs/steps were skipped and produced no evidence.
+
+The scoped fix validates the journal's private DACL, accepts the Administrators Owner only for the transient journal while running as an administrator, and repairs its Owner to the current user before the write transaction commits. Persisted credential-store files still require current-user/SYSTEM ownership. The SQLite regression tests cover journal inspection, the narrow Owner exception, and repair; no credential values were accessed. The earlier pytest temporary-directory issue was already fixed and was not repeated.
+
+### Local package build and portable verification
+
+`ISOLATED_OFFLINE_TEST`: `deployment/build_release.ps1` built and validated a local candidate from the existing pinned CPython 3.13.17 archive and local hash-locked wheelhouse. The first attempt was stopped when the managed system TEMP path denied pip's temporary-target creation. It did not proceed to archive creation. The retry used the existing project-local `.venv/test-tmp` and a new output directory, leaving the failed attempt and all pre-existing artifacts untouched. The successful candidate is `dist/release-0.9.1-codex-20261107-retry01`; Build ID is `local-v0.9.1-20261107`.
+
+| Candidate asset | Size | SHA256 |
+|---|---:|---|
+| `DBAToolkit-0.9.1-Windows-x64-Full.zip` | 99,938,941 bytes (95.31 MiB) | `4a809c73a3f3d9a0f1af4db24c1307f81509131231fc9b87ea61c0dcbd1958e2` |
+| `DBAToolkit-0.9.1-Windows-x64-Update.zip` | 45,444,289 bytes (43.32 MiB) | `ecdad107dc9d9b2ccd855f8616ff5bcf2957a2583f9308a4351486485a7a1c2f` |
+| `使用说明.md` | 2,929 bytes | `6706c5c1cd1c74c6401610811c8fde46bc446f4376c3bdc4babfb0747167289d` |
+
+`verify_release.ps1` confirmed the exact three-entry SHA256SUMS manifest and validated Full/Update archive contents. Full ZIP CRC and every ZIP entry read passed (5,504 entries); Update archive manifest and payload hashes passed (1,367 entries). `deployment/verify_portable.ps1` then ran the extracted Full package's bundled Python 3.13.17 runtime, version command, SQL Registry validation (118 scripts), and managed-driver checks. It reported success with zero configured instances and no warnings. This is portable offline smoke validation only; it is not a database compatibility claim.
+
+### Release boundary
+
+The local candidate build is not the public release. GitHub Actions and uploaded Release asset verification are pending the authorized commit, push, and `v0.9.1` tag. Cross-version Update on a disposable host without Python remains unverified, so `PORTABLE-UPDATE-001` remains `E2E_PENDING`. `V091-P5-WORKBENCH-001` remains `IN_PROGRESS`; four-database real report generation and real-report JSON/HTML parity remain `NOT_EXECUTED`. No database, Docker, Inventory, Credential Store, or credential was accessed in this work.

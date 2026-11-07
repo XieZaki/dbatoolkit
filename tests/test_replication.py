@@ -170,7 +170,7 @@ def test_postgresql_unconfigured_is_not_critical() -> None:
     assert report.summary.status == "NOT_CONFIGURED"
     assert report.summary.overall == "HEALTHY"
     assert not any(issue.severity in {"HIGH", "CRITICAL"} for issue in report.issues)
-    assert "Not applicable because replication is not configured." in render_replication_summary(
+    assert "未配置复制，不适用。" in render_replication_summary(
         report, report_path="report.html"
     )
 
@@ -245,8 +245,8 @@ def test_replication_report_html_is_bounded_and_discloses_manual_only() -> None:
     report = diagnose_replication(adapter)
     model = build_report_model(report, build_incident_summary(report))
     page = HtmlReportRenderer().render(model)
-    assert "Replication Summary" in page and "Topology" in page
-    assert "Toolkit Executed: NO" in page
+    assert "复制摘要" in page and "拓扑结构" in page
+    assert "Toolkit 是否执行" in page and "否" in page
     assert "<img>" not in page
     assert "&lt;img&gt;" in page
     assert "PROMOTE" not in page and "START REPLICA" not in page
@@ -369,7 +369,7 @@ def test_mysql_successful_empty_status_is_complete_not_configured(
     assert report.summary.apply_status == "NOT_CONFIGURED"
     assert report.members == ()
     assert report.issues == ()
-    assert "Not applicable because replication is not configured." in render_replication_summary(
+    assert "未配置复制，不适用。" in render_replication_summary(
         report, report_path=None
     )
 

@@ -549,4 +549,4 @@ def test_pg_cli_connection_collect_and_diagnose(tmp_path: Path,
     monkeypatch.setattr(builtins, "print", original_print)
     assert main([*common, "diagnose", "pg", "plan", "--session", "1", "--json"],
                 provider=provider, driver=driver) == 1
-    assert "not implemented" in capsys.readouterr().out.lower()
+    assert "尚未实现" in capsys.readouterr().out

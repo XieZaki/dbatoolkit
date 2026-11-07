@@ -163,6 +163,8 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
+          draft: true
+          fail_on_unmatched_files: true
           files: |
             release-assets/DBAToolkit-${{ needs.build.outputs.version }}-Windows-x64-Full.zip
             release-assets/DBAToolkit-${{ needs.build.outputs.version }}-Windows-x64-Update.zip
@@ -170,3 +172,63 @@ jobs:
             release-assets/使用说明.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify uploaded assets before publishing
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ needs.build.outputs.version }}'
+          $tag = '${{ github.ref_name }}'
+          $fullName = "DBAToolkit-$version-Windows-x64-Full.zip"
+          $updateName = "DBAToolkit-$version-Windows-x64-Update.zip"
+          $sumsName = "DBAToolkit-$version-SHA256SUMS.txt"
+          $manualName = '使用说明.md'
+          $expectedAssets = @($fullName, $updateName, $sumsName, $manualName)
+
+          $releaseJson = gh release view $tag --json isDraft,assets
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the draft Release.' }
+          $release = $releaseJson | ConvertFrom-Json
+          if (-not $release.isDraft) { throw 'Release must remain a draft until asset verification completes.' }
+          $assetNames = @($release.assets | ForEach-Object { $_.name } | Sort-Object)
+          $sortedExpected = @($expectedAssets | Sort-Object)
+          if ($assetNames.Count -ne 4 -or (Compare-Object $sortedExpected $assetNames)) {
+            throw 'Draft Release does not contain exactly the four expected assets.'
+          }
+
+          $sourceSums = Join-Path $env:GITHUB_WORKSPACE (Join-Path 'release-assets' $sumsName)
+          if (-not (Test-Path -LiteralPath $sourceSums -PathType Leaf)) { throw 'Local SHA256SUMS asset is missing.' }
+          $checksums = @{}
+          foreach ($line in Get-Content -LiteralPath $sourceSums) {
+            $match = [regex]::Match($line, '^(?<hash>[a-fA-F0-9]{64})\s+\*?(?<name>.+)$')
+            if (-not $match.Success) { throw 'SHA256SUMS contains an invalid entry.' }
+            $checksums[$match.Groups['name'].Value] = $match.Groups['hash'].Value.ToLowerInvariant()
+          }
+          if ($checksums.Count -ne 3 -or -not $checksums.ContainsKey($fullName) -or
+              -not $checksums.ContainsKey($updateName) -or -not $checksums.ContainsKey($manualName)) {
+            throw 'SHA256SUMS must cover exactly Full, Update, and the Chinese manual.'
+          }
+
+          $verifyDirectory = Join-Path $env:RUNNER_TEMP 'dbatoolkit-release-asset-check'
+          New-Item -ItemType Directory -Path $verifyDirectory -Force | Out-Null
+          gh release download $tag --dir $verifyDirectory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the uploaded Release assets for verification.' }
+          foreach ($name in $expectedAssets) {
+            $downloaded = Join-Path $verifyDirectory $name
+            if (-not (Test-Path -LiteralPath $downloaded -PathType Leaf)) { throw "Release asset is missing: $name" }
+            $remoteAsset = $release.assets | Where-Object { $_.name -ceq $name }
+            if ($null -eq $remoteAsset -or (Get-Item -LiteralPath $downloaded).Length -ne $remoteAsset.size) {
+              throw "Downloaded Release asset size differs from the uploaded asset: $name"
+            }
+            if ($name -eq $sumsName) {
+              $localHash = (Get-FileHash -LiteralPath $sourceSums -Algorithm SHA256).Hash.ToLowerInvariant()
+            } else {
+              $localHash = $checksums[$name]
+            }
+            $downloadHash = (Get-FileHash -LiteralPath $downloaded -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($downloadHash -ne $localHash) { throw "Release asset SHA256 verification failed: $name" }
+          }
+
+          gh release edit $tag --draft=false
+          if ($LASTEXITCODE -ne 0) { throw 'Verified Release could not be published.' }

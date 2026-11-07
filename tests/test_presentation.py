@@ -15,7 +15,7 @@ def test_check_human_and_json_share_one_domain_result() -> None:
     )
     human = render_human("check", result)
     machine = json.loads(render_json(result))
-    assert "DBA Toolkit Check" in human and "READY_WITH_WARNING" in human
+    assert "DBA Toolkit 检查" in human and "就绪（有提示）" in human
     assert "permissions" not in machine
     assert machine["status"] == "READY_WITH_WARNING"
 
@@ -26,7 +26,7 @@ def test_status_human_handles_no_active_requests() -> None:
         "16.0", "READY", 2, 0, 0, {"ONLINE": 3}, "READY",
     )
     rendered = render_human("status", result)
-    assert "Active Requests" in rendered and "0" in rendered
+    assert "活动请求数" in rendered and "0" in rendered
     assert "dba diagnose sql slow" in rendered
 
 

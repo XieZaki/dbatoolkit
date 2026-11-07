@@ -550,7 +550,7 @@ def _same_source_output_parity(
     cli = _human_cli_diff_summary(_human_cli_rows(human_text), items)
     metadata_match = all(token in human_text for token in (
         str(top.get("metric_name", "")), str(top.get("metric_unit", "")),
-        "CUMULATIVE", "SQL_STATEMENT", "INSTANCE",
+        "累计统计", "SQL 语句", "实例级",
     ))
     if not metadata_match:
         cli = {"classification": "METADATA_MISMATCH", "first_mismatch_field": "metric_metadata"}

@@ -234,7 +234,7 @@ class SqlScriptRegistry:
             raise ValidationError("Invalid SQL database_type") from exc
         if path.parent.name != metadata.database_type.value or path.stem != metadata.name:
             raise ValidationError("SQL metadata must match directory and filename")
-        check_sql(text)
+        check_sql(text, metadata.database_type)
         script = SqlScript(metadata, text)
         return script, path, self._digest(script)
 
@@ -273,7 +273,7 @@ class SqlScriptRegistry:
         current, _, current_digest = self._read(issued[1])
         if current_digest != issued[2] or current != script:
             raise ValidationError("SQL or metadata changed after registration")
-        check_sql(script.text)
+        check_sql(script.text, database_type)
 
     def validate(self) -> list[SqlScript]:
         if not self.root.is_dir():

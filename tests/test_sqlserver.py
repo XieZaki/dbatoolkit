@@ -746,9 +746,9 @@ def test_cli_other_database_and_disabled(
 ) -> None:
     args = ["--inventory", str(ROOT / "examples/inventory/demo.yaml")]
     assert main([*args, "test-connection", "demo-postgresql"], driver=driver) == 1
-    assert "disabled" in capsys.readouterr().out
+    assert "已禁用" in capsys.readouterr().out
     assert main([*args, "test-connection", "demo-sqlserver"], driver=driver) == 1
-    assert "disabled" in capsys.readouterr().out
+    assert "已禁用" in capsys.readouterr().out
     assert not driver.calls
 
 
@@ -770,8 +770,8 @@ def test_cli_check_and_status_human_and_json(
     assert main([*common, "check", instance.id],
                 provider=MemoryCredentialProvider(), driver=FakeDriver()) == 0
     human = capsys.readouterr().out
-    assert "DBA Toolkit Check" in human and not human.lstrip().startswith("{")
-    assert "Version Status" in human and "AUTO_DETECTED" in human
+    assert "DBA Toolkit 检查" in human and not human.lstrip().startswith("{")
+    assert "版本状态" in human and "自动检测" in human
     assert TEST_CREDENTIAL not in human
     assert main([*common, "status", instance.id, "--json"],
                 provider=MemoryCredentialProvider(), driver=FakeDriver()) == 0

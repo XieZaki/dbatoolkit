@@ -312,8 +312,8 @@ def test_active_sql_cli_json_html_share_one_collector_result_and_link_sql_text_o
     assert payload["rankings"]["logical-reads"][0]["metric_unit"] == "pages"
     assert payload["sql_texts"][0]["plan_identities"]
     assert len(payload["sql_texts"]) == 1
-    assert cli.count(sql) == 1 and "Top N: 10" in cli
-    assert "Current request CPU time (milliseconds)" in cli
+    assert cli.count(sql) == 1 and "排名数量：10" in cli
+    assert "当前请求 CPU 时间（毫秒）" in cli
     assert 'href="#sql-text-sql-001"' in html and 'id="sql-text-sql-001"' in html
     assert html.count("&lt;script&gt;not markup&lt;/script&gt;") == 1
     assert "<script>not markup</script>" not in html

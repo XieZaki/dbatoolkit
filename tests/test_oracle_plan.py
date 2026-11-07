@@ -181,7 +181,7 @@ def test_oracle_26ai_native_three_row_plan_accepts_null_root_position() -> None:
     html = HtmlReportRenderer().render(build_report_model(report, incident))
     for text in ("SELECT STATEMENT", "TABLE ACCESS", "BY INDEX ROWID", "INDEX", "RANGE SCAN"):
         assert text in html
-    assert "Estimated Rows" in html and "Estimated Cost" in html and "Estimated Bytes" in html
+    assert "估算行数" in html and "估算成本" in html and "估算字节数" in html
     assert "42" in html and "1.5" in html and "512" in html and "—" in html
     assert "No obvious active database-side issue detected" not in html
     assert "未评估" in html
@@ -326,8 +326,8 @@ def test_json_cli_and_html_expose_same_oracle_identity_and_plan_tree() -> None:
     incident = build_incident_summary(report, "report.html")
     model = build_report_model(report, incident)
     html = HtmlReportRenderer().render(model)
-    assert "Oracle Cached Plan Identity" in html
-    assert "Cached Plan Tree" in html
+    assert "Oracle 缓存执行计划身份" in html
+    assert "缓存执行计划树" in html
     assert "TABLE ACCESS" in html
     assert "Estimated Cost" in model.sections[2].tables[0].headers
     assert report.details["top_operators"][0]["estimated_rows"] is None
@@ -367,7 +367,7 @@ def test_oracle_plan_cli_executes_only_bound_registry_route(tmp_path: Path,
     payload = json.loads(capsys.readouterr().out)
     assert status == 0, payload
     assert payload["report"]["details"]["plan_status"] == "AVAILABLE"
-    assert "Cached Plan Tree" in report_path.read_text(encoding="utf-8")
+    assert "缓存执行计划树" in report_path.read_text(encoding="utf-8")
     plan_calls = [(name, parameters) for name, parameters in driver.connection.bound_parameters
                   if name.startswith("oracle_plan_")]
     assert [item[0] for item in plan_calls] == [

@@ -177,7 +177,7 @@ def test_check_missing_runtime_fails_before_credential_provider(
     provider = FailIfPrompted()
     assert main(["--inventory", str(inventory), "check", "pg"]) == 1
     output = capsys.readouterr().out
-    assert "Database Runtime Missing" in output and "dba doctor" in output
+    assert "数据库运行组件缺失" in output and "dba doctor" in output
     assert not provider.called
 
 
@@ -199,7 +199,7 @@ def test_check_missing_credential_is_actionable_without_connecting(
     assert main(["--inventory", str(inventory), "check", "pg"],
                 provider=MissingProvider(), driver=object()) == 1
     rendered = capsys.readouterr().out
-    assert "Credential Not Found" in rendered
+    assert "未找到凭据" in rendered
     assert "dba credentials set <credential_alias>" in rendered
 
 
@@ -208,7 +208,7 @@ def test_no_arguments_and_help_show_common_commands(capsys: pytest.CaptureFixtur
     output = capsys.readouterr().out
     assert "dba check <database_id>" in output and "dba diagnose <database_id> slow" in output
     assert main(["help"]) == 0
-    assert "Common DBA Commands" in capsys.readouterr().out
+    assert "常用 DBA 命令" in capsys.readouterr().out
 
 
 def test_doctor_uses_inventory_and_runtime_info_does_not_load_it(

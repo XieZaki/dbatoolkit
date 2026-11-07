@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$PythonEmbedZip,
     [Parameter(Mandatory = $true)][string]$Wheelhouse,
     [Parameter(Mandatory = $true)][string]$BuildPython,
-    [string]$Version = '0.9.0',
+    [string]$Version = '0.9.1',
     [string]$BuildId = '',
     [string]$MinimumSupportedVersion = '0.9.0',
     [string]$OutputDirectory = 'dist'

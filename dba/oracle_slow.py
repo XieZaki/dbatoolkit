@@ -32,6 +32,31 @@ class OracleSlowReport(DiagnosticReport):
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _SlowReportContext:
+    version: str
+    rac_global_snapshot: bool
+    rac_enabled: bool
+    lock_evidence: bool
+
+
+_SLOW_REPORT_CONTEXT_ATTRIBUTE = "_oracle_slow_report_context"
+
+
+def _slow_report_context(adapter: OracleAdapter, *, refresh: bool = False) -> _SlowReportContext:
+    cached = getattr(adapter, _SLOW_REPORT_CONTEXT_ATTRIBUTE, None)
+    if not refresh and isinstance(cached, _SlowReportContext):
+        return cached
+    context = _SlowReportContext(
+        adapter.get_server_version(),
+        adapter.capabilities["rac_global_snapshot"],
+        adapter.rac_enabled,
+        adapter.capabilities["lock_evidence"],
+    )
+    setattr(adapter, _SLOW_REPORT_CONTEXT_ATTRIBUTE, context)
+    return context
+
+
 def _positive(value: Any) -> int | None:
     return value if type(value) is int and value > 0 else None
 
@@ -491,6 +516,9 @@ def build_slow_report(instance: DatabaseInstance, results: tuple[CollectorResult
 
 
 def diagnose_slow(adapter: OracleAdapter) -> OracleSlowReport:
+    # Snapshot report metadata before the first Collector can close the adapter
+    # after an error. get_server_version() deliberately requires a ready adapter.
+    context = _slow_report_context(adapter, refresh=True)
     collectors = (ActiveSessionsCollector, ActiveRequestsCollector, TransactionsCollector,
                   BlockingCollector, PreviousSQLCollector)
     results: list[CollectorResult] = []
@@ -509,10 +537,10 @@ def diagnose_slow(adapter: OracleAdapter) -> OracleSlowReport:
         if not result.success:
             break
     return build_slow_report(adapter.instance, tuple(results), adapter.settings,
-                             adapter.get_server_version(),
-                             rac_global_snapshot=adapter.capabilities["rac_global_snapshot"],
-                             rac_enabled=adapter.rac_enabled,
-                             lock_evidence=adapter.capabilities["lock_evidence"],
+                             context.version,
+                             rac_global_snapshot=context.rac_global_snapshot,
+                             rac_enabled=context.rac_enabled,
+                             lock_evidence=context.lock_evidence,
                              required_collectors=tuple(required),
                              optional_collectors=optional_collectors_for_adapter(adapter))
 
@@ -528,6 +556,10 @@ _STAGED_COLLECTORS = {
 
 def collect_slow_phase(adapter: OracleAdapter, names: tuple[str, ...],
                        existing: tuple[CollectorResult, ...] = ()) -> tuple[CollectorResult, ...]:
+    # The first stage starts a new report; subsequent stages reuse its context
+    # if an earlier Collector closed the connection. A live reconnect refreshes
+    # the context while preflight is available again.
+    _slow_report_context(adapter, refresh=not existing or adapter._ready)
     results = list(existing)
     have = {item.collector_name for item in results}
     supplemental = bool(existing)
@@ -540,6 +572,7 @@ def collect_slow_phase(adapter: OracleAdapter, names: tuple[str, ...],
                 adapter.connect()
             except Exception:
                 break
+            _slow_report_context(adapter, refresh=True)
             reconnect_pending = False
         result = _STAGED_COLLECTORS[name](adapter).collect(adapter.instance)
         results.append(result)
@@ -554,21 +587,22 @@ def collect_slow_phase(adapter: OracleAdapter, names: tuple[str, ...],
 
 def build_slow_phase_report(adapter: OracleAdapter, results: tuple[CollectorResult, ...],
                             *, emergency: bool) -> OracleSlowReport:
+    context = _slow_report_context(adapter)
     required = (emergency_collectors_for_adapter(adapter) if emergency else
                 required_collectors_for_adapter(
                     adapter, ("active_sessions", "active_requests", "transactions", "blocking")))
     optional = () if emergency else optional_collectors_for_adapter(adapter)
     report = build_slow_report(
-        adapter.instance, results, adapter.settings, adapter.get_server_version(),
-        rac_global_snapshot=adapter.capabilities["rac_global_snapshot"],
-        rac_enabled=adapter.rac_enabled, lock_evidence=adapter.capabilities["lock_evidence"],
+        adapter.instance, results, adapter.settings, context.version,
+        rac_global_snapshot=context.rac_global_snapshot,
+        rac_enabled=context.rac_enabled, lock_evidence=context.lock_evidence,
         required_collectors=required, optional_collectors=optional)
     core = emergency_collectors_for_adapter(adapter)
     by_name = {item.collector_name: item for item in results}
     complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
-                   for name in core) and not (adapter.rac_enabled and not adapter.capabilities["rac_global_snapshot"])
+                   for name in core) and not (context.rac_enabled and not context.rac_global_snapshot)
     full_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
-                        for name in required + optional) and bool(adapter.capabilities["lock_evidence"])
+                        for name in required + optional) and context.lock_evidence
     report.details.update({"diagnostic_phase": "EMERGENCY" if emergency else "FINAL",
                            "emergency_evidence_complete": complete,
                            "emergency_evidence_status": "COMPLETE" if complete else "INCOMPLETE",

@@ -269,7 +269,7 @@ $rules = @($acl.Access | ForEach-Object {{
         with store._connection(True) as connection:
             connection.execute("UPDATE credential_store SET generation=generation+1 WHERE id=1")
             assert journal.exists()
-            _windows_acl(journal)
+            _windows_acl(journal, repair_created_owner=True)
             journal_acl = acl_evidence(journal)
             # Journal Owner and DACL are checked as separate properties too.
             assert journal_acl["Owner"] in {sid, system_sid}

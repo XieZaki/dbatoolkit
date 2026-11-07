@@ -1,6 +1,6 @@
 # Windows 便携版升级与回退指南
 
-版本策略：`0.9.0` Full 是首次安装基线；正式 `0.10.0` 及后续版本同时提供 Full 和 Update。Update 包是独立、完整的目标程序/runtime/SQL/模板/默认驱动载荷，不是依赖其他补丁的增量包。
+版本策略：`0.9.0` Full 是首次安装基线；正式版本从 `0.9.1` 起同时提供 Full 和 Update。Update 包是独立、完整的目标程序/runtime/SQL/模板/默认驱动载荷，不是依赖其他补丁的增量包。
 
 ## 首次安装、换电脑和日常升级
 
@@ -13,8 +13,8 @@
 可用 PowerShell 校验发布文件（与发布页 SHA256SUMS 中记录逐项比对）：
 
 ```powershell
-$Full = '.\DBAToolkit-0.10.0-Windows-x64-Full.zip'
-$Update = '.\DBAToolkit-0.10.0-Windows-x64-Update.zip'
+$Full = '.\DBAToolkit-0.9.1-Windows-x64-Full.zip'
+$Update = '.\DBAToolkit-0.9.1-Windows-x64-Update.zip'
 Get-FileHash -LiteralPath $Full -Algorithm SHA256
 Get-FileHash -LiteralPath $Update -Algorithm SHA256
 ```
@@ -73,9 +73,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 仅在匹配的 Windows x64 构建机、锁定 Runtime/wheelhouse 均已准备时运行：
 
 ```powershell
-.\deployment\build_full.ps1 -Version 0.9.0
-.\deployment\build_update.ps1 -Version 0.9.0
-.\deployment\verify_release.ps1 -Version 0.9.0
+.\deployment\build_full.ps1 -Version 0.9.1
+.\deployment\build_update.ps1 -Version 0.9.1
+.\deployment\verify_release.ps1 -Version 0.9.1
 ```
 
-当前源码版本保持 `0.9.0`；构建脚本拒绝与 `pyproject.toml` 或 `dba.__version__` 不一致的版本。开发 Update 不能伪装为未来正式版本。GitHub Actions 的 Release 需已有匹配版本 tag；工作流不创建 tag。
+当前源码版本为 `0.9.1`；构建脚本拒绝与 `pyproject.toml` 或 `dba.__version__` 不一致的版本。GitHub Actions 的 Release 需已有匹配版本 tag；工作流不创建 tag。

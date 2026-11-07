@@ -301,13 +301,13 @@ def test_sqlserver_top_sql_cli_json_and_html_share_the_contract() -> None:
     assert incident.status == "UNKNOWN" and incident.observed_now == "NOT_ASSESSED"
     model = build_report_model(report, incident)
     html = HtmlReportRenderer().render(model)
-    assert "Top SQL" in html and "0x01" in html and "CUMULATIVE" in html
-    assert "Collection Scope" in html and "INSTANCE" in html
+    assert "Top SQL" in html and "0x01" in html and "累计统计" in html
+    assert "采集范围" in html and "实例级" in html
     assert "SELECT " not in html
     from dba.presentation import render_human
     cli = render_human("top-sql", result)
     assert "total_cpu_time" in cli
-    assert "Collection Scope" in cli and "INSTANCE" in cli
+    assert "采集范围" in cli and "实例级" in cli
     assert "0x01" in cli and "1000" in cli
 
 

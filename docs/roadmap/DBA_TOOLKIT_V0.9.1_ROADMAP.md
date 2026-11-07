@@ -4,7 +4,7 @@
 
 This document defines product direction, phase boundaries, dependencies, entry criteria, exit criteria, and work that is intentionally deferred. It does not maintain task status. Task state exists only in `DBA_TOOLKIT_V0.9.1_BACKLOG.md`; the current pointer is in `DBA_TOOLKIT_V0.9.1_PROGRESS.md`; evidence is in `DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md`.
 
-The package version remains `0.9.0` until the user explicitly approves a version change. “V0.9.1” in these planning filenames identifies the target planning stream, not a completed release.
+The user explicitly approved the product version change and release of `0.9.1` on 2026-11-07. “V0.9.1” in these planning filenames identifies the target planning stream; a completed release requires the tagged GitHub Actions build and all verified Release assets.
 
 ## 2. Product goal
 

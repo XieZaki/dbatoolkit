@@ -487,8 +487,8 @@ def test_oracle_optional_denials_preserve_healthy_core_health() -> None:
     assert summary.observed_now.startswith("No core storage risk")
     assert not summary.missing_evidence
     assert "disk_fra" in summary.unavailable_optional_evidence
-    assert "No automatic or destructive remediation generated." in render_console_summary(summary)
-    assert "No session termination command generated." not in render_console_summary(summary)
+    assert "未生成自动或破坏性处置操作。" in render_console_summary(summary)
+    assert "未生成会话终止参考命令。" not in render_console_summary(summary)
     assert report.details["other"]["active_transaction_count"] is None
 
 

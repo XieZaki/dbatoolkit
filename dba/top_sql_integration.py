@@ -142,7 +142,7 @@ def associate_slow_sql_text(
                 clipped = sql_text[:policy.max_sql_chars]
                 was_truncated = len(sql_text) > policy.max_sql_chars
                 if was_truncated:
-                    clipped += "\n[SQL text omitted by human report limit.]"
+                    clipped += "\n[SQL 文本因人工报告长度上限而省略。]"
                 association = {
                     "status": "MATCHED",
                     "source": "slow.active_requests",

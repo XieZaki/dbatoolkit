@@ -12,7 +12,47 @@ ASSIGNMENT = re.compile(
     r"""(?i)\b(password|pwd|secret|token)["']?\s*[:=]\s*"""
     r"""(?:\{(?:[^}]|}})*\}|N?"(?:[^"\\]|\\.|"")*"|N?'(?:[^'\\]|\\.|'')*'|[^;\s,]+)"""
 )
-URI = re.compile(r"([a-zA-Z][\w+.-]*://)[^\s/@]+:[^\s/@]*@")
+
+
+def _redact_uri_credentials(value: str) -> str:
+    """Hide URI user-info without retrying every position on long non-URI text."""
+    pieces: list[str] = []
+    copied_until = 0
+    search_from = 0
+    while True:
+        separator = value.find("://", search_from)
+        if separator < 0:
+            break
+        scheme_start = separator
+        while scheme_start > 0:
+            char = value[scheme_start - 1]
+            if not (char.isalnum() or char in "_+.-"):
+                break
+            scheme_start -= 1
+        scheme = value[scheme_start:separator]
+        if (scheme_start < copied_until or not scheme or not scheme[0].isascii()
+                or not scheme[0].isalpha()):
+            search_from = separator + 3
+            continue
+
+        authority_start = separator + 3
+        authority_end = authority_start
+        while authority_end < len(value) and not value[authority_end].isspace() \
+                and value[authority_end] != "/":
+            authority_end += 1
+        authority = value[authority_start:authority_end]
+        at_sign = authority.find("@")
+        if at_sign < 0 or ":" not in authority[:at_sign]:
+            search_from = max(authority_end, separator + 3)
+            continue
+
+        user_info_end = authority_start + at_sign
+        pieces.extend((value[copied_until:authority_start], "[REDACTED]@"))
+        copied_until = user_info_end + 1
+        search_from = copied_until
+
+    pieces.append(value[copied_until:])
+    return "".join(pieces)
 
 
 def redact(value: Any) -> Any:
@@ -25,7 +65,7 @@ def redact(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [redact(v) for v in value]
     if isinstance(value, str):
-        return URI.sub(r"\1[REDACTED]@", ASSIGNMENT.sub(r"\1=[REDACTED]", value))
+        return _redact_uri_credentials(ASSIGNMENT.sub(r"\1=[REDACTED]", value))
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if value is None or isinstance(value, (bool, int, float)):

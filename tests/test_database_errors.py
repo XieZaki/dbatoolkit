@@ -115,7 +115,7 @@ def test_human_and_json_output_preserve_vendor_message_and_redact_secret() -> No
     assert "Unknown database 'missing'" in human and "DATABASE_NOT_FOUND" in human
     assert "Unknown database 'missing'" in payload and "DATABASE_NOT_FOUND" in payload
     assert SECRET not in human + payload
-    assert "Database" in human and "missing" in human
+    assert "数据库" in human and "missing" in human
 
 
 def test_safe_formatter_logs_sanitized_database_error_fields() -> None:

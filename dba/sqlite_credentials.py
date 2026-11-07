@@ -40,7 +40,10 @@ def _failure(kind: str) -> ToolkitError:
     return ToolkitError(kind, messages[kind])
 
 
-def _windows_acl(path: Path, *, initialize: bool = False) -> None:
+def _windows_acl(
+    path: Path, *, initialize: bool = False, allow_default_admin_owner: bool = False,
+    repair_created_owner: bool = False,
+) -> None:
     """Private DACL: only current user and SYSTEM; directory ACEs inherit to journals."""
     from ctypes import wintypes
 
@@ -71,6 +74,7 @@ def _windows_acl(path: Path, *, initialize: bool = False) -> None:
     descriptor = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
     owner = ctypes.c_void_p()
+    owner_value = ""
     advapi.GetNamedSecurityInfoW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
                                             ctypes.c_void_p, ctypes.c_void_p,
                                             ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
@@ -91,8 +95,7 @@ def _windows_acl(path: Path, *, initialize: bool = False) -> None:
         if not advapi.ConvertSidToStringSidW(owner, ctypes.byref(owner_text)):
             raise _failure("CredentialStoreUnsafe")
         try:
-            if owner_text.value not in {sid, "S-1-5-18"}:
-                raise _failure("CredentialStoreUnsafe")
+            owner_value = owner_text.value or ""
         finally:
             kernel.LocalFree(owner_text)
         for index in range(count):
@@ -111,6 +114,23 @@ def _windows_acl(path: Path, *, initialize: bool = False) -> None:
                 kernel.LocalFree(trustee)
     finally:
         kernel.LocalFree(descriptor)
+    if owner_value not in {sid, "S-1-5-18"}:
+        # SQLite creates rollback journals with the token's default Owner.
+        # Hosted Windows runners use the Administrators group as that Owner.
+        # While an existing journal is awaiting SQLite recovery/locking, allow
+        # only this known transient Owner after the DACL has been validated.
+        # The transaction owner repairs it before commit; persisted Store files
+        # continue to require current-user/SYSTEM ownership.
+        if owner_value != "S-1-5-32-544":
+            raise _failure("CredentialStoreUnsafe")
+        shell = ctypes.WinDLL("shell32", use_last_error=True)
+        shell.IsUserAnAdmin.restype = ctypes.c_int
+        if not shell.IsUserAnAdmin():
+            raise _failure("CredentialStoreUnsafe")
+        if repair_created_owner:
+            _windows_acl(path, initialize=True)
+        elif not allow_default_admin_owner:
+            raise _failure("CredentialStoreUnsafe")
 
 
 class SQLiteCredentialStore(EncryptedFileCredentialStore):
@@ -147,7 +167,7 @@ class SQLiteCredentialStore(EncryptedFileCredentialStore):
                 if sidecar.is_symlink() or sidecar.stat().st_file_attributes & 0x400:
                     raise _failure("CredentialStoreUnsafe")
                 try:
-                    _windows_acl(sidecar)
+                    _windows_acl(sidecar, allow_default_admin_owner=suffix == "-journal")
                 except ToolkitError:
                     if sidecar.exists():
                         raise
@@ -190,6 +210,9 @@ class SQLiteCredentialStore(EncryptedFileCredentialStore):
                     raise _failure("CredentialStoreUnsupported")
                 connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
                 yield connection
+                journal = Path(str(self.path) + "-journal")
+                if write and journal.exists():
+                    _windows_acl(journal, repair_created_owner=True)
                 connection.commit()
             except sqlite3.Error as exc:
                 code = getattr(exc, "sqlite_errorcode", 0) & 255

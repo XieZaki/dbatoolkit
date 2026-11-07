@@ -170,7 +170,7 @@ def test_ambiguous_native_identity_is_unmatched_and_never_displays_candidate_sql
     section = next(part for part in model.sections if part.section_id == "top-sql")
     cli_text = render_report_section_text(section)
     html = HtmlReportRenderer().render(model)
-    assert "UNMATCHED" in cli_text and "UNMATCHED" in html
+    assert "身份未匹配" in cli_text and "身份未匹配" in html
     for candidate in (
         "FUZZY_ONLY_SENTINEL", "EXACT_MATCH_SENTINEL",
         "AMBIGUOUS_SQL_ONE_SENTINEL", "AMBIGUOUS_SQL_TWO_SENTINEL",
@@ -354,7 +354,7 @@ def test_cli_and_html_use_the_same_bounded_top_sql_report_section() -> None:
     section = next(item for item in model.sections if item.section_id == "top-sql")
     cli_text = render_report_section_text(section)
     html = HtmlReportRenderer().render(model)
-    for evidence in ("total_exec_time", "CUMULATIVE", "queryid=17", "MATCHED"):
+    for evidence in ("total_exec_time", "累计统计", "queryid=17", "身份已匹配"):
         assert evidence in cli_text and evidence in html
     assert "Top SQL 排名反映数据库统计视图中的累计表现，不代表当前故障根因。" in cli_text
     assert "SELECT" in cli_text and "SELECT" in html
@@ -379,8 +379,9 @@ def test_unmatched_top_sql_never_displays_sql_details() -> None:
     model = build_report_model(report, build_incident_summary(report))
     section = next(item for item in model.sections if item.section_id == "top-sql")
     html = HtmlReportRenderer().render(model)
-    assert "UNMATCHED" in render_report_section_text(section) and "MUST_NOT_BE_SHOWN" not in render_report_section_text(section)
-    assert "UNMATCHED" in html and "MUST_NOT_BE_SHOWN" not in html
+    assert "身份未匹配" in render_report_section_text(section)
+    assert "MUST_NOT_BE_SHOWN" not in render_report_section_text(section)
+    assert "身份未匹配" in html and "MUST_NOT_BE_SHOWN" not in html
 
 
 def test_status_only_top_sql_is_presented_without_marking_slow_incomplete() -> None:
@@ -393,5 +394,5 @@ def test_status_only_top_sql_is_presented_without_marking_slow_incomplete() -> N
     }
     model = build_report_model(report, build_incident_summary(report))
     section = next(item for item in model.sections if item.section_id == "top-sql")
-    assert "NOT_COLLECTED" in render_report_section_text(section)
+    assert "未采集" in render_report_section_text(section)
     assert report.details.get("incomplete") is False

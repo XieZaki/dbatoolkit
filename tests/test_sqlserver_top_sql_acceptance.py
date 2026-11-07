@@ -351,8 +351,8 @@ def test_one_collector_result_drives_json_html_and_human_cli(
     assert json_rows[0]["plan_fields"]["plan_generation_num"] == PLAN_FIELDS["plan_generation_num"]
     assert html_parity["status"] == "MATCH"
     assert human_parity["classification"] == "MATCH"
-    assert "CUMULATIVE" in human_text and "INSTANCE" in human_text
-    assert "CUMULATIVE" in html_page and "INSTANCE" in html_page
+    assert "累计统计" in human_text and "实例级" in human_text
+    assert "累计统计" in html_page and "实例级" in html_page
 
 
 @pytest.mark.parametrize("corruption", [

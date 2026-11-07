@@ -150,7 +150,7 @@ def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() 
     assert "<img src=x" not in page
     assert "<script>alert(1)</script>" not in page
     assert 'data-copy="UPDATE t SET value = &#x27;&lt;script&gt;alert(1)' in page
-    assert '<details' in page and "Session 59 SQL" in page
+    assert '<details' in page and "会话 59 SQL" in page
     assert '{"session_id"' not in page and "{'session_id'" not in page
     assert "https://" not in page and "http://" not in page
     assert '<script src=' not in page and "<script>alert(1)</script>" not in page
@@ -373,7 +373,7 @@ def test_report_policy_bounds_high_concurrency_and_discloses_omissions() -> None
     page = render_bounded(build_report_model(report, summary, policy=policy),
                           HtmlReportRenderer().render, policy)
     assert "省略" in page
-    assert "人工处置参考" in page and "现场诊断结论" in page
+    assert "人工处置参考" in page and "根因候选" in page
     assert "长运行请求 303 条 · 阻塞相关 302 条 · 非阻塞 1 条" in page
     assert len(page.encode("utf-8")) < policy.hard_report_bytes
     assert page.count("<tr>") < 100
@@ -403,9 +403,9 @@ def test_hard_report_size_fallback_keeps_incident_and_recovery() -> None:
                           HtmlReportRenderer().render, policy)
     assert "故障概况" in page
     assert "人工处置参考" in page
-    assert "现场诊断结论" in page
+    assert "根因候选" in page
     assert "证据完整性" in page
-    assert "Report evidence was reduced" in page
+    assert "报告达到大小上限，已收敛部分证据内容" in page
     assert len(page.encode("utf-8")) <= policy.hard_report_bytes
 
 
@@ -431,7 +431,7 @@ def test_displayed_sql_obeys_report_character_policy() -> None:
     policy = HumanReportPolicy(max_sql_chars=32)
     page = HtmlReportRenderer().render(build_report_model(
         report, build_incident_summary(report, "reports/report.html"), policy=policy))
-    assert "SQL text omitted by human report limit" in page
+    assert "SQL 文本因人工报告长度上限而省略" in page
     assert "x" * 100 not in page
 
 
@@ -453,7 +453,7 @@ def test_default_human_report_budget_for_high_session_counts(session_count: int)
         "roots": [57], "children": {57: list(range(1, blocked_count + 1))}, "anomalies": []}
     summary = build_incident_summary(report, "reports/synthetic.html")
     page = render_bounded(build_report_model(report, summary), HtmlReportRenderer().render)
-    assert "人工处置参考" in page and "现场诊断结论" in page
+    assert "人工处置参考" in page and "根因候选" in page
     assert "省略" in page
     assert len(page.encode("utf-8")) <= DEFAULT_HUMAN_REPORT_POLICY.hard_report_bytes
     assert len(page.encode("utf-8")) < 5 * 1024 * 1024
@@ -494,10 +494,12 @@ def test_mysql_top_sql_quality_distinguishes_collection_from_partial_completenes
     rows = {row[0]: row for row in quality.tables[0].rows}
 
     assert rows["mysql_top_sql"][1] == "PARTIAL"
-    assert "Collection status=COLLECTED" in rows["mysql_top_sql"][2]
-    assert "completeness=PARTIAL" in rows["mysql_top_sql"][2]
+    assert "采集状态=COLLECTED" in rows["mysql_top_sql"][2]
+    assert "证据完整性=PARTIAL" in rows["mysql_top_sql"][2]
     assert "COUNTER_EPOCH_UNKNOWN" in rows["mysql_top_sql"][2]
     assert "SOURCE_COVERAGE_INCOMPLETE" in rows["mysql_top_sql"][2]
+    page = HtmlReportRenderer().render(model)
+    assert "采集状态=已采集" in page and "证据完整性=部分可用" in page
     top_sql = next(section for section in model.sections if section.section_id == "top-sql")
     top_sql_fields = dict(top_sql.fields)
     assert top_sql_fields["Database Engine"] == "MySQL"
@@ -606,10 +608,10 @@ def test_postgresql_slow_version_is_readable_and_retains_raw_server_version_num(
     report.details.update(version="160015", server_version_num=160015)
     model = build_report_model(report, build_incident_summary(report))
     metadata = dict(model.metadata)
-    assert metadata["版本"] == "16.15"
-    assert metadata["server_version_num（原始值）"] == "160015"
+    assert metadata["Version"] == "16.15"
+    assert metadata["server_version_num (raw)"] == "160015"
     page = HtmlReportRenderer().render(model)
-    assert "16.15" in page and "160015" in page
+    assert "版本" in page and "16.15" in page and "160015" in page
 
 
 @pytest.mark.parametrize("database_type", [DatabaseType.MYSQL, DatabaseType.POSTGRESQL])
@@ -635,7 +637,7 @@ def test_independent_top_sql_report_uses_statistics_summary_and_keeps_native_ide
 
     for expected in ("数据库类型", "PostgreSQL", "数据库版本", "16.15", "采集状态",
                      "证据完整性", "部分可用", "返回记录数", "排序指标", "指标单位",
-                     "CUMULATIVE", "统计范围", "数据来源", "采集时间", "queryid=8107"):
+                     "累计统计", "统计范围", "数据来源", "采集时间", "queryid=8107"):
         assert expected in page
     for inappropriate in ("严重程度", "主要问题", "当前观测", "采集开始", "初报完成", "N/A"):
         assert inappropriate not in page

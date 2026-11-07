@@ -150,7 +150,7 @@
     </aside>
     <main class="main">
       <div class="toolbar">
-        <span class="toolbar-label">DBA TOOLKIT / SLOW DIAGNOSE</span>
+          <span class="toolbar-label">DBA TOOLKIT / 慢 SQL 诊断</span>
         <div class="toolbar-actions">
           <button class="button" id="toggleDetails" type="button" aria-expanded="false"><span>展开全部</span></button>
           <button class="button" id="copySummary" type="button" data-copy="{{SUMMARY_COPY}}">复制摘要</button>
@@ -158,13 +158,13 @@
         </div>
       </div>
       <header class="hero" id="summary">
-        <div class="hero-top"><span class="eyebrow">Slow Diagnose · 只读现场快照</span><span class="status-pill {{STATUS_CLASS}}"><i class="status-dot" aria-hidden="true"></i>{{STATUS}} · {{SEVERITY}}</span></div>
+        <div class="hero-top"><span class="eyebrow">慢 SQL 诊断 · 只读现场快照</span><span class="status-pill {{STATUS_CLASS}}"><i class="status-dot" aria-hidden="true"></i>{{STATUS}} · {{SEVERITY}}</span></div>
         <h1>{{TITLE}}</h1>
         <p class="hero-description">主要问题：{{PRIMARY_PROBLEM}} · 当前观测：{{OBSERVED_NOW}} · 证据完整性：{{COMPLETENESS}} · 快照一致性：{{SNAPSHOT_CONSISTENCY}}</p>
         <div class="hero-meta">{{METADATA}}</div>
       </header>
       <section class="overview" aria-labelledby="overview-heading">
-        <div class="section-heading"><h2 id="overview-heading">故障概况</h2><p>摘要仅呈现本次 ReportModel 中已有证据</p></div>
+        <div class="section-heading"><h2 id="overview-heading">故障概况</h2><p>摘要仅呈现本次采集已有证据</p></div>
         <div class="kpi-grid">{{METRICS}}</div>
       </section>
       <section class="panel-group" id="root-assessment"><div class="section-heading"><h2>根阻塞判断</h2><p>根候选来自已采样阻塞关系</p></div>{{ROOT_ASSESSMENT}}</section>
@@ -173,7 +173,7 @@
       <section class="panel-group" id="evidence"><div class="section-heading"><h2>诊断证据</h2><div class="legend" aria-label="状态图例"><span><i class="red" aria-hidden="true"></i>已确认参与阻塞</span><span><i class="green" aria-hidden="true"></i>完整采样确认未参与</span><span><i class="amber" aria-hidden="true"></i>部分或身份未知</span></div></div>{{EVIDENCE}}</section>
       <section class="panel-group" id="collection-quality-panel"><div class="section-heading"><h2>采集完整性</h2><p>完整采样不代表所有风险都已排除</p></div>{{QUALITY}}</section>
       <section class="panel-group" id="session-appendix"><div class="section-heading"><h2>会话附录</h2><p>搜索仅过滤报告已展示行</p></div><div class="appendix-tools"><span id="filteredCount" class="toolbar-label"></span><label><span aria-hidden="true">⌕</span><input id="sessionSearch" type="search" aria-label="搜索已展示的会话" placeholder="筛选会话 ID、用户或来源信息"></label></div>{{APPENDIX}}<div id="noResults" class="empty-filter">已展示的会话行中没有匹配项；未采集或被省略的会话不在本地筛选范围内。</div></section>
-      <footer class="foot"><span>DBA Toolkit / Slow Diagnose</span><span>自包含 · 离线可用 · 只读证据 · 人工复核</span></footer>
+      <footer class="foot"><span>DBA Toolkit / 慢 SQL 诊断</span><span>自包含 · 离线可用 · 只读证据 · 人工复核</span></footer>
     </main>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

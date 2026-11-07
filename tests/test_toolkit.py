@@ -27,7 +27,9 @@ from dba.inventory import Inventory, ValidationError
 from dba.logging import SafeFormatter, redact
 from dba.registry import (
     DEFAULT_MAX_RESULT_BYTES,
+    MAX_METADATA_SOURCE_BYTES,
     MAX_SQL_ROWS,
+    MAX_SQL_SOURCE_BYTES,
     MAX_SQL_TIMEOUT_SECONDS,
     SqlScriptRegistry,
     fetch_bounded_rows,
@@ -195,6 +197,27 @@ def test_registry_rejects_unbounded_metadata(
         SqlScriptRegistry(tmp_path).load(script)
 
 
+@pytest.mark.parametrize("source_limit", ("sql", "metadata"))
+def test_registry_rejects_oversized_source(
+    script: Path, tmp_path: Path, source_limit: str,
+) -> None:
+    path = script if source_limit == "sql" else script.with_suffix(".yaml")
+    limit = MAX_SQL_SOURCE_BYTES if source_limit == "sql" else MAX_METADATA_SOURCE_BYTES
+    path.write_bytes(b"x" * (limit + 1))
+    with pytest.raises(ValidationError, match="size limit"):
+        SqlScriptRegistry(tmp_path).load(script)
+
+
+def test_registry_rejects_duplicate_metadata_keys(script: Path, tmp_path: Path) -> None:
+    script.with_suffix(".yaml").write_text(
+        "name: probe\nname: overridden\ndatabase_type: sqlserver\nrisk: READ_ONLY\n"
+        "timeout_seconds: 5\nmax_rows: 1\nreviewed: true\ndescription: fixture\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError, match="Duplicate YAML key"):
+        SqlScriptRegistry(tmp_path).load(script)
+
+
 def test_registry_revalidates_metadata_digest_without_retaining_probe_scripts(
     script: Path, tmp_path: Path,
 ) -> None:
@@ -287,6 +310,23 @@ def test_metadata_rejects(script: Path, tmp_path: Path, key: str, value: object)
         "SELECT pg_terminate_backend(12)",
         "SELECT pg_cancel_backend(12)",
         "SELECT 1 INTO x",
+        "SELECT id FROM t FOR KEY SHARE",
+        "SELECT id FROM t FOR/*comment*/KEY SHARE",
+        "SELECT id FROM t FOR/*comment*/SHARE",
+        "SELECT id FROM t LOCK IN SHARE MODE",
+        "SELECT id FROM t LOCK/*comment*/IN SHARE MODE",
+        "SELECT id FROM t WITH (UPDLOCK)",
+        "SELECT id FROM t WITH (HOLDLOCK)",
+        "SELECT id FROM t WITH (TABLOCKX)",
+        "SELECT NEXT VALUE FOR dbo.sequence_name",
+        "SELECT NEXT/*comment*/VALUE FOR dbo.sequence_name",
+        "SELECT set_config('default_transaction_read_only', 'off', false)",
+        "SELECT set_config('statement_timeout', '0', false)",
+        "SELECT pg_advisory_lock(12)",
+        "SELECT pg_try_advisory_xact_lock(12)",
+        "SELECT GET_LOCK('dba-toolkit', 1)",
+        "SELECT RELEASE_LOCK('dba-toolkit')",
+        "SELECT RELEASE_ALL_LOCKS()",
         "SELECT 1; EXEC x",
         "SELECT 1; SELECT 2",
         "SELECT 1; -- trailing comment\nSELECT 2",
@@ -305,6 +345,32 @@ def test_single_statement_check_ignores_quoted_and_trailing_comment_semicolons()
     check_sql("SELECT 'first; second'")
     check_sql("SELECT $$first; second$$")
     check_sql("SELECT 1; -- a trailing comment; is not a second statement")
+
+
+def test_sqlserver_temp_table_hash_does_not_start_a_comment() -> None:
+    check_sql("SELECT * FROM #temp", DatabaseType.SQLSERVER)
+    with pytest.raises(ValidationError, match="one SQL statement"):
+        check_sql("SELECT * FROM #temp; SELECT 2", DatabaseType.SQLSERVER)
+    with pytest.raises(ValidationError, match="one SQL statement"):
+        check_sql("SELECT 1 # 2; SELECT 3", DatabaseType.POSTGRESQL)
+
+
+@pytest.mark.parametrize("database_type", (DatabaseType.MYSQL, None))
+def test_hash_comment_remains_a_comment_for_mysql(
+    database_type: DatabaseType | None,
+) -> None:
+    check_sql("SELECT 1 # trailing comment; not a second statement", database_type)
+
+
+def test_carriage_return_ends_line_comment_for_statement_check() -> None:
+    with pytest.raises(ValidationError, match="one SQL statement"):
+        check_sql("SELECT 1; -- trailing comment\rSELECT 2")
+
+
+def test_mysql_double_dash_requires_whitespace_before_comment() -> None:
+    with pytest.raises(ValidationError, match="one SQL statement"):
+        check_sql("SELECT 1--x; SELECT 2", DatabaseType.MYSQL)
+    check_sql("SELECT 1-- comment; trailing comment", DatabaseType.MYSQL)
 
 
 def test_registry_refuses_dangerous(script: Path, tmp_path: Path) -> None:
@@ -422,7 +488,7 @@ def test_production_adapter_rejects_mock() -> None:
 def test_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     args = ["--inventory", str(ROOT / "examples/inventory/demo.yaml"), "--sql-root", str(ROOT / "sql")]
     assert main([*args, "validate"]) == 0
-    assert "Validation OK" in capsys.readouterr().out
+    assert "校验通过" in capsys.readouterr().out
     assert main([*args, "list", "--type", "postgresql"]) == 0
     output = capsys.readouterr().out
     assert "demo-postgresql" in output and "demo-sqlserver" not in output

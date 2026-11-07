@@ -250,10 +250,10 @@ def test_cli_plan_report_and_no_secret(tmp_path: Path, capsys: pytest.CaptureFix
     assert result["incident_summary"]["report_path"] == str(report_path)
     html = report_path.read_text(encoding="utf-8")
     assert "Execution Plan XML" not in html
-    assert "Raw Execution Plan" in html
+    assert "原始执行计划" in html
     assert "ShowPlanXML" not in html
-    assert "Important Operators" in html and "Warnings and Index Evidence" in html
-    assert "Missing Index Evidence" in html and "Implicit Conversion" in html
+    assert "关键算子" in html and "警告与索引证据" in html
+    assert "缺失索引证据" in html and "隐式转换" in html
     assert report_path.with_suffix(".sqlplan").exists()
     assert "ShowPlanXML" in report_path.with_suffix(".sqlplan").read_text(encoding="utf-8")
     assert "private" not in html
@@ -268,7 +268,7 @@ def test_cli_plan_report_and_no_secret(tmp_path: Path, capsys: pytest.CaptureFix
     human_args = [*args[:-1], "--report", str(console_path)]
     assert main(human_args, provider=MemoryCredentialProvider(), driver=console_driver) == 0
     human = capsys.readouterr().out
-    assert "Incident Summary" in human and "Detailed Report" in human
+    assert "事件摘要" in human and "详细报告" in human
     assert "SELECT private" not in human and "Index Scan" not in human
 
 

@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$PackageRoot = 'dist\DBAToolkit-0.9.0-Windows-x64-Portable')
+param([string]$PackageRoot = 'dist\DBAToolkit-0.9.1-Windows-x64-Portable')
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path

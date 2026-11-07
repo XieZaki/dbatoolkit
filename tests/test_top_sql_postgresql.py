@@ -490,7 +490,7 @@ def test_slow_top_sql_is_opt_in_and_appends_one_existing_collector_result(
     assert top_sql["items"][0]["sql_text_association"]["status"] == "UNMATCHED"
     html = report_path.read_text(encoding="utf-8")
     assert "Top SQL 排名反映数据库统计视图中的累计表现" in html
-    assert "queryid=77" in html and "CUMULATIVE" in html
+    assert "queryid=77" in html and "累计统计" in html
 
 
 def test_pg_top_sql_one_result_drives_json_cli_and_offline_html() -> None:
@@ -506,5 +506,5 @@ def test_pg_top_sql_one_result_drives_json_cli_and_offline_html() -> None:
     html = HtmlReportRenderer().render(build_report_model(report, incident))
     assert json_payload["items"] == payload["items"]
     assert "queryid=89" in cli and "55.5" in cli and "planning_time_included=False" in cli
-    assert "queryid=89" in html and "55.5" in html and "Planning Time Included: NO" in html
+    assert "queryid=89" in html and "55.5" in html and "是否包含规划耗时" in html and "否" in html
     assert fake.parameters == (10, "total_exec_time")

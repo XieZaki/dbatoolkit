@@ -379,7 +379,7 @@ def test_mysql_top_sql_same_result_drives_json_human_and_offline_html() -> None:
     })
     html = HtmlReportRenderer().render(build_report_model(report, build_incident_summary(report)))
     assert json_payload["items"] == payload["items"]
-    assert "digest=a1" in human and "2.5" in human and "CUMULATIVE" in human
+    assert "digest=a1" in human and "2.5" in human and "累计统计" in human
     assert "digest=a1" in html and "2.5" in html and "sum_timer_wait" in html
     assert "DIGEST_TEXT" not in html and "SELECT " not in html
 

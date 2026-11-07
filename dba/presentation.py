@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -11,6 +12,14 @@ from typing import Any
 from dba.core import DiagnosticReport
 from dba.incident import IncidentSummary
 from dba.logging import redact
+from dba.reporting.normalizers import (
+    display_database_type,
+    display_error_message,
+    display_error_title,
+    display_label,
+    display_message,
+    display_value,
+)
 
 
 class OutputMode(StrEnum):
@@ -45,19 +54,45 @@ class StatusResult:
 
 def render_json(value: Any) -> str:
     payload = asdict(value) if hasattr(value, "__dataclass_fields__") else value
-    return json.dumps(redact(payload), ensure_ascii=False, indent=2, default=str)
+    safe_payload = redact(payload)
+    return json.dumps(_localize_json_messages(safe_payload), ensure_ascii=False, indent=2, default=str)
+
+
+def _localize_json_messages(value: Any, *, vendor_evidence: bool = False) -> Any:
+    """Translate exact fixed prose fields while preserving enums and vendor evidence."""
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            is_vendor = vendor_evidence or key in {"error", "database_error", "vendor_error"}
+            if (not is_vendor and key in {"error_message", "message", "reason", "hint", "guidance",
+                                          "recommendation", "action", "impact", "interpretation"}
+                    and isinstance(item, str)):
+                result[key] = display_message(item)
+            else:
+                result[key] = _localize_json_messages(item, vendor_evidence=is_vendor)
+        return result
+    if isinstance(value, list):
+        return [_localize_json_messages(item, vendor_evidence=vendor_evidence) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_localize_json_messages(item, vendor_evidence=vendor_evidence) for item in value)
+    return value
 
 
 def _line(label: str, value: Any) -> str:
     safe = redact(value)
-    return f"  {label:<24}{safe if safe not in (None, '') else 'UNKNOWN'}"
+    shown = (display_database_type(str(safe))
+             if label.casefold() in {"type", "database type", "database engine"} and safe is not None
+             else display_value(safe))
+    if isinstance(shown, str):
+        shown = display_message(shown)
+    return f"  {display_label(label):<24}{shown if shown not in (None, '') else '未知'}"
 
 
 def _first(row: dict[str, Any], *names: str) -> Any:
     return next((row[name] for name in names if row.get(name) is not None), None)
 
 
-def render_human(command: str, value: Any) -> str:
+def _render_human(command: str, value: Any) -> str:
     """Render common results without coupling domain modules to the terminal."""
     data = asdict(value) if hasattr(value, "__dataclass_fields__") else value
     if isinstance(data, dict) and data.get("error_type"):
@@ -324,6 +359,41 @@ def render_human(command: str, value: Any) -> str:
     return _render_error(data) if isinstance(data, dict) and data.get("error_type") else _render_generic(command, data)
 
 
+def render_human(command: str, value: Any) -> str:
+    """Render common CLI results with Chinese interface labels and headings."""
+    return _localize_console_text(_render_human(command, value))
+
+
+def _localize_console_text(value: str) -> str:
+    """Translate only known UI text/labels; retain SQL, identifiers, and vendor evidence."""
+    localized: list[str] = []
+    for line in value.splitlines():
+        leading = line[:len(line) - len(line.lstrip())]
+        body = line[len(leading):]
+        exact = display_message(body)
+        if exact != body:
+            localized.append(leading + exact)
+            continue
+        delimiter = next((item for item in (": ", "：") if item in body), None)
+        if delimiter is not None:
+            label, separator, content = body.partition(delimiter)
+            shown_label = display_label(label)
+            shown_value = display_message(str(display_value(content)))
+            localized.append(f"{leading}{shown_label}{separator}{shown_value}")
+            continue
+        aligned = re.match(r"^(?P<label>[^\s].*?)(?P<separator>\s{2,})(?P<content>\S.*)$", body)
+        if aligned is not None:
+            label = aligned.group("label").strip()
+            content = aligned.group("content").strip()
+            shown_label = display_label(label)
+            shown_value = display_message(str(display_value(content)))
+            if shown_label != label or shown_value != content:
+                localized.append(f"{leading}{shown_label}{aligned.group('separator')}{shown_value}")
+                continue
+        localized.append(leading + display_label(body))
+    return "\n".join(localized)
+
+
 def render_incident_summary(value: IncidentSummary | dict[str, Any], verbose: bool = False) -> str:
     """Render the compact DBA response view; full evidence remains in reports."""
     data = asdict(value) if isinstance(value, IncidentSummary) else value
@@ -425,7 +495,7 @@ def render_incident_summary(value: IncidentSummary | dict[str, Any], verbose: bo
                 lines.append(f"  {item.get('collector')}: success={item.get('success')}, "
                              f"truncated={item.get('truncated')}, rows={item.get('row_count')}")
     lines.extend(["", "Detailed Report", f"  {data.get('report_path') or 'Unavailable'}"])
-    return "\n".join(lines)
+    return _localize_console_text("\n".join(lines))
 
 
 def render_oracle_plan_human(report: Any, report_path: str) -> str:
@@ -470,7 +540,7 @@ def render_oracle_plan_human(report: Any, report_path: str) -> str:
     lines.extend(("", f"HTML report: {report_path}",
                   "Plan is read from the current shared pool; cursor load generation is not captured.",
                   "Adaptive plan candidate/final branches are not classified."))
-    return "\n".join(lines)
+    return _localize_console_text("\n".join(lines))
 
 
 def _line_value(value: Any) -> str:
@@ -532,7 +602,7 @@ def render_top_sql_human(data: Any) -> str:
                              if key in allowed_metadata)
         if summary:
             lines.extend(["", "Source Metadata", "  " + summary[:512]])
-    return "\n".join(lines)
+    return _localize_console_text("\n".join(lines))
 
 
 def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str, Any], ...] = (),
@@ -891,7 +961,7 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                   "补充证据：待采集" if pending else "补充证据：无额外查询",
                   "采样为串行 BEST-EFFORT 快照，不是原子快照。", "=" * 52,
                   "正在采集补充证据…" if pending else "无额外补充查询，正在生成 HTML 报告…"))
-    return "\n".join(lines)
+    return _localize_console_text("\n".join(lines))
 
 
 def render_replication_summary(report: Any, report_path: str, verbose: bool = False) -> str:
@@ -948,20 +1018,12 @@ def render_replication_summary(report: Any, report_path: str, verbose: bool = Fa
         for member in members[:15]:
             lines.append(f"  {member.get('name')}: {member.get('role')} / {member.get('status')} "
                          f"({member.get('vendor_status')})")
-    return "\n".join(lines)
+    return _localize_console_text("\n".join(lines))
 
 
 def _render_error(data: dict[str, Any]) -> str:
     kind = str(data.get("error_type", "Operation Failed"))
-    title = {
-        "CredentialNotFound": "Credential Not Found",
-        "CredentialStoreUnavailable": "Credential Store Error",
-        "CredentialStoreFailed": "Credential Store Error",
-        "DriverUnavailable": "Database Runtime Missing",
-        "PrivilegedAccount": "Monitoring Account Rejected",
-        "QueryDenied": "Database Rejected Query",
-        "ConnectionFailed": "Database Connection Failed",
-    }.get(kind, kind.replace("Error", " Failed"))
+    title = display_error_title(kind)
     lines = [title, "-" * 42]
     for key, label in (("database_id", "Database"), ("account", "Account"),
                        ("target", "Target"),
@@ -969,7 +1031,9 @@ def _render_error(data: dict[str, Any]) -> str:
                        ("tls", "TLS"), ("alias", "Alias"), ("feature", "Feature"),
                        ("error_message", "Reason")):
         if data.get(key) is not None:
-            lines.extend(["", label, f"  {data[key]}"])
+            detail = (display_error_message(kind, str(data[key])) if key == "error_message"
+                      else data[key])
+            lines.extend(["", label, f"  {detail}"])
     vendor = data.get("error")
     if isinstance(vendor, dict):
         lines.extend(["", "Vendor Error"])
@@ -1006,15 +1070,15 @@ def _render_error(data: dict[str, Any]) -> str:
         lines.extend(["", "Suggested Steps", "  dba credentials test <credential_alias>",
                       "  dba credentials set <credential_alias>"])
     elif kind == "PrivilegedAccount":
-        lines.extend(["", "Action", "  Review and reduce the monitoring account grants.",
-                      "  Toolkit will not use privileged monitoring accounts."])
+        lines.extend(["", "Action", "  请改用专用最小权限监控账号。",
+                      "  Toolkit 不会使用高权限监控账号。"])
     elif kind in {"ConnectionFailed", "ConnectionTLSFailed", "ConnectionTimeout"}:
-        lines.extend(["", "What To Check", "  1. Verify the stored monitoring credential.",
-                      "  2. Verify the SQL login and approved authentication mode.",
-                      "  3. Confirm the target, firewall, driver and certificate settings."])
+        lines.extend(["", "What To Check", "  1. 核对已选监控凭据别名。",
+                      "  2. 核对 SQL 登录和已批准的身份验证方式。",
+                      "  3. 核对目标地址、防火墙、驱动和证书设置。"])
         if data.get("alias"):
             lines.extend(["", "Credential", f"  dba credentials show {data['alias']}"])
-    return "\n".join(lines)
+    return _localize_console_text("\n".join(lines))
 
 
 def _render_generic(command: str, data: Any) -> str:

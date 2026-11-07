@@ -216,14 +216,17 @@ class _GrantedTable(HTMLParser):
 
 
 def _shared_projection(row: dict[str, Any]) -> list[str]:
+    from dba.reporting.normalizers import display_value
+
     identity = row.get("request_identity")
     identity = identity if isinstance(identity, dict) else {}
     return [_safe(value) for value in (
-        row.get("session_id"), row.get("request_id"), identity.get("request_status"),
+        row.get("session_id"), row.get("request_id"),
+        display_value(identity.get("request_status")),
         row.get("requested_memory_kb"), row.get("required_memory_kb"),
         row.get("granted_memory_kb"), row.get("used_memory_kb"),
         row.get("max_used_memory_kb"), identity.get("wait_type"),
-        identity.get("request_context_status"),
+        display_value(identity.get("request_context_status")),
     )]
 
 

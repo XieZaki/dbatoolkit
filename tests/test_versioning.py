@@ -401,11 +401,11 @@ def _probe_cli_version_family_output(
             return True, False
         useful = (exit_code == 1 and payload.get("success") is False
                   and "version_family" in payload.get("error_message", "")
-                  and ("supported:" in payload["error_message"]
-                       or "quoted string" in payload["error_message"]))
+                  and ("支持的取值" in payload["error_message"]
+                       or "带引号的字符串" in payload["error_message"]))
     else:
         useful = (exit_code == 1 and "version_family" in captured.out
-                  and ("supported:" in captured.out or "quoted string" in captured.out))
+                  and ("支持的取值" in captured.out or "带引号的字符串" in captured.out))
     return True, useful
 
 

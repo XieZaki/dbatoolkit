@@ -10,10 +10,27 @@ from importlib.resources import files
 
 from dba.logging import redact
 from dba.reporting.model import ReportModel, ReportSection, ReportTable
+from dba.reporting.normalizers import (
+    display_database_type,
+    display_label,
+    display_quality_impact,
+    display_report_summary,
+    display_report_value,
+    display_scenario,
+)
 
 
 def _escape(value: object) -> str:
     return escape(str(redact(value)), quote=True)
+
+
+def _report_value(label: str, value: str) -> str:
+    normalized = " ".join(label.replace("_", " ").split()).casefold()
+    if normalized in {"database type", "database engine", "type", "数据库类型"}:
+        return display_database_type(value)
+    if normalized in {"scenario", "diagnostic scenario", "诊断场景"}:
+        return display_scenario(value)
+    return display_report_value(label, value)
 
 
 class HtmlReportRenderer:
@@ -32,7 +49,8 @@ class HtmlReportRenderer:
         return template
 
     def _table(self, table: ReportTable, *, table_id: str | None = None,
-               session_search: bool = False, tree: bool = False) -> str:
+               session_search: bool = False, tree: bool = False,
+               section_id: str | None = None) -> str:
         headers = "".join(f"<th scope=\"col\">{_escape(_label(header))}</th>" for header in table.headers)
         links = {(row_index, column_index): target
                  for row_index, column_index, target in getattr(table, "cell_links", ())
@@ -59,8 +77,13 @@ class HtmlReportRenderer:
                     "PERMISSION_DENIED": "danger", "COLLECTION_FAILED": "danger",
                     "IDENTITY_INCOMPLETE": "caution", "NOT_ASSESSED": "caution",
                 }.get(normalized)
-                escaped = (f'<span class="state-badge {badge_class}">{_escape(_label(str(value)))}</span>'
-                           if badge_class else _escape(value))
+                is_status = column_index < len(table.headers)
+                header = table.headers[column_index] if is_status else ""
+                display_cell = (display_quality_impact(str(value))
+                                if section_id == "collection-quality" and header == "Impact" else
+                                display_report_value(header, str(value)) if is_status else str(value))
+                escaped = (f'<span class="state-badge {badge_class}">{_escape(_label(display_cell))}</span>'
+                           if badge_class else _escape(display_cell))
                 state = table.row_states[row_index] if row_index < len(table.row_states) else ""
                 if column_index == 0 and state in state_labels:
                     state_class, state_text = state_labels[state]
@@ -83,7 +106,8 @@ class HtmlReportRenderer:
         return f'<div class="table-wrap">{table_markup}</div>'
 
     def _section(self, section: ReportSection, *, slow: bool = False) -> str:
-        fields = "".join(self._fragment("field.html", LABEL=_escape(_label(label)), VALUE=_escape(value))
+        fields = "".join(self._fragment("field.html", LABEL=_escape(_label(label)),
+                                        VALUE=_escape(_report_value(label, value)))
                          for label, value in section.fields)
         searchable = section.section_id in {"appendix", "session-sources"}
         tables = "".join(self._table(
@@ -92,7 +116,7 @@ class HtmlReportRenderer:
                       "sessionIdentityTable" if section.section_id == "session-sources" and index == 0 else
                       f"{section.section_id}-table-{index + 1}" if slow else None),
             session_search=searchable,
-            tree=section.section_id == "blocking")
+            tree=section.section_id == "blocking", section_id=section.section_id)
             for index, table in enumerate(section.tables))
         blocks: list[str] = []
         for block in section.code_blocks:
@@ -113,11 +137,12 @@ class HtmlReportRenderer:
                 blocks.append(detail)
             else:
                 blocks.append(code)
-        summary = f"<p>{_escape(section.summary)}</p>" if section.summary else ""
+        summary = f"<p>{_escape(display_report_summary(section.summary))}</p>" if section.summary else ""
         body = summary + (f"<dl class=\"fields\">{fields}</dl>" if fields else "") + tables + "".join(blocks)
         severity = _escape(section.severity.upper())
         section_html = self._fragment("section.html", ID=_escape(section.section_id),
-                                      TITLE=_escape(_label(section.title)), SEVERITY=severity, BODY=body)
+                                      TITLE=_escape(_label(section.title)), SEVERITY_CLASS=severity,
+                                      SEVERITY=_escape(_label(severity)), BODY=body)
         if slow:
             section_html = section_html.replace("<section id=", '<section class="report-section" id=', 1)
             if section.section_id == "immediate-recovery":
@@ -163,15 +188,18 @@ class HtmlReportRenderer:
             summary_fields.extend((("主要等待类别", incident.wait.get("category", "UNKNOWN")),
                                    ("主要等待事件", incident.wait.get("event", "UNKNOWN"))))
         summary_fields.append(("采样时间", _local_snapshot(incident.snapshot_time)))
-        summary_body = "".join(self._fragment("field.html", LABEL=_escape(_label(label)), VALUE=_escape(value))
+        summary_body = "".join(self._fragment("field.html", LABEL=_escape(_label(label)),
+                                                VALUE=_escape(_report_value(label, value)))
                                for label, value in summary_fields)
         summary_section = self._fragment(
             "section.html", ID="incident-summary", TITLE="故障概况",
-            SEVERITY=_escape(incident.severity),
+            SEVERITY_CLASS=_escape(incident.severity.upper()),
+            SEVERITY=_escape(_label(incident.severity)),
             BODY=f"<div class=\"summary-metrics\">{summary_metrics}</div>"
                  f"<dl class=\"fields\">{summary_body}</dl>")
 
-        metadata = "".join(self._fragment("field.html", LABEL=_escape(_label(label)), VALUE=_escape(value))
+        metadata = "".join(self._fragment("field.html", LABEL=_escape(_label(label)),
+                                    VALUE=_escape(_report_value(label, value)))
                             for label, value in model.metadata)
         sections = [self._section(section) for section in model.sections]
         toc = "".join(f"<a href=\"#{_escape(section.section_id)}\">{_escape(_label(section.title))}</a>"
@@ -222,9 +250,9 @@ class HtmlReportRenderer:
                 rendered = (f'<span class="top-sql-badge completeness-{completeness_class}">'
                             f'{_escape(_label(item))}</span>')
             else:
-                display_value = (item if label == "指标语义" else
-                                 {"mysql": "MySQL", "postgresql": "PostgreSQL",
-                                  "sqlserver": "SQL Server", "oracle": "Oracle"}.get(item.lower(), item)
+                display_value = (display_report_value("Metric Semantics", item)
+                                 if label == "指标语义" else
+                                 display_database_type(item)
                                  if label == "数据库类型" else _label(item))
                 rendered = _escape(display_value)
             cards.append(f'<div class="summary-metric"><strong>{_escape(label)}</strong> '
@@ -265,7 +293,8 @@ class HtmlReportRenderer:
                         "caution" if status in {"DEGRADED", "PARTIAL"} or
                         incident.data_completeness != "COMPLETE" else "unknown")
         metadata_html = "".join(
-            f'<div class="hero-meta-item"><span>{_escape(_label(key))}</span><strong>{_escape(value)}</strong></div>'
+            f'<div class="hero-meta-item"><span>{_escape(_label(key))}</span>'
+            f'<strong>{_escape(_report_value(key, value))}</strong></div>'
             for key, value in model.metadata)
 
         def meta_value(*keys: str, default: str = "UNKNOWN") -> str:
@@ -296,13 +325,14 @@ class HtmlReportRenderer:
         summary_lines = [
             f"诊断：{model.title}",
             f"实例：{meta_value('Instance', '实例')}",
-            f"数据库：{meta_value('Database Type', '数据库类型')} / {meta_value('Version', '版本')}",
+            f"数据库：{display_database_type(meta_value('Database Type', '数据库类型'))} / "
+            f"{meta_value('Version', '版本')}",
             f"采集：{meta_value('Capture Started', '采集开始', default='N/A')} — "
             f"{meta_value('Capture Finished', '采集结束', default='N/A')}",
-            f"一致性：{meta_value('Snapshot Consistency', '快照一致性', default='UNKNOWN')}",
+            f"一致性：{_label(meta_value('Snapshot Consistency', '快照一致性', default='UNKNOWN'))}",
             f"状态：{status_display} / {_label(severity)}；问题：{primary_problem_display}；观测：{observed_now_display}",
-            *[f"影响 {key}：{value}" for key, value in incident.impact.items()],
-            *[f"时间 {key}：{value}" for key, value in incident.timing.items()],
+            *[f"影响 {_label(key)}：{value}" for key, value in incident.impact.items()],
+            *[f"时间 {_label(key)}：{value}" for key, value in incident.timing.items()],
         ]
         summary_copy = "\n".join(summary_lines)
 
@@ -353,84 +383,7 @@ class HtmlReportRenderer:
 
 
 def _label(value: str) -> str:
-    translations = {
-        "UNKNOWN": "未知", "HEALTHY": "健康", "DEGRADED": "需关注", "NOT_DETECTED": "未观测到",
-        "NOT_ASSESSED": "未评估",
-        "BLOCKING": "锁与阻塞", "IDLE_TRANSACTION": "长期未提交事务", "LONG_RUNNING_SQL": "慢 SQL",
-        "HIGH_CONCURRENCY": "高并发", "Database": "数据库", "Instance": "实例",
-        "Database Type": "数据库类型", "Version": "版本", "Scenario": "诊断场景",
-        "Generated At": "报告生成时间", "Environment": "环境", "Data Completeness": "证据完整性",
-        "Root Blockers": "根阻塞", "Root Cause Candidate": "现场诊断结论",
-        "Recent SQL Evidence": "最近执行 SQL",
-        "Blocking Analysis": "锁与阻塞链", "Transaction Analysis": "长期未提交事务",
-        "Session Identity": "会话身份与来源", "Request Runtime": "请求运行信息",
-        "Workload Summary": "当前数据库状态", "Long Running SQL": "慢 SQL",
-        "Wait Analysis": "等待分析", "Appendix — Other Sessions": "其他会话（附录）",
-        "Immediate Recovery": "人工处置参考", "Collection Quality": "证据完整性",
-        "Findings and Recommendations": "诊断发现与建议", "Database Space": "数据文件与表空间",
-        "Transaction Log": "事务日志与保留证据", "Other Storage Evidence": "其他空间与日志证据",
-        "Diagnostic Context": "未获取的证据与诊断上下文", "Execution Plan Follow-up": "执行计划后续检查",
-        "Capture Window": "采集时间窗口", "Priority Review Candidates": "优先核查对象",
-        "Database ID": "数据库 ID", "Session": "会话", "Role": "角色",
-        "Status": "状态", "Login": "用户", "Host": "主机", "Program": "应用",
-        "Client IP": "客户端 IP", "Open Txn": "未结束事务数", "Elapsed": "持续时间",
-        "Wait": "等待事件", "Blocked By": "阻塞者", "CPU": "CPU", "Logical Reads": "逻辑读",
-        "Reads": "物理读", "Writes": "写入", "Root Session": "根会话", "Affected Sessions": "影响会话数",
-        "Direct Children": "直接子会话", "Maximum Depth": "最大深度", "Longest Block": "最长阻塞",
-        "Collector": "采集器", "Impact": "影响", "Finding": "发现", "Recommendation": "建议",
-        "Evidence Reference": "证据位置", "Severity": "严重程度", "Age": "事务时长",
-        "Transaction ID": "事务 ID", "Begin Time": "开始时间", "Type": "类型", "State": "状态",
-        "Report contents": "报告目录",
-        "Rank": "排序", "User": "用户", "Reason": "原因", "Application": "应用",
-        "Runtime seconds": "运行秒数", "Transaction age seconds": "事务时长秒",
-        "SQL identity": "SQL 标识", "Transaction identity": "事务标识", "Login time": "登录时间",
-        "Blocked session count": "影响会话数", "Evidence timestamp": "证据时间",
-        "Identity recheck": "身份复核", "Priority": "优先级", "Action": "建议动作",
-        "Reference Command": "人工参考命令", "Capture Started": "采集开始",
-        "Triage Completed": "初报完成", "Capture Finished": "采集结束",
-        "Snapshot Consistency": "快照一致性",
-        "Indirectly Affected": "间接受影响会话",
-        "Direct Blocked": "直接阻塞会话", "Direct Blocker": "直接阻塞者",
-        "SQL identifier type": "SQL 标识类型",
-        "Root Blocker": "根阻塞会话", "Wait Resource": "等待资源描述",
-        "MySQL PROCESSLIST_ID": "MySQL PROCESSLIST_ID",
-        "Performance Schema THREAD_ID": "Performance Schema THREAD_ID",
-        "PostgreSQL PID": "PostgreSQL PID", "Oracle INST_ID": "Oracle INST_ID",
-        "Oracle SID": "Oracle SID", "Oracle SERIAL#": "Oracle SERIAL#",
-        "Observation": "当前观测", "Session Open Transaction Count": "会话级未结束事务计数",
-        "Identity quality": "身份可信度", "Identity reuse note": "会话复用提示",
-        "Target Session": "目标会话", "Open Transaction": "未结束事务",
-        "Rollback Risk": "回滚风险", "Rollback Duration": "回滚耗时",
-        "DBA Approval Required": "需要 DBA 审批", "Toolkit Executed": "Toolkit 是否执行",
-        "Root-blocker Related Requests": "根阻塞相关请求",
-        "Non-blocked Long-running Requests": "非阻塞的长运行请求",
-        "Blocked Long-running Requests": "被阻塞的长运行请求",
-        "MISSING_REQUIRED": "必需证据缺失",
-        "OPTIONAL_UNAVAILABLE": "可选证据不可用", "NOT_COLLECTED": "未采集",
-        "TRUNCATED": "结果已截断", "COMPLETE": "完整", "FAILED": "失败",
-        "CRITICAL": "严重", "WARNING": "警告", "HIGH": "高", "INFO": "提示",
-        "YES": "是", "NO": "否", "ACTIVE": "活动",
-        "sleeping": "休眠", "suspended": "挂起", "running": "运行中",
-        "Blocked": "被阻塞会话", "Long Running": "长运行请求",
-        "Data completeness": "证据完整性", "Emergency evidence": "应急证据",
-        "Full profile evidence": "完整配置证据", "required evidence": "必需证据",
-        "Optional evidence": "可选证据", "Required evidence": "必需证据",
-        "Optional unavailable": "可选证据不可用", "Collector row limit reached": "已达到采集行数上限",
-        "NOT_APPLICABLE": "不适用", "PARTIAL": "部分可用", "INCOMPLETE": "不完整",
-        "PENDING": "待采集", "IDENTITY_INCOMPLETE": "身份信息不完整",
-        "REQUIRED_BEFORE_MANUAL_ACTION": "人工操作前必须重新核验",
-        "COLLECTED": "已采集", "PERMISSION_DENIED": "权限不足",
-        "UNSUPPORTED": "不支持", "UNAVAILABLE": "不可用",
-        "SOURCE_UNAVAILABLE": "数据来源不可用", "SOURCE_NOT_CONFIGURED": "未配置数据来源",
-        "COLLECTION_FAILED": "采集失败", "EMPTY": "无记录",
-        "server_version_num（原始值）": "server_version_num（原始值）",
-        "Top SQL Summary": "Top SQL 摘要",
-    }
-    if value in translations:
-        return translations[value]
-    parts = value.replace("_", " ").split()
-    joined = " ".join(parts)
-    return translations.get(joined, joined)
+    return display_label(value)
 
 
 def _local_snapshot(value: str) -> str:

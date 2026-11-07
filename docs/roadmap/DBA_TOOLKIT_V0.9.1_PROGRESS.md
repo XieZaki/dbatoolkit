@@ -3,17 +3,17 @@
 ## Current position
 
 ```text
-CURRENT_PHASE: Phase 2 — Top SQL comprehensive-diagnosis integration
-CURRENT_TASK: V091-P2-TOPSQL-INTEGRATION-001 — IN_PROGRESS; report presentation checks pass; the prior full-suite Windows PowerShell Update failure did not recur in the follow-up full run (1264 passed, 3 skipped), but its root cause remains unconfirmed; live E2E remains BLOCKED before DB access by Credential Session IPC status denial, 2026-11-05
+CURRENT_PHASE: V0.9.1 release preparation and publication
+CURRENT_TASK: PORTABLE-UPDATE-001 — E2E_PENDING; local 0.9.1 tests and Full/Update candidate package verification recorded in Acceptance §59; GitHub Actions/Release pending
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
-CURRENT_VERSION: 0.9.0
-BASE_HEAD_FOR_CURRENT_CHECKPOINT: 1c0274af1fea439ce93fa6e8abbb2a7134e8fe5f
-CURRENT_TASK_DELIVERY: Acceptance §49 records implementation and offline evidence. Acceptance §50 records the prior locked-session attempt. Acceptance §51 records the Credential Session IPC denial and no-connection stop. Acceptance §52 records report presentation repair and the initial full-suite result; its “Portable Update failure follow-up” subsection records the later single/module/nearest-predecessor tests and full-suite result (1264 passed, 3 skipped), while noting that the earlier output assertion failure remains unexplained. Neither changes §51's live-E2E status or Backlog state.
-LAST_COMPLETED_TASK: V091-P2-TOPSQL-ORACLE-001 — VERIFIED within the Oracle Free 26ai metrics/scenarios recorded in Acceptance §21.
-NEXT_READY_TASK: Resume scoped real-database E2E for V091-P2-TOPSQL-INTEGRATION-001 from the user's normal Windows PowerShell session where Credential Session status is readable and UNLOCKED; do not unlock the encrypted credential store or start Top SQL Delta. Do not repeat or reopen the four verified Collector tasks.
-WAITING_FOR_USER_REVIEW: NO — implementation is user-approved.
-WAITING_FOR_USER_ACTION: Run the provided commands in the normal Windows PowerShell session that owns the Credential Session, or provide that authorized execution context; no credential unlock or DB connection was attempted.
-FOLLOWING_ORDER: Four independent Top SQL collectors are verified within their recorded scopes. Packaging, Update, offline deployment, GitHub Actions and Release work remain frozen by user direction. Existing unrelated Backlog statuses remain unchanged.
+CURRENT_VERSION: 0.9.1
+BASE_HEAD_FOR_CURRENT_CHECKPOINT: af3474558f28a236a1912435f0d133df1f61bbcc
+CURRENT_TASK_DELIVERY: Full pytest 1324 passed, 3 skipped; Ruff, strict MyPy (78 files), `dba validate` (4 example instances, 118 SQL scripts, 0 warnings), deployment and inline workflow PowerShell parsing, diff check, local Full/Update archive validation, and extracted portable smoke checks passed. No DB E2E.
+LAST_COMPLETED_TASK: SQL-REGISTRY-SAFETY-001 — VERIFIED in Backlog; Acceptance §58 records its final offline audit. Formal user acceptance remains separate.
+NEXT_READY_TASK: Finish GitHub Actions build and 0.9.1 Release asset verification; then retain `PORTABLE-UPDATE-001` as E2E_PENDING if formal cross-version Update acceptance remains outstanding. V091-P5-WORKBENCH-001 remains IN_PROGRESS for real four-database report generation and real-report JSON/HTML parity; database host/session gates were not exercised. Do not start Top SQL Delta.
+WAITING_FOR_USER_REVIEW: NO — the user authorized 0.9.1 version change, commit, push, tag, and Release in this request.
+WAITING_FOR_USER_ACTION: None. No database, Inventory, Credential Store, credential, or Docker was accessed in local validation.
+FOLLOWING_ORDER: Preserve existing Oracle, SQL Registry, Top SQL, and P5 evidence. Release is not complete until the tagged Actions build, draft asset size/hash checks, and public Release verification succeed.
 ```
 
 ### BUG-WINDOWS-CI-FAILURES-001 — code-complete local acceptance — 2026-11-03
@@ -271,3 +271,13 @@ No database, Docker, Credential Store, Inventory, real `local_config.py` value, 
 ### LAB-CREDENTIAL-OUTPUT-001 formal conditional closure — 2026-10-31
 
 The user formally approved conditional closure. Backlog status is `DONE`; the approval and acceptance boundary are recorded in Acceptance §35. The task used synthetic configuration and Fake Drivers only; it does not claim real database connection E2E. The external lab scripts have no JSON/HTML report-generation path (`NOT_APPLICABLE`). The real `local_config.py` was not read, executed, copied, modified, or scanned. Secret Scanner coverage was Git Index plus exactly the 10 named worktree files recorded in Acceptance §34; unrelated files are not covered by that supplemental scan. The 15 pre-existing external-script Ruff E701 findings remain untouched. Roadmap phase/order is unchanged. `INVENTORY-CONNECTION-001` is next by Backlog order but has not started and requires separate approval. No tests or external systems were rerun for this documentation-only status update; no commit or push occurred.
+
+### Oracle Slow Collector error-preservation regression — 2026-11-06
+
+Added a report-context snapshot before Oracle Slow Collector execution so the normal and staged paths can render a report after a failed Collector closes the adapter. Four Fake Driver regressions cover required/optional failures in both paths and verify the original `QueryDenied` and `ORA-01031` details survive; the targeted Oracle/report suite passed **157 tests**. Ruff and strict MyPy passed, as did `git diff --check`. Evidence is `ISOLATED_OFFLINE_TEST` only; no database or credentials were accessed. `V091-P2-TOPSQL-INTEGRATION-001` remains `BLOCKED` in Backlog pending authorized Windows real E2E.
+
+### V091-P5-WORKBENCH-001 — inline interaction regression checkpoint — 2026-11-06
+
+Added `tests/test_slow_report_interactions.py`, which executes the actual inline script from `dba/reporting/templates/slow_report.html` with Node's built-in VM and a minimal synthetic DOM. It covers session search/no-results, expand/collapse state, temporary full expansion for print and restoration afterward, and clipboard fallback text-only behavior. This adds no Python or browser dependency and changes no product template behavior.
+
+`ISOLATED_OFFLINE_TEST`: the new interaction test plus `tests/test_html_reports.py` passed **50 tests**. Ruff passed for the new test; strict MyPy passed for all 78 `dba` sources and the new test; `git diff --check` passed with existing LF-to-CRLF advisories. The first pytest invocation failed during setup because the sandbox-managed Windows Temp path was inaccessible; rerunning with `.tmp/pytest-temp-p5-workbench-20261106` passed. A managed-browser attempt to inspect the template at 320px/414px was blocked by local-file access policy (`ERR_BLOCKED_BY_ADMINISTRATOR`), so no narrow-width visual result is claimed. No database, Docker, Credential Session, Inventory, Credential Store, or credential was accessed. Backlog status remains `IN_PROGRESS`; review Acceptance §55 before further P5 work.

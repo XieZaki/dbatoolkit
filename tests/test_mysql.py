@@ -309,7 +309,7 @@ def test_check_cli_displays_mysql_vendor_error_in_human_and_json(
             assert parsed["error"]["vendor_code"] == 1049
             assert parsed["effective_connection"]["database"] == "missing_db"
         else:
-            assert "Effective Connection" in output
+            assert "生效连接" in output
 
 
 @pytest.mark.parametrize("field,value,error", [
@@ -529,17 +529,26 @@ def test_replication_query_access_denial_preserves_vendor_error_and_guide_pointe
 
 
 @pytest.mark.regression
-def test_streaming_cursor_is_closed_before_connection_on_truncation() -> None:
+def test_streaming_truncation_closes_connection_before_cursor_to_avoid_drain() -> None:
     driver = FakeDriver()
-    driver.cursors = SimpleNamespace(SSCursor=FakeCursor)
+    class DrainOnCloseCursor(FakeCursor):
+        def close(self) -> None:
+            if not self.connection.closed:
+                while self.fetchmany(1):
+                    pass
+            super().close()
+
+    driver.cursors = SimpleNamespace(SSCursor=DrainOnCloseCursor)
     target, _ = adapter(driver)
     target.connect()
     driver.connection.results["active_sessions"] = [session(pid) for pid in range(2001)]
     result = target.execute_readonly(target.registry.get("active_sessions", DatabaseType.MYSQL))
     assert result.truncated and result.row_count == 2000
-    assert driver.connection.cursor_classes[-1] is FakeCursor
+    cursor = driver.connection.cursors[-1]
+    assert driver.connection.cursor_classes[-1] is DrainOnCloseCursor
+    assert cursor.offset == 2000
     assert driver.connection.cursors[-1].closed
-    assert driver.connection.lifecycle[-2:] == ["cursor.close", "connection.close"]
+    assert driver.connection.lifecycle[-2:] == ["connection.close", "cursor.close"]
     assert driver.connection.closed
 
 

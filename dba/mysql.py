@@ -422,20 +422,28 @@ class MySQLAdapter(Adapter):
             error = ToolkitError("Interrupted", "Query was interrupted; connection will be closed.")
             raise
         finally:
+            streaming_cursor = (cursor is not None
+                                and script.metadata.name in self.STREAMING_SCRIPTS)
+            connection_closed_before_cursor = False
+            if streaming_cursor and (error is not None or truncated):
+                connection_closed_before_cursor = self._close()
+                if not connection_closed_before_cursor:
+                    error = error or ToolkitError(
+                        "CleanupFailed", "Streaming result connection cleanup failed."
+                    )
             if cursor is not None:
                 try:
                     cursor.close()
                 except Exception:
-                    error = error or ToolkitError("CleanupFailed", "Query cursor cleanup failed.")
-            # Always close the active cursor before its connection. PyMySQL's
-            # public SSCursor.close() finishes an unbuffered result; closing the
-            # connection first leaves its destructor trying to read a dead socket.
+                    if not connection_closed_before_cursor:
+                        error = error or ToolkitError("CleanupFailed", "Query cursor cleanup failed.")
             if error is not None:
                 rows = ()
                 truncated = False
                 result_bytes = 0
-                self._close()
-            elif truncated and script.metadata.name in self.STREAMING_SCRIPTS:
+                if not connection_closed_before_cursor:
+                    self._close()
+            elif truncated and streaming_cursor and not connection_closed_before_cursor:
                 self._close()
             details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
                                        "result_bytes": result_bytes}

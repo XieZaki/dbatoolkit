@@ -1,4 +1,4 @@
-# dba-toolkit 0.9.0
+# dba-toolkit 0.9.1
 
 企业内部运维机器上的跨数据库只读诊断基础框架。**工具负责查清楚，DBA 负责做决定。**
 
@@ -16,7 +16,7 @@ V0.8.3.2 将详细诊断报告统一为自包含离线 HTML；终端保持事故
 V0.8.3.3 将 Human HTML 收敛为有预算的 DBA 分析报告：恢复动作前置、事故相关会话与请求分表、显式报告省略数量；计划 XML 单独保存为受 `.gitignore` 保护的 `.sqlplan`。新增 Windows/Linux upgrade 流程和只扫描 Git-tracked 文件的敏感数据检查。本版本不会自动 push 或创建 release tag。
 V0.8.3.5 在 V0.8.3.4 的加密 Credential Store 上增加当前 OS 用户短期 Credential Session。使用 `dba credentials unlock` 后，在默认 30 分钟绝对 TTL 内可复用解密凭据；`status` 查看、`lock` 立即清除 Agent 内存。Windows 使用当前 SID ACL 的 Named Pipe，Linux 使用有 peer UID 验证的私有 Unix Socket。秘密不写磁盘、环境变量或日志。安全设计与限制见 [Credential Security](docs/CREDENTIAL_SECURITY.md)。
 
-V0.9.1 是规划目标，不是当前软件包版本。Version-Aware Profile 的 Phase A–D 已覆盖版本检测、Replication、Slow 和 Disk-Growth；Phase E 将已有 SQL Server Plan 路径接入版本路由。Profile 路由只说明对应能力路径已实现，不代表所有目标版本或所有能力均已实机验证。矩阵见 [Version Profiles](docs/VERSION_PROFILES.md)，真实验收按版本和场景记录在 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。
+当前产品版本为 0.9.1。本版统一 CLI 与报告中的中文展示术语，优化离线诊断报告的证据呈现，并提供 Windows x64 Full / Update 便携包。Version-Aware Profile 的路由只说明对应能力路径已实现，不代表所有目标版本或所有能力均已实机验证。矩阵见 [Version Profiles](docs/VERSION_PROFILES.md)，真实验收按版本和场景记录在 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。
 
 截至 2026-10-20 的当前 HEAD 代表性验证：SQL Server 2022 核心诊断与指定 Plan 场景为 `E2E_VERIFIED`；PostgreSQL 16 核心诊断为 `E2E_VERIFIED`；MySQL 8.4 和 Oracle Free 26ai 的四库代表性回归为 `PARTIAL`。Oracle Free 26ai 的 P0.2 指定阻塞诊断场景为 `E2E_VERIFIED`，但 Oracle 可选权限和 Disk-Growth 证据仍有缺口。MySQL 驱动来源不一致已列为 [独立 Backlog 项](docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md)。旧版本兼容矩阵仍需逐版本实机验证；这些结果不扩大为全部目标版本的支持承诺。
 

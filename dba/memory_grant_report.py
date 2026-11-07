@@ -21,21 +21,19 @@ def memory_grant_sections(value: Any) -> list[ReportSection]:
     waiting = waiting if isinstance(waiting, dict) else {}
     granted = granted if isinstance(granted, dict) else {}
     return [
-        _sample_section("memory-grant-waiting", "Waiting for Memory Grant", waiting, waiting=True),
-        _sample_section("memory-grant-granted", "Granted Memory", granted, waiting=False),
+        _sample_section("memory-grant-waiting", "等待 Memory Grant", waiting, waiting=True),
+        _sample_section("memory-grant-granted", "已授予的内存", granted, waiting=False),
         ReportSection(
             "memory-grant-evidence",
-            "Collection Quality",
-            summary=("Waiting and granted rows were sampled using separate sequential read-only queries. "
-                     "The samples are not an atomic server snapshot. A missing request join preserves the "
-                     "grant row while marking request context unavailable. This scenario does not assess "
-                     "overall database health. Elapsed time is client end-to-end, including driver execution, "
-                     "network fetch, and row parsing; server-side SQL execution duration is not separately measured."),
+            "证据完整性",
+            summary=("等待记录和已授予记录由两条顺序执行的只读查询分别采样，二者不是同一时刻的服务器快照。"
+                     "请求关联缺失时仍保留内存授予记录，并标明请求上下文不可用。本场景不评估数据库整体健康度。"
+                     "耗时为客户端端到端时间，包含驱动执行、网络读取和结果解析；不单独表示服务器端 SQL 执行耗时。"),
             fields=(
-                ("Completeness", _safe(data.get("completeness"))),
-                ("Snapshot Consistency", _safe(data.get("snapshot_consistency"))),
-                ("Health Assessment", _safe(data.get("health_assessment"))),
-                ("Identity Conflicts", _safe(data.get("identity_conflicts"))),
+                ("证据完整性", _display(data.get("completeness"))),
+                ("快照一致性", _display(data.get("snapshot_consistency"))),
+                ("健康评估", _display(data.get("health_assessment"))),
+                ("身份冲突数", _safe(data.get("identity_conflicts"))),
             ),
         ),
     ]
@@ -55,36 +53,36 @@ def _sample_section(section_id: str, title: str, sample: dict[str, Any], *, wait
             if waiting:
                 row = (
                     _safe(raw.get("session_id")), _safe(raw.get("request_id")),
-                    _safe(identity.get("request_status")), _safe(identity.get("wait_type")),
+                    _display(identity.get("request_status")), _safe(identity.get("wait_type")),
                     _safe(raw.get("wait_time_ms")), _safe(raw.get("requested_memory_kb")),
                     _safe(raw.get("required_memory_kb")), _safe(raw.get("queue_id")),
-                    _safe(raw.get("wait_order")), _safe(identity.get("request_context_status")),
+                    _safe(raw.get("wait_order")), _display(identity.get("request_context_status")),
                 )
             else:
                 row = (
                     _safe(raw.get("session_id")), _safe(raw.get("request_id")),
-                    _safe(identity.get("request_status")), _safe(raw.get("requested_memory_kb")),
+                    _display(identity.get("request_status")), _safe(raw.get("requested_memory_kb")),
                     _safe(raw.get("required_memory_kb")), _safe(raw.get("granted_memory_kb")),
                     _safe(raw.get("used_memory_kb")), _safe(raw.get("max_used_memory_kb")),
-                    _safe(identity.get("wait_type")), _safe(identity.get("request_context_status")),
+                    _safe(identity.get("wait_type")), _display(identity.get("request_context_status")),
                 )
             rows.append(row)
-    headers = (("Session ID", "Request ID", "Request Status", "Wait Type", "Wait Time (ms)",
-                "Requested (KB)", "Required (KB)", "Queue ID", "Wait Order", "Request Identity")
+    headers = (("会话 ID", "请求 ID", "请求状态", "等待类型", "等待时长（毫秒）",
+                "请求内存（KB）", "所需内存（KB）", "队列 ID", "等待顺序", "请求身份")
                if waiting else
-               ("Session ID", "Request ID", "Request Status", "Requested (KB)", "Required (KB)",
-                "Granted (KB)", "Used (KB)", "Max Used (KB)", "Wait Type", "Request Identity"))
+               ("会话 ID", "请求 ID", "请求状态", "请求内存（KB）", "所需内存（KB）",
+                "已授予内存（KB）", "已用内存（KB）", "最大已用内存（KB）", "等待类型", "请求身份"))
     table = ReportTable(headers, tuple(rows)) if rows else None
-    sample_label = "Waiting" if waiting else "Granted"
+    sample_label = "等待中" if waiting else "已授予"
     summary = (
-        f"{sample_label} rows: {len(rows)}; source query returned {sample.get('row_count', 0)}; "
-        f"sample: {_safe(sample.get('started_at'))} to {_safe(sample.get('finished_at'))}; "
-        f"client elapsed: {_elapsed_label(sample)}; "
-        f"truncated: {_safe(sample.get('truncated'))}; status: {_safe(sample.get('success'))}."
+        f"{sample_label}记录：{len(rows)}；查询返回：{sample.get('row_count', 0)}；"
+        f"采样时间：{_safe(sample.get('started_at'))} 至 {_safe(sample.get('finished_at'))}；"
+        f"客户端耗时：{_elapsed_label(sample)}；是否截断：{_display(sample.get('truncated'))}；"
+        f"采集状态：{_display(sample.get('success'))}。"
     )
     fields = () if sample.get("success") else (
-        ("Error Type", _safe(sample.get("error_type"))),
-        ("Error", _safe(sample.get("error_message"))),
+        ("错误类型", _safe(sample.get("error_type"))),
+        ("错误详情", _safe(sample.get("error_message"))),
     )
     return ReportSection(section_id, title, summary=summary, fields=fields,
                          tables=(table,) if table else ())
@@ -97,25 +95,24 @@ def render_memory_grant_human(value: Any, report_path: str | None = None) -> str
     waiting = waiting if isinstance(waiting, dict) else {}
     granted = granted if isinstance(granted, dict) else {}
     lines = [
-        "SQL Server Memory Grant Queue",
+        "SQL Server Memory Grant 等待队列",
         "=" * 64,
-        f"Database: {_safe(data.get('database_id'))} | Version: {_safe(data.get('database_version'))}",
-        f"Collection: {_safe(data.get('collection_status'))} | "
-        f"Completeness: {_safe(data.get('completeness'))}",
-        "Overall database health: NOT ASSESSED",
-        "Waiting and granted queries are separate sequential samples, not an atomic snapshot.",
-        "Elapsed time is client end-to-end, including driver execution, network fetch, and row parsing; "
-        "server-side SQL execution duration is not separately measured.",
+        f"数据库：{_safe(data.get('database_id'))} | 版本：{_safe(data.get('database_version'))}",
+        f"采集状态：{_display(data.get('collection_status'))} | "
+        f"证据完整性：{_display(data.get('completeness'))}",
+        "数据库整体健康度：未评估",
+        "等待记录和已授予记录分别顺序采样，不构成原子快照。",
+        "耗时为客户端端到端时间，包含驱动执行、网络读取和结果解析；不单独表示服务器端 SQL 执行耗时。",
     ]
-    for sample_name, sample, is_waiting in (("Waiting", waiting, True), ("Granted", granted, False)):
+    for sample_name, sample, is_waiting in (("等待中", waiting, True), ("已授予", granted, False)):
         raw_rows = sample.get("rows", [])
         raw_rows = raw_rows if isinstance(raw_rows, list) else []
-        lines.extend(("", f"{sample_name}: {len(raw_rows)} | "
-                      f"Sampled: {_safe(sample.get('started_at'))} to {_safe(sample.get('finished_at'))} | "
-                      f"Client elapsed: {_elapsed_label(sample)} | "
-                      f"Truncated: {_safe(sample.get('truncated'))}"))
+        lines.extend(("", f"{sample_name}记录：{len(raw_rows)} | "
+                      f"采样时间：{_safe(sample.get('started_at'))} 至 {_safe(sample.get('finished_at'))} | "
+                      f"客户端耗时：{_elapsed_label(sample)} | "
+                      f"是否截断：{_display(sample.get('truncated'))}"))
         if not sample.get("success"):
-            lines.append(f"  Unavailable: {_safe(sample.get('error_type'))} — "
+            lines.append(f"  采集失败：{_safe(sample.get('error_type'))} — "
                          f"{_safe(sample.get('error_message'))}")
         for raw in raw_rows[:_HUMAN_ROW_LIMIT]:
             if not isinstance(raw, dict):
@@ -123,23 +120,22 @@ def render_memory_grant_human(value: Any, report_path: str | None = None) -> str
             identity = raw.get("request_identity", {})
             identity = identity if isinstance(identity, dict) else {}
             if is_waiting:
-                text = (f"Session={_safe(raw.get('session_id'))} Request={_safe(raw.get('request_id'))} "
-                        f"Wait={_safe(identity.get('wait_type'))}/{_safe(raw.get('wait_time_ms'))}ms "
-                        f"Requested={_safe(raw.get('requested_memory_kb'))}KB "
-                        f"Required={_safe(raw.get('required_memory_kb'))}KB")
+                text = (f"会话={_safe(raw.get('session_id'))} 请求={_safe(raw.get('request_id'))} "
+                        f"等待={_safe(identity.get('wait_type'))}/{_safe(raw.get('wait_time_ms'))} 毫秒 "
+                        f"请求内存={_safe(raw.get('requested_memory_kb'))} KB "
+                        f"所需内存={_safe(raw.get('required_memory_kb'))} KB")
             else:
-                text = (f"Session={_safe(raw.get('session_id'))} Request={_safe(raw.get('request_id'))} "
-                        f"Granted={_safe(raw.get('granted_memory_kb'))}KB "
-                        f"Used={_safe(raw.get('used_memory_kb'))}KB "
-                        f"MaxUsed={_safe(raw.get('max_used_memory_kb'))}KB")
-            lines.append(f"  {text} | Request identity: {_safe(identity.get('request_context_status'))}")
+                text = (f"会话={_safe(raw.get('session_id'))} 请求={_safe(raw.get('request_id'))} "
+                        f"已授予={_safe(raw.get('granted_memory_kb'))} KB "
+                        f"已用={_safe(raw.get('used_memory_kb'))} KB "
+                        f"最大已用={_safe(raw.get('max_used_memory_kb'))} KB")
+            lines.append(f"  {text} | 请求身份：{_display(identity.get('request_context_status'))}")
         if len(raw_rows) > _HUMAN_ROW_LIMIT:
-            lines.append(f"  ... {len(raw_rows) - _HUMAN_ROW_LIMIT} more rows in the HTML/JSON report.")
-    lines.extend(("", "Interpretation: a waiting request is evidence of a memory grant wait only; "
-                  "granted memory is distinct from current memory use. A granted request is not "
-                  "identified as a unique cause."))
+            lines.append(f"  HTML/JSON 报告另含 {len(raw_rows) - _HUMAN_ROW_LIMIT} 条记录。")
+    lines.extend(("", "说明：等待请求只能证明发生了 Memory Grant 等待；已授予内存与当前内存使用量不同。"
+                  "单条已授予请求不能据此判定为唯一根因。"))
     if report_path:
-        lines.extend(("", "Detailed HTML Report", f"  {report_path}"))
+        lines.extend(("", "详细 HTML 报告", f"  {report_path}"))
     return str(redact("\n".join(lines)))
 
 
@@ -151,8 +147,14 @@ def _safe(value: Any) -> str:
                    and not 0x80 <= ord(char) <= 0x9F else " " for char in text)
 
 
+def _display(value: Any) -> str:
+    from dba.reporting.normalizers import display_value
+
+    return _safe(display_value(value))
+
+
 def _elapsed_label(sample: dict[str, Any]) -> str:
     elapsed = sample.get("elapsed_ms")
     if sample.get("elapsed_scope") != "CLIENT_END_TO_END" or not isinstance(elapsed, (int, float)):
-        return "not recorded"
-    return f"{elapsed:.3f} ms (client end-to-end)"
+        return "未记录"
+    return f"{elapsed:.3f} 毫秒（客户端端到端）"

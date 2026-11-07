@@ -89,6 +89,7 @@ from dba.reporting import (
     render_bounded,
     render_report_section_text,
 )
+from dba.reporting.normalizers import display_message, display_value
 from dba.runtime import RuntimeStatus, database_runtime_status, doctor, runtime_info
 from dba.settings import (
     MySQLSettings,
@@ -136,6 +137,21 @@ TOP_SQL_METRIC_CHOICES = tuple(dict.fromkeys((*SQLSERVER_TOP_SQL_METRICS,
                                              *POSTGRESQL_TOP_SQL_METRICS,
                                              *MYSQL_TOP_SQL_METRICS,
                                              *ORACLE_TOP_SQL_METRICS)))
+
+
+class _ChineseArgumentParser(argparse.ArgumentParser):
+    """Keep argparse's generated labels consistent with the Chinese CLI."""
+
+    def format_help(self) -> str:
+        result = super().format_help()
+        for source, target in (("usage:", "用法："),
+                               ("positional arguments:", "位置参数："),
+                               ("options:", "选项："),
+                               ("optional arguments:", "选项："),
+                               ("show this help message and exit", "显示帮助信息并退出"),
+                               ("show program's version number and exit", "显示程序版本并退出")):
+            result = result.replace(source, target)
+        return result
 
 
 def _triage_summary_fingerprint(
@@ -193,16 +209,16 @@ class _InjectedCredentialProvider(CredentialProvider):
 
 
 def _add_output_options(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--json", action="store_true", help="Write structured JSON")
-    command.add_argument("--quiet", action="store_true", help="Show only the final status")
+    command.add_argument("--json", action="store_true", help="输出结构化 JSON")
+    command.add_argument("--quiet", action="store_true", help="仅显示最终状态")
 
 
 def _add_credential_backend(command: argparse.ArgumentParser) -> None:
     command.add_argument("--credential-store-path", type=Path, default=None,
-                         help="Explicit Store path for the selected encrypted backend")
+                         help="所选加密后端使用的显式 Store 路径")
     command.add_argument(
         "--credential-backend", choices=("auto", "os", "encrypted", "sqlite", "interactive"),
-        default="auto", help="Select credential source; encrypted sessions may avoid repeated unlock prompts",
+        default="auto", help="选择凭据来源；加密凭据会话可减少重复解锁提示",
     )
 
 
@@ -214,7 +230,7 @@ def _emit(args: Any, command: str, result: Any) -> None:
         print(render_json(result))
     elif getattr(args, "quiet", False):
         status = result.get("status", "READY" if result.get("success", True) else "FAILED")
-        print(f"{status}  {result.get('database_id', result.get('database', {}).get('id', ''))}".rstrip())
+        print(f"{display_value(status)}  {result.get('database_id', result.get('database', {}).get('id', ''))}".rstrip())
     else:
         print(render_human(command, result))
 
@@ -286,147 +302,146 @@ def main(
     credential_store: CredentialStore | None = None,
 ) -> int:
     _configure_windows_pipe_encoding()
-    parser = argparse.ArgumentParser(
-        prog="dba", description=("Common DBA commands. Missing database credentials can be entered "
-                                "interactively when a command first needs them."),
-        epilog=("Common DBA Commands:\n"
+    parser = _ChineseArgumentParser(
+        prog="dba", description="常用 DBA 命令。命令首次需要数据库凭据时，可在交互提示中输入。",
+        epilog=("常用 DBA 命令：\n"
                 "  dba list\n"
                 "  dba check <database_id>\n"
                 "  dba status <database_id>\n"
                 "  dba diagnose <database_id> slow\n"
                 "  dba diagnose <database_id> disk-growth\n\n"
-                "Advanced commands: dba -h"),
+                "高级命令：dba -h"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"dba-toolkit {__version__}")
     parser.add_argument("--inventory", type=Path, default=Path("config/inventory.yaml"))
     parser.add_argument("--sql-root", type=Path, default=Path("sql"))
     parser.add_argument(
-        "--settings", type=Path, help="Optional runtime YAML; safe defaults when omitted"
+        "--settings", type=Path, help="可选的运行时 YAML；省略时使用安全默认值"
     )
-    commands = parser.add_subparsers(dest="command")
-    commands.add_parser("help", help="Show common DBA tasks")
-    listing = commands.add_parser("list", help="List inventory")
+    commands = parser.add_subparsers(dest="command", title="命令")
+    commands.add_parser("help", help="显示常用 DBA 任务")
+    listing = commands.add_parser("list", help="列出资产清单")
     _add_output_options(listing)
     listing.add_argument("--type", choices=[t.value for t in DatabaseType])
     listing.add_argument("--env")
     listing.add_argument("--group")
     listing.add_argument("--tag")
-    showing = commands.add_parser("show", help="Show one inventory instance")
+    showing = commands.add_parser("show", help="显示一个数据库资产")
     showing.add_argument("database_id")
     _add_output_options(showing)
-    validation = commands.add_parser("validate", help="Validate inventory and all formal SQL scripts")
+    validation = commands.add_parser("validate", help="校验资产清单及全部正式 SQL 脚本")
     _add_output_options(validation)
     driver_info_command = commands.add_parser(
-        "driver-info", help="Inspect local Python/ODBC environment without connecting"
+        "driver-info", help="检查本机 Python/ODBC 环境，不建立数据库连接"
     )
     _add_output_options(driver_info_command)
-    doctor_command = commands.add_parser("doctor", help="Check local Toolkit runtime without credentials or connections")
+    doctor_command = commands.add_parser("doctor", help="检查本机 Toolkit 运行环境，不读取凭据或连接数据库")
     doctor_command.add_argument("--database", action="append", choices=[t.value for t in DatabaseType],
-                                help="Check a configured database runtime (repeatable)")
+                                help="检查指定数据库运行组件（可重复指定）")
     _add_output_options(doctor_command)
-    runtime_command = commands.add_parser("runtime-info", help="Show local runtime components without connecting")
+    runtime_command = commands.add_parser("runtime-info", help="显示本机运行组件，不建立数据库连接")
     _add_output_options(runtime_command)
-    driver_command = commands.add_parser("driver", help="Inspect and manage explicitly installed local database drivers")
+    driver_command = commands.add_parser("driver", help="检查和管理显式安装的本机数据库驱动")
     driver_commands = driver_command.add_subparsers(dest="driver_command", required=True)
-    driver_commands.add_parser("list", help="List active and backup managed drivers")
-    driver_check = driver_commands.add_parser("check", help="Check driver packages and native requirements")
+    driver_commands.add_parser("list", help="列出当前和备份的受管驱动")
+    driver_check = driver_commands.add_parser("check", help="检查驱动软件包及原生组件要求")
     driver_check.add_argument("--database", choices=("mysql", "postgresql", "oracle", "sqlserver"))
-    driver_install = driver_commands.add_parser("install", help="Install a trusted local driver ZIP")
+    driver_install = driver_commands.add_parser("install", help="安装可信的本机驱动 ZIP")
     driver_install.add_argument("--file", type=Path, required=True)
-    driver_rollback = driver_commands.add_parser("rollback", help="Switch to the previous driver version")
+    driver_rollback = driver_commands.add_parser("rollback", help="切换到上一版驱动")
     driver_rollback.add_argument("--database", choices=("mysql", "postgresql", "oracle", "sqlserver"), required=True)
     for subcommand in driver_commands.choices.values():
         _add_output_options(subcommand)
     credentials = commands.add_parser(
-        "credentials", help="Manage secure credentials; missing database aliases can be enrolled on demand",
-        description=("Database commands can enroll a missing credential alias when first needed. "
-                     "Use these commands for sessions and advanced credential administration."),
+        "credentials", help="管理安全凭据；数据库命令需要时可按提示登记缺失的别名",
+        description=("数据库命令首次需要缺失的凭据别名时，可按提示登记。"
+                     "此命令也用于管理凭据会话和高级凭据操作。"),
     )
     credential_commands = credentials.add_subparsers(dest="credential_command", required=True)
     credential_set = credential_commands.add_parser(
-        "set", help="Advanced: store or update one credential explicitly"
+        "set", help="高级操作：显式保存或更新一个凭据"
     )
     credential_set.add_argument("credential_alias")
     credential_set.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
     _add_output_options(credential_set)
-    credential_list = credential_commands.add_parser("list", help="List stored credential aliases")
+    credential_list = credential_commands.add_parser("list", help="列出已保存的凭据别名")
     credential_list.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
-    credential_show = credential_commands.add_parser("show", help="Show credential metadata only")
+    credential_show = credential_commands.add_parser("show", help="仅显示凭据元数据")
     credential_show.add_argument("credential_alias")
     credential_show.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
     _add_output_options(credential_show)
-    credential_delete = credential_commands.add_parser("delete", help="Delete one stored credential")
+    credential_delete = credential_commands.add_parser("delete", help="删除一个已保存的凭据")
     credential_delete.add_argument("credential_alias")
     credential_delete.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
     _add_output_options(credential_delete)
-    credential_test = credential_commands.add_parser("test", help="Test credential retrieval only")
+    credential_test = credential_commands.add_parser("test", help="仅测试能否读取凭据")
     credential_test.add_argument("credential_alias")
     credential_test.add_argument("--backend", choices=("auto", "os", "encrypted", "sqlite"), default="auto")
     _add_output_options(credential_test)
     _add_output_options(credential_commands.choices["list"])
-    credential_init = credential_commands.add_parser("init", help="Initialize encrypted local credential storage")
+    credential_init = credential_commands.add_parser("init", help="初始化本地加密凭据存储")
     credential_init.add_argument("--backend", choices=("encrypted", "sqlite"), required=True)
     _add_output_options(credential_init)
-    credential_backend = credential_commands.add_parser("backend", help="Show credential backend availability")
+    credential_backend = credential_commands.add_parser("backend", help="显示凭据后端可用状态")
     _add_output_options(credential_backend)
-    credential_rekey = credential_commands.add_parser("rekey", help="Change encrypted store master password")
+    credential_rekey = credential_commands.add_parser("rekey", help="更改加密存储的主密码")
     credential_rekey.add_argument("--backend", choices=("encrypted", "sqlite"), required=True)
     _add_output_options(credential_rekey)
-    credential_unlock = credential_commands.add_parser("unlock", help="Unlock encrypted credentials for a short session")
+    credential_unlock = credential_commands.add_parser("unlock", help="在有限时长内解锁加密凭据")
     credential_unlock.add_argument("--backend", choices=("encrypted", "sqlite"), default="encrypted")
-    credential_unlock.add_argument("--ttl", default=None, help="Absolute session lifetime, 5m to 8h (default 30m)")
-    credential_unlock.add_argument("--renew", action="store_true", help="Re-authenticate and replace an active session")
+    credential_unlock.add_argument("--ttl", default=None, help="会话绝对有效期，5 分钟至 8 小时（默认 30 分钟）")
+    credential_unlock.add_argument("--renew", action="store_true", help="重新验证并替换当前会话")
     _add_output_options(credential_unlock)
-    credential_status = credential_commands.add_parser("status", help="Show credential session status")
+    credential_status = credential_commands.add_parser("status", help="显示凭据会话状态")
     _add_output_options(credential_status)
-    credential_lock = credential_commands.add_parser("lock", help="Lock and clear the active credential session")
+    credential_lock = credential_commands.add_parser("lock", help="锁定并清除当前凭据会话")
     _add_output_options(credential_lock)
-    check = commands.add_parser("check", help="Check runtime, connection and detected database version")
+    check = commands.add_parser("check", help="检查运行环境、连接和检测到的数据库版本")
     check.add_argument("database_id")
     _add_credential_backend(check)
     _add_output_options(check)
-    status_command = commands.add_parser("status", help="Show lightweight current database status")
+    status_command = commands.add_parser("status", help="查看数据库当前轻量状态")
     status_command.add_argument("database_id")
     _add_credential_backend(status_command)
     _add_output_options(status_command)
     connection = commands.add_parser(
-        "test-connection", help="Connect, verify basic server identity and close"
+        "test-connection", help="建立连接、核验服务器基本身份后关闭连接"
     )
     connection.add_argument("database_id")
     _add_credential_backend(connection)
     _add_output_options(connection)
-    collect = commands.add_parser("collect", help="Run a reviewed database collector")
+    collect = commands.add_parser("collect", help="运行已审核的数据库采集器")
     collect.add_argument("database_id")
     _add_credential_backend(collect)
     collect.add_argument("collector", choices=tuple(dict.fromkeys((*COLLECTORS, *PG_COLLECTORS,
                                                                     *MYSQL_COLLECTORS,
                                                                     *ORACLE_COLLECTORS))))
     _add_output_options(collect)
-    diagnose = commands.add_parser("diagnose", help="Read-only slow, active SQL, Top SQL, Memory Grant, disk-growth, replication or cached execution-plan diagnosis")
+    diagnose = commands.add_parser("diagnose", help="只读诊断慢 SQL、活动 SQL、Top SQL、Memory Grant、磁盘增长、复制或缓存执行计划")
     diagnose.add_argument("database_id")
     _add_credential_backend(diagnose)
     diagnose.add_argument("scenario", choices=("slow", "plan", "active-sql", "top-sql", "memory-grant", "disk-growth", "replication"))
-    diagnose.add_argument("--session", type=int, help="Positive session ID for plan diagnosis")
-    diagnose.add_argument("--sql-id", help="Oracle cached-plan SQL_ID (requires --child-number)")
-    diagnose.add_argument("--child-number", type=int, help="Oracle cached-plan child cursor number")
-    diagnose.add_argument("--inst-id", type=int, help="Oracle current RAC instance ID")
-    diagnose.add_argument("--con-id", type=int, help="Oracle current container ID (12c+)")
-    diagnose.add_argument("--plan-hash", type=int, help="Expected Oracle PLAN_HASH_VALUE")
+    diagnose.add_argument("--session", type=int, help="执行计划诊断使用的正整数会话 ID")
+    diagnose.add_argument("--sql-id", help="Oracle 缓存执行计划 SQL_ID（需要同时指定 --child-number）")
+    diagnose.add_argument("--child-number", type=int, help="Oracle 缓存计划的子游标编号")
+    diagnose.add_argument("--inst-id", type=int, help="Oracle 当前 RAC 实例 ID")
+    diagnose.add_argument("--con-id", type=int, help="Oracle 当前容器 ID（12c 及以上）")
+    diagnose.add_argument("--plan-hash", type=int, help="期望的 Oracle PLAN_HASH_VALUE")
     diagnose.add_argument("--metric", choices=TOP_SQL_METRIC_CHOICES, default=None,
-                          help="Top SQL cumulative metric (default: SQL Server/Oracle cpu_time; PostgreSQL total_exec_time; MySQL sum_timer_wait)")
-    diagnose.add_argument("--top", type=int, default=10, help="Top SQL row limit (1-100)")
+                          help="Top SQL 累计指标（默认：SQL Server/Oracle cpu_time；PostgreSQL total_exec_time；MySQL sum_timer_wait）")
+    diagnose.add_argument("--top", type=int, default=10, help="Top SQL 结果行数上限（1–100）")
     diagnose.add_argument("--sort", choices=("cpu", "logical-reads", "elapsed"), default="cpu",
-                          help="Active SQL primary CLI ranking (HTML always includes all three rankings)")
+                          help="活动 SQL 终端主排序方式（HTML 报告始终包含三种排序）")
     diagnose.add_argument("--include-top-sql", action="store_true",
-                          help="After complete Slow core evidence, append one cumulative Top SQL snapshot")
-    diagnose.add_argument("--report", type=Path, help="Output HTML report file")
+                          help="慢 SQL 核心证据完整后，附加一次 Top SQL 累计快照")
+    diagnose.add_argument("--report", type=Path, help="HTML 报告输出路径")
     diagnose.add_argument("--format", choices=("console", "json"), default="console",
                           help=argparse.SUPPRESS)
     diagnose.add_argument("--verbose", action="store_true",
-                          help="Include secondary signals and collector quality in the incident summary")
+                          help="在事件摘要中包含次要信号和采集器质量")
     _add_output_options(diagnose)
-    credential_migrate = credential_commands.add_parser("migrate", help="Copy and verify a legacy Store into a new SQLite Store")
+    credential_migrate = credential_commands.add_parser("migrate", help="将旧版 Store 复制并核验到新的 SQLite Store")
     credential_migrate.add_argument("--source", type=Path, required=True)
     credential_migrate.add_argument("--destination", type=Path, required=True)
     _add_output_options(credential_migrate)
@@ -820,9 +835,9 @@ def main(
             if args.json:
                 _emit(args, "validate", validation_result)
             else:
-                print(f"Validation OK: {len(inventory.instances)} instances, {len(scripts)} SQL scripts")
+                print(f"校验通过：{len(inventory.instances)} 个资产，{len(scripts)} 个 SQL 脚本")
                 for warning in warnings:
-                    print(f"WARNING: {warning}")
+                    print(f"警告：{display_message(warning)}")
         elif args.command in {"test-connection", "collect", "diagnose", "check", "status"}:
             instance = inventory.get(args.database_id)
             instance_for_hint = instance
@@ -1488,7 +1503,8 @@ def main(
                             if section is not None:
                                 print(render_report_section_text(section), flush=True)
                         if args.quiet:
-                            print(f"{'READY' if output.get('success') else 'PARTIAL'}  {report_path}", flush=True)
+                            status = "READY" if output.get("success") else "PARTIAL"
+                            print(f"{display_value(status)}  {report_path}", flush=True)
                         else:
                             print(f"\n详细中文报告已写入：{report_path}", flush=True)
                     else:

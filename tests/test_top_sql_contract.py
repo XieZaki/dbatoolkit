@@ -183,8 +183,8 @@ def test_cli_json_and_html_show_contract_status_without_sql_text() -> None:
     assert payload["metric_unit"] == "milliseconds"
     assert payload["metric_scope"] == "SQL_STATEMENT"
     assert payload["collection_scope"] == "INSTANCE"
-    assert "Collection Scope" in cli and "INSTANCE" in cli
-    assert "CUMULATIVE" in cli and "pg_stat_statements" in cli and "0" in cli
+    assert "采集范围" in cli and "实例级" in cli
+    assert "累计统计" in cli and "pg_stat_statements" in cli and "0" in cli
 
     report = _report()
     report_with_top = replace(report, details={**report.details, "top_sql": result.to_dict()})
@@ -193,7 +193,7 @@ def test_cli_json_and_html_show_contract_status_without_sql_text() -> None:
     assert "Top SQL 资源排序" in page and "pg_stat_statements" in page
     assert "queryid=123" in page
     assert "elapsed_time" in page
-    assert "Collection Scope" in page and "INSTANCE" in page
+    assert "采集范围" in page and "实例级" in page
 
 
 def test_legacy_top_sql_report_without_collection_scope_remains_renderable() -> None:
@@ -205,7 +205,7 @@ def test_legacy_top_sql_report_without_collection_scope_remains_renderable() -> 
         report_with_top, build_incident_summary(report_with_top, "reports/slow.html")))
     cli = render_human("top-sql", legacy_payload)
     assert "Top SQL 资源排序" in page
-    assert "Top SQL" in cli and "Collection Scope" in cli and "UNKNOWN" in cli
+    assert "Top SQL" in cli and "采集范围" in cli and "未知" in cli
 
 
 def test_html_omits_top_sql_section_when_contract_absent_and_never_renders_sql_text() -> None:

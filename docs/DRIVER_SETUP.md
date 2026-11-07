@@ -2,11 +2,11 @@
 
 中文操作手册：[用户操作手册](用户操作手册.md)；升级与回退：[UPDATE_GUIDE.md](UPDATE_GUIDE.md)；故障处理：[故障排查.md](故障排查.md)。
 
-本手册说明 Windows x64 离线 Full ZIP、独立 Update ZIP、驱动检查和替换。当前产品版本仍为 `0.9.0`。Full 包使用 CPython Embeddable Runtime 和普通可导入的 `dba` 应用目录；四种 Python 数据库驱动位于独立、带版本号的 `drivers/<database>/versions/`，通过本地 `driver.json` ZIP 显式安装。程序本身不下载、不调用 pip，也不自动执行系统安装器。
+本手册说明 Windows x64 离线 Full ZIP、独立 Update ZIP、驱动检查和替换。当前产品版本为 `0.9.1`。Full 包使用 CPython Embeddable Runtime 和普通可导入的 `dba` 应用目录；四种 Python 数据库驱动位于独立、带版本号的 `drivers/<database>/versions/`，通过本地 `driver.json` ZIP 显式安装。程序本身不下载、不调用 pip，也不自动执行系统安装器。
 
 ## 首次使用
 
-1. 从经批准的分发位置下载 `DBAToolkit-0.9.0-Windows-x64-Full.zip` 和对应 `SHA256SUMS.txt`。
+1. 从经批准的分发位置下载 `DBAToolkit-0.9.1-Windows-x64-Full.zip` 和对应 `SHA256SUMS.txt`。
 2. 在 Windows PowerShell 使用 `Get-FileHash -Algorithm SHA256` 核对 ZIP，再解压到本机目录。不要解压到网络共享目录。
 3. 双击 `启动.bat`。也可从终端运行 `dba.bat --version`、`dba.bat validate` 或任意已有 `dba` 命令。
 4. 在 `config/inventory.yaml` 或 `config/inventory/` 配置本站 Inventory；便携包初始 Inventory 为空，不包含开发机或真实资产。`examples/inventory/` 中的示例均禁用；复制到站点配置前仍需按本站要求编辑。
@@ -51,7 +51,7 @@ Toolkit 不下载、运行 MSI、不修改 PATH/注册表、不安装/删除 ODB
 
 ## 更新与回退
 
-首次安装使用 Full ZIP。正式版本 0.10.0 起提供 Full 和独立、完整的 Update ZIP。将唯一的最新 Update ZIP 放入安装目录 `updates/`，关闭 Toolkit 后双击 `升级.bat`。它使用 Windows PowerShell 外部更新器，不运行旧 Python 来覆盖自身 Runtime。详细步骤、版本兼容、首个 0.9.0 基线迁移和回滚命令见 [便携版升级手册](PORTABLE_UPDATES.md)。
+首次安装使用 Full ZIP。正式版本 0.9.1 起同时提供 Full 和独立、完整的 Update ZIP。将唯一的最新 Update ZIP 放入安装目录 `updates/`，关闭 Toolkit 后双击 `升级.bat`。它使用 Windows PowerShell 外部更新器，不运行旧 Python 来覆盖自身 Runtime。详细步骤、版本兼容、首个 0.9.0 基线迁移和回滚命令见 [便携版升级手册](PORTABLE_UPDATES.md)。
 
 升级器验证清单、版本范围、完整文件列表与 SHA256、磁盘空间及新 Runtime/SQL Registry；在同卷 staging 中准备后再切换。升级失败会尝试恢复旧程序并保留备份。只在活动驱动确认为旧 Toolkit 默认包时更新默认驱动；用户选择的自定义驱动、活动驱动目录、`driver-packages`、Inventory、Credential Store、报告和日志均保留。不要将 ZIP 内容直接覆盖到已有便携目录。
 
@@ -62,12 +62,12 @@ Toolkit 不下载、运行 MSI、不修改 PATH/注册表、不安装/删除 ODB
 Windows 手工构建入口为 `deployment/build_full.ps1 -Version <version>`、`deployment/build_update.ps1 -Version <version>` 和 `deployment/verify_release.ps1 -Version <version>`。版本必须匹配 `pyproject.toml` 与 `dba.__version__`。构建宿主使用 Windows x64 CPython，目标使用项目固定的 CPython 3.13.17 Embeddable Runtime 与哈希锁定 wheelhouse。构建只从本地 wheelhouse 使用 `pip --no-index`；目标端不需要 Python、pip 或联网。
 
 ```powershell
-.\deployment\build_full.ps1 -Version 0.9.0
-.\deployment\build_update.ps1 -Version 0.9.0
-.\deployment\verify_release.ps1 -Version 0.9.0
+.\deployment\build_full.ps1 -Version 0.9.1
+.\deployment\build_update.ps1 -Version 0.9.1
+.\deployment\verify_release.ps1 -Version 0.9.1
 ```
 
-在当前 0.9.0 基线上，Full 是首次安装基线；同版本 Update 只作为不同 build ID 的开发候选。0.10.0 及以后正式版本才发布 Update。GitHub Actions 的 main 构建上传候选 Full/Update artifacts；匹配项目版本的正式 `vX.Y.Z` tag 才触发 Release 创建。工作流不创建 tag。完整升级说明见 [便携版升级手册](PORTABLE_UPDATES.md)。
+0.9.0 Full 是首次安装基线；0.9.1 起正式版本同时发布 Full 和 Update。GitHub Actions 的 main 构建上传候选 Full/Update artifacts；匹配项目版本的正式 `vX.Y.Z` tag 才触发 Release 创建。工作流不创建 tag。完整升级说明见 [便携版升级手册](PORTABLE_UPDATES.md)。
 
 CPython Embeddable Runtime 使用 `._pth` 控制导入路径；它与完整 Python 安装和 pip 部署的运行语义不同。本项目只在便携验收范围内配置这些路径，不把该压缩包当作通用 Python 安装包。
 
