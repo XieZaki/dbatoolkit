@@ -579,10 +579,27 @@ def render_top_sql_human(data: Any) -> str:
                    "statement_end_offset", "database_id", "queryid", "dbid", "userid", "pid",
                    "backend_start", "digest", "schema_name", "processlist_id", "thread_id", "sql_id",
                    "child_number", "inst_id", "plan_hash_value", "plan_generation_num", "toplevel"}
-        identity_text = ", ".join(f"{key}={redact(value)}" for key, value in fields.items() if key in allowed)
-        safe = (redact(identity_text) or "identity unavailable")[:240]
+        engine = identity.get("database_engine") if isinstance(identity, dict) else None
+        if engine == "sqlserver":
+            database_name = item.get("database_name") or "未知"
+            safe = (f"数据库={redact(database_name)}；语句偏移="
+                    f"{fields.get('statement_start_offset', '未知')}-"
+                    f"{fields.get('statement_end_offset', '未知')}")
+        elif engine == "postgresql":
+            safe = f"数据库 ID={fields.get('dbid', '未知')}；Query ID={fields.get('queryid', '未知')}"
+        elif engine == "mysql":
+            safe = f"Schema={fields.get('schema_name') or '未知'}；Digest={str(fields.get('digest') or '未知')[:16]}"
+        elif engine == "oracle":
+            safe = (f"SQL ID={fields.get('sql_id', '未知')}；Child={fields.get('child_number', '未知')}；"
+                    f"实例={fields.get('inst_id', '未知')}")
+        else:
+            identity_text = ", ".join(f"{key}={redact(value)}" for key, value in fields.items() if key in allowed)
+            safe = (redact(identity_text) or "identity unavailable")[:180]
         metric_value = redact(item.get("metric_value"))
         lines.append(f"  {item['rank']:<5} {safe:<50} {metric_value if metric_value is not None else '—'}")
+        if fields:
+            technical = ", ".join(f"{key}={redact(value)}" for key, value in fields.items() if key in allowed)
+            lines.append(f"        原生身份（用于精确关联）：{(redact(technical) or '不可用')[:512]}")
     if len(ranked) > 10:
         lines.append(f"  Showing 10 of {len(ranked)} ranked rows; {len(ranked) - 10} omitted. JSON contains the full requested Top N.")
     if data.get("collection_status") == "COLLECTED" and not items:
