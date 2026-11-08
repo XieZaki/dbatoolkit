@@ -201,10 +201,33 @@ def _top_sql_section(value: Any,
             identity_text = f"{identity.get('database_engine', 'UNKNOWN')}:{native or '身份不可用'}"[:256]
         else:
             identity_text = "身份不可用"
+        database_name = item.get("database_name")
+        if not isinstance(database_name, str) or not database_name.strip():
+            database_name = "未知"
+        primary_identity = identity_text
+        if identity.get("database_engine") == "sqlserver" and isinstance(identity, dict):
+            primary_identity = (
+                f"数据库={database_name}；语句偏移="
+                f"{native_fields.get('statement_start_offset', '未知')}-"
+                f"{native_fields.get('statement_end_offset', '未知')}"
+            )
+        elif identity.get("database_engine") == "postgresql" and isinstance(identity, dict):
+            primary_identity = f"数据库 ID={native_fields.get('dbid', '未知')}；Query ID={native_fields.get('queryid', '未知')}"
+        elif identity.get("database_engine") == "mysql" and isinstance(identity, dict):
+            primary_identity = f"Schema={native_fields.get('schema_name') or '未知'}"
+        elif identity.get("database_engine") == "oracle" and isinstance(identity, dict):
+            primary_identity = (f"SQL ID={native_fields.get('sql_id', '未知')}；"
+                                f"Child={native_fields.get('child_number', '未知')}；"
+                                f"实例={native_fields.get('inst_id', '未知')}")
+        primary_identity = primary_identity[:180]
+        if identity_text != "身份不可用":
+            code_blocks.append(ReportCodeBlock(
+                f"排名 {item.get('rank')} — 原生身份与执行计划标识",
+                identity_text, "text", True))
         association = item.get("sql_text_association") if integrated else None
         association_status = (association.get("status") if isinstance(association, dict)
                               else "NOT_ATTEMPTED")
-        base_row = (str(item.get("rank")), identity_text, _human(item.get("metric_value")))
+        base_row = (str(item.get("rank")), primary_identity, _human(item.get("metric_value")))
         if sqlserver_reason_column:
             reason_values = ([association.get("reason"), association.get("request_state")]
                              if isinstance(association, dict) else [])
@@ -235,6 +258,9 @@ def _top_sql_section(value: Any,
         summary = "当前没有可用的已排名 Top SQL 记录；状态和限制见契约字段。"
     else:
         summary = _omitted(len(raw_items), len(rows), "Top SQL rows")
+    if payload.get("database_engine") == "sqlserver" and rows:
+        summary = ("SQL Server 的数据库名称与语句偏移用于快速定位；完整 SQL Handle、Hash、Plan Handle "
+                   "保留在下方可展开的原生身份详情中。 " + summary)
     if integrated:
         summary = ("Top SQL 排名反映数据库统计视图中的累计表现，不代表当前故障根因。 "
                    "它与当前活动会话、等待和阻塞证据分开呈现。 "
