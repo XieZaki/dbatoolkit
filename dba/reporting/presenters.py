@@ -222,9 +222,11 @@ def _top_sql_section(value: Any,
         # native-identity presentation and acceptance-parser contract.
         primary_identity = primary_identity[:180]
         if identity_text != "身份不可用" and not sqlserver_slow:
+            detail_title = f"排名 {item.get('rank')} — 原生身份与执行计划标识"
+            if isinstance(identity, dict) and identity.get("database_engine") == "sqlserver":
+                detail_title = f"排名 {item.get('rank')} — 数据库 {database_name} — 原生身份与执行计划标识"
             code_blocks.append(ReportCodeBlock(
-                f"排名 {item.get('rank')} — 原生身份与执行计划标识",
-                identity_text, "text", True))
+                detail_title, identity_text, "text", True))
         association = item.get("sql_text_association") if integrated else None
         association_status = (association.get("status") if isinstance(association, dict)
                               else "NOT_ATTEMPTED")
