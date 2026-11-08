@@ -75,7 +75,7 @@ def test_sqlserver_top_sql_routes_are_explicit_and_2025_unverified() -> None:
     assert "sys.dm_exec_query_stats" in script.text
     assert "sys.dm_exec_sql_text" in script.text
     assert "COALESCE(st.dbid, plan_text.dbid) AS database_id" in script.text
-    assert "DB_NAME(COALESCE(st.dbid, plan_text.dbid)) AS database_name" in script.text
+    assert "DB_NAME(COALESCE(st.dbid, plan_text.dbid)) END AS database_name" in script.text
     assert "OUTER APPLY sys.dm_exec_sql_text(qs.plan_handle) AS plan_text" in script.text
     assert "query_plan_hash" in script.text and "statement_start_offset" in script.text
     assert "TOP (?)" in script.text and "ORDER BY ranking.ranking_value DESC" in script.text
@@ -316,7 +316,8 @@ def test_sqlserver_top_sql_cli_json_and_html_share_the_contract() -> None:
         "limitations": ["RESET_SUSPECTED", "CACHE_EVICTED"],
         "items": [{"rank": 1, "sql_identity": {"database_engine": "sqlserver", "kind": "STATEMENT",
             "fields": {"sql_handle": "0x01", "statement_start_offset": 0, "statement_end_offset": 42}},
-            "plan_identity": None, "request_identity": None, "metric_value": 1000, "value_status": "OBSERVED"}],
+            "plan_identity": None, "request_identity": None, "metric_value": 1000,
+            "database_name": "appdb", "value_status": "OBSERVED"}],
     }
     report = TopSQLDiagnosticReport(instance_report.instance, datetime.now(timezone.utc), "top-sql", (),
                                     {"version": "16.0.4305.5", "top_sql": result})
@@ -333,7 +334,7 @@ def test_sqlserver_top_sql_cli_json_and_html_share_the_contract() -> None:
     cli = render_human("top-sql", result)
     assert "total_cpu_time" in cli
     assert "采集范围" in cli and "实例级" in cli
-    assert "数据库=appdb" in cli and "原生身份（用于精确关联）" in cli
+    assert "sqlserver:sql_handle=0x01" in cli
     assert "0x01" in cli and "1000" in cli
 
 

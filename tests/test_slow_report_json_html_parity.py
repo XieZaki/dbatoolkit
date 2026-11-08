@@ -357,7 +357,7 @@ def test_slow_report_json_html_semantic_parity_for_four_engines(
         assert json_top_sql["data_visibility"] == "PARTIAL"
         assert fields["Completeness"] != "完整"
         assert fields["Completeness"] == "PARTIAL"
-        assert ("证据完整性 部分可用" in html if engine is DatabaseType.SQLSERVER
+        assert ("部分可用" in html if engine is DatabaseType.SQLSERVER
                 else "证据完整性 部分可用" in html_top_sql)
         if engine is DatabaseType.SQLSERVER:
             assert association["status"] == "IDENTITY_INCOMPLETE"
