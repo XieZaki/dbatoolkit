@@ -205,17 +205,17 @@ def _top_sql_section(value: Any,
         if not isinstance(database_name, str) or not database_name.strip():
             database_name = "未知"
         primary_identity = identity_text
-        if identity.get("database_engine") == "sqlserver" and isinstance(identity, dict):
+        if isinstance(identity, dict) and identity.get("database_engine") == "sqlserver":
             primary_identity = (
                 f"数据库={database_name}；语句偏移="
                 f"{native_fields.get('statement_start_offset', '未知')}-"
                 f"{native_fields.get('statement_end_offset', '未知')}"
             )
-        elif identity.get("database_engine") == "postgresql" and isinstance(identity, dict):
+        elif isinstance(identity, dict) and identity.get("database_engine") == "postgresql":
             primary_identity = f"数据库 ID={native_fields.get('dbid', '未知')}；Query ID={native_fields.get('queryid', '未知')}"
-        elif identity.get("database_engine") == "mysql" and isinstance(identity, dict):
+        elif isinstance(identity, dict) and identity.get("database_engine") == "mysql":
             primary_identity = f"Schema={native_fields.get('schema_name') or '未知'}"
-        elif identity.get("database_engine") == "oracle" and isinstance(identity, dict):
+        elif isinstance(identity, dict) and identity.get("database_engine") == "oracle":
             primary_identity = (f"SQL ID={native_fields.get('sql_id', '未知')}；"
                                 f"Child={native_fields.get('child_number', '未知')}；"
                                 f"实例={native_fields.get('inst_id', '未知')}")
