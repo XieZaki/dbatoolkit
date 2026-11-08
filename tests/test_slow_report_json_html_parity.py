@@ -185,7 +185,9 @@ def _top_sql_result(engine: DatabaseType, state: str, *, identifier: str | None 
     if state in {"complete_matched", "partial_unmatched"}:
         identity, plan, source_row = _identity_and_source(
             engine, identifier=identifier, sql_text=sql_text, matched=state == "complete_matched")
-        items = (TopSQLItem(identity, 42, rank=1, plan_identity=plan),)
+        metric_value = 42_000_000 if engine is DatabaseType.SQLSERVER else 42
+        items = (TopSQLItem(identity, metric_value, rank=1, plan_identity=plan,
+                            database_name="parity_db" if engine is DatabaseType.SQLSERVER else None),)
         rows = [source_row]
 
     completeness = (Completeness.PARTIAL if state == "partial_unmatched" else
@@ -303,12 +305,24 @@ def test_slow_report_json_html_semantic_parity_for_four_engines(
     assert fields["Metric Semantics"] == json_top_sql["metric_semantics"]
     assert fields["Metric Scope"] == json_top_sql["metric_scope"]
     assert fields["Collection Scope"] == json_top_sql["collection_scope"]
-    assert "采集状态" in html_top_sql
-    assert display_label(json_top_sql["collection_status"]) in html_top_sql
-    for label, value in fields.items():
-        assert display_label(label) in html_top_sql
-        display_value = display_report_value(label, value)
-        assert display_value in html_top_sql
+    if engine is DatabaseType.SQLSERVER:
+        assert "数据库名称" in html_top_sql
+        if state in {"complete_matched", "partial_unmatched"}:
+            assert "parity_db" in html_top_sql and "42.00 秒" in html_top_sql
+        assert "采集状态" not in html_top_sql
+        assert "handle-001" not in html_top_sql
+        assert "plan-handle-001" not in html_top_sql
+        assert "query-hash-001" not in html_top_sql
+        for label in ("Ranking Metric", "Ranking Direction", "Collection Scope", "Returned Records"):
+            assert display_label(label) in html_top_sql
+        assert '<section class="report-section" id="top-sql"' in html
+    else:
+        assert "采集状态" in html_top_sql
+        assert display_label(json_top_sql["collection_status"]) in html_top_sql
+        for label, value in fields.items():
+            assert display_label(label) in html_top_sql
+            display_value = display_report_value(label, value)
+            assert display_value in html_top_sql
     assert json_document["success"] is True
     assert summary.status == baseline_summary.status
     assert summary.severity == baseline_summary.severity
@@ -343,7 +357,8 @@ def test_slow_report_json_html_semantic_parity_for_four_engines(
         assert json_top_sql["data_visibility"] == "PARTIAL"
         assert fields["Completeness"] != "完整"
         assert fields["Completeness"] == "PARTIAL"
-        assert "证据完整性 部分可用" in html_top_sql
+        assert ("证据完整性 部分可用" in html if engine is DatabaseType.SQLSERVER
+                else "证据完整性 部分可用" in html_top_sql)
         if engine is DatabaseType.SQLSERVER:
             assert association["status"] == "IDENTITY_INCOMPLETE"
             assert association["reason"] == "SLOW_REQUEST_IDENTITY_INCOMPLETE"
@@ -375,7 +390,7 @@ def test_slow_report_json_html_semantic_parity_for_four_engines(
         assert json_top_sql["database_error"]["classification"] == "TIMEOUT"
         assert "FAILED" in fields["Collection Status"]
         assert "COLLECTION_FAILED" in fields["Limitations"]
-        assert "失败" in html_top_sql
+        assert ("失败" in html if engine is DatabaseType.SQLSERVER else "失败" in html_top_sql)
         assert "ConnectionFailed" not in html_top_sql
         assert not section.tables
         assert json_document["success"] is True
@@ -411,9 +426,14 @@ def test_report_boundary_values_stay_bounded_escaped_and_structured(engine: Data
     section = _top_sql_section(model)
     identity_text = section.tables[0].rows[0][1]
     assert section.code_blocks[0].content == association["sql_text"]
-    assert "A" * 100 in identity_text
-    assert "A" * 101 not in identity_text
-    assert "B" not in identity_text
+    if engine is DatabaseType.SQLSERVER:
+        assert identity_text == "parity_db"
+        assert "A" * 100 not in html_top_sql
+        assert identifier not in html
+    else:
+        assert "A" * 100 in identity_text
+        assert "A" * 101 not in identity_text
+        assert "B" not in identity_text
     assert len(html) < DEFAULT_HUMAN_REPORT_POLICY.hard_report_bytes
     assert "PARITY_BOUNDARY_&lt;script&gt;&amp;&quot;quote&quot;" in html
     assert "PARITY_BOUNDARY_<script>" not in html
@@ -463,6 +483,33 @@ def test_sqlserver_identity_state_has_json_html_parity(
     assert _UNMATCHED_SQL not in json.dumps(json_document, ensure_ascii=False)
     assert _UNMATCHED_SQL not in html
 
+
+
+
+def test_sqlserver_slow_top_sql_hides_native_ids_and_labels_missing_database_name() -> None:
+    report = _slow_snapshot(DatabaseType.SQLSERVER)
+    result, source = _top_sql_result(DatabaseType.SQLSERVER, "complete_matched")
+    _attach_top_sql(report, result, source)
+    report.details["top_sql"]["items"][0].pop("database_name", None)
+
+    summary = build_incident_summary(report, "reports/sqlserver-readable-top-sql.html")
+    model = build_report_model(report, summary)
+    html = render_bounded(model, HtmlReportRenderer().render)
+    html_top_sql = _section_text(html)
+    section = _top_sql_section(model)
+    json_document = _json_report(report, summary)
+    item = json_document["report"]["details"]["top_sql"]["items"][0]
+
+    assert section.tables[0].headers[1] == "Database Name"
+    assert section.tables[0].rows[0][1] == "名称未采集"
+    assert "名称未采集" in html_top_sql
+    assert "handle-001" not in html_top_sql
+    assert "plan-handle-001" not in html_top_sql
+    assert "query-hash-001" not in html_top_sql
+    assert "database_id=7" not in html_top_sql
+    assert item["sql_identity"]["fields"]["sql_handle"] == "handle-001"
+    assert item["sql_identity"]["fields"]["database_id"] == 7
+    assert item["plan_identity"]["fields"]["plan_handle"] == "plan-handle-001"
 
 def test_sqlserver_session_identity_is_consistent_in_json_and_html() -> None:
     now = _STAMP

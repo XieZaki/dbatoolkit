@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import replace
 from datetime import datetime
@@ -144,6 +145,18 @@ def _top_sql_section(value: Any,
     raw_items: list[Any] = payload.get("items", [])
     if not isinstance(raw_items, list):
         raw_items = []
+    sqlserver_slow = integrated and payload.get("database_engine") == "sqlserver"
+    sqlserver_metric_labels = {
+        "cpu_time": "累计 CPU",
+        "logical_reads": "累计逻辑读",
+        "physical_reads": "累计物理读",
+        "execution_count": "执行次数",
+        "elapsed_time": "累计耗时",
+        "average_cpu_time": "平均 CPU",
+        "average_elapsed_time": "平均耗时",
+    }
+    sqlserver_metric_label = sqlserver_metric_labels.get(
+        payload.get("ranking_metric"), "指标值")
     metadata = ("collection_status", "completeness", "data_visibility",
                 "database_engine", "database_version", "profile_id", "collection_timestamp",
                 "ranking_metric", "ranking_direction", "metric_name", "metric_unit",
@@ -203,9 +216,10 @@ def _top_sql_section(value: Any,
             identity_text = "身份不可用"
         database_name = item.get("database_name")
         if not isinstance(database_name, str) or not database_name.strip():
-            database_name = "未知"
-        primary_identity = identity_text
-        if isinstance(identity, dict) and identity.get("database_engine") == "sqlserver":
+            database_name = "名称未采集" if sqlserver_slow else "未知"
+        primary_identity = database_name if sqlserver_slow else identity_text
+        if (not sqlserver_slow and isinstance(identity, dict)
+                and identity.get("database_engine") == "sqlserver"):
             primary_identity = (
                 f"数据库={database_name}；语句偏移="
                 f"{native_fields.get('statement_start_offset', '未知')}-"
@@ -220,14 +234,27 @@ def _top_sql_section(value: Any,
                                 f"Child={native_fields.get('child_number', '未知')}；"
                                 f"实例={native_fields.get('inst_id', '未知')}")
         primary_identity = primary_identity[:180]
-        if identity_text != "身份不可用":
+        if identity_text != "身份不可用" and not sqlserver_slow:
             code_blocks.append(ReportCodeBlock(
                 f"排名 {item.get('rank')} — 原生身份与执行计划标识",
                 identity_text, "text", True))
         association = item.get("sql_text_association") if integrated else None
         association_status = (association.get("status") if isinstance(association, dict)
                               else "NOT_ATTEMPTED")
-        base_row = (str(item.get("rank")), primary_identity, _human(item.get("metric_value")))
+        metric_value = _human(item.get("metric_value"))
+        if sqlserver_slow:
+            raw_value = item.get("metric_value")
+            unit = payload.get("metric_unit")
+            if type(raw_value) in (int, float) and math.isfinite(raw_value):
+                if unit == "microseconds":
+                    metric_value = f"{raw_value / 1_000_000:,.2f} 秒"
+                elif unit == "microseconds/execution":
+                    metric_value = f"{raw_value:,.2f} 微秒/次"
+                elif unit == "pages":
+                    metric_value = f"{raw_value:,.0f} 页"
+                elif unit == "executions":
+                    metric_value = f"{raw_value:,.0f} 次"
+        base_row = (str(item.get("rank")), primary_identity, metric_value)
         if sqlserver_reason_column:
             reason_values = ([association.get("reason"), association.get("request_state")]
                              if isinstance(association, dict) else [])
@@ -247,7 +274,9 @@ def _top_sql_section(value: Any,
                 code_blocks.append(ReportCodeBlock(
                     f"Top SQL 排名 {item.get('rank')} — 与慢 SQL 精确匹配",
                     str(redact(clipped)), "sql", True))
-    headers = (("Rank", "SQL identity", "Metric value", "SQL text association", "Association reason")
+    headers = (("Rank", "Database Name", sqlserver_metric_label,
+                "SQL text association", "Association reason") if sqlserver_slow else
+               ("Rank", "SQL identity", "Metric value", "SQL text association", "Association reason")
                if sqlserver_reason_column else
                ("Rank", "SQL identity", "Metric value", "SQL text association") if integrated else
                ("Rank", "SQL identity", "Metric value"))
@@ -258,14 +287,21 @@ def _top_sql_section(value: Any,
         summary = "当前没有可用的已排名 Top SQL 记录；状态和限制见契约字段。"
     else:
         summary = _omitted(len(raw_items), len(rows), "Top SQL rows")
-    if payload.get("database_engine") == "sqlserver" and rows:
-        summary = ("SQL Server 的数据库名称与语句偏移用于快速定位；完整 SQL Handle、Hash、Plan Handle "
-                   "保留在下方可展开的原生身份详情中。 " + summary)
-    if integrated:
+    if sqlserver_slow:
+        summary = (
+            "Top SQL 排名反映数据库统计视图中的累计表现，不代表当前故障根因；"
+            "它与当前活动会话、等待和阻塞证据分开呈现。"
+            "SQL 文本仅在严格原生身份匹配时展示；未匹配时不展示 SQL 文本。"
+            "SQL Handle、Plan Handle、Query Hash 等内部标识不占用默认报告版面，"
+            "完整值保留在原始 JSON 中。数据库名称以采集结果为准；未取得名称时显示“名称未采集”，不以 DBID 代替。 "
+            + summary
+        )
+    elif integrated:
         summary = ("Top SQL 排名反映数据库统计视图中的累计表现，不代表当前故障根因。 "
                    "它与当前活动会话、等待和阻塞证据分开呈现。 "
                    "此处完整性仅描述 Top SQL 附加快照，不改变 Slow 核心证据完整性。 " + summary)
-    return ReportSection("top-sql", "Top SQL", summary=summary, fields=fields,
+    title = "Top SQL 资源排序" if sqlserver_slow else "Top SQL"
+    return ReportSection("top-sql", title, summary=summary, fields=fields,
                          tables=(table,) if table else (), code_blocks=tuple(code_blocks))
 
 

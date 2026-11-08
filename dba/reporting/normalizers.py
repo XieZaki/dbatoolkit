@@ -19,6 +19,7 @@ DISPLAY_LABELS = {
     "LONG_RUNNING_SQL": "慢 SQL",
     "HIGH_CONCURRENCY": "高并发",
     "Database": "数据库",
+    "Database Name": "数据库名称",
     "Instance": "实例",
     "Database Type": "数据库类型",
     "Database Engine": "数据库类型",
