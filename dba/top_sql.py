@@ -184,10 +184,18 @@ class TopSQLItem:
     rank: int | None = None
     plan_identity: NativeSQLIdentity | None = None
     request_identity: NativeSQLIdentity | None = None
+    # Optional human-facing database context; deliberately excluded from native identity.
+    database_name: str | None = None
 
     def __post_init__(self) -> None:
         status = MetricValueStatus(self.value_status)
         object.__setattr__(self, "value_status", status)
+        if self.database_name is not None and (
+            not isinstance(self.database_name, str)
+            or not self.database_name.strip()
+            or len(self.database_name) > 128
+        ):
+            raise ValueError("Display database name must be a non-empty identifier of at most 128 characters.")
         if status is MetricValueStatus.OBSERVED:
             if (type(self.metric_value) not in (int, float) or
                     not math.isfinite(float(cast(int | float, self.metric_value)))):
@@ -203,11 +211,14 @@ class TopSQLItem:
                 raise ValueError("SQL, plan, and request identities must use the same database engine.")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"rank": self.rank,
-                "sql_identity": self.sql_identity.to_dict() if self.sql_identity else None,
-                "plan_identity": self.plan_identity.to_dict() if self.plan_identity else None,
-                "request_identity": self.request_identity.to_dict() if self.request_identity else None,
-                "metric_value": self.metric_value, "value_status": MetricValueStatus(self.value_status).value}
+        result = {"rank": self.rank,
+                  "sql_identity": self.sql_identity.to_dict() if self.sql_identity else None,
+                  "plan_identity": self.plan_identity.to_dict() if self.plan_identity else None,
+                  "request_identity": self.request_identity.to_dict() if self.request_identity else None,
+                  "metric_value": self.metric_value, "value_status": MetricValueStatus(self.value_status).value}
+        if self.database_name is not None:
+            result["database_name"] = self.database_name
+        return result
 
 
 @dataclass(frozen=True)
