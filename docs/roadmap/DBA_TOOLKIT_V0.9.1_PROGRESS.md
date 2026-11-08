@@ -3,17 +3,17 @@
 ## Current position
 
 ```text
-CURRENT_PHASE: V0.9.1 release preparation and publication
-CURRENT_TASK: PORTABLE-UPDATE-001 — E2E_PENDING; v0.9.1 public Release and remote asset hash verification recorded in Acceptance §60; formal cross-version Update remains unverified
+CURRENT_PHASE: Phase 2 — SQL Server Top SQL identity integration accepted; remaining scopes unchanged
+CURRENT_TASK: V091-P2-TOPSQL-INTEGRATION-001 — DONE; user-accepted SQL Server 2022 Docker E2E scope recorded in Acceptance §63
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.1
-BASE_HEAD_FOR_CURRENT_CHECKPOINT: af3474558f28a236a1912435f0d133df1f61bbcc
-CURRENT_TASK_DELIVERY: GitHub Actions run #14 (`42345786728`) passed Windows pytest (1325 passed, 2 skipped), Ruff, strict MyPy (78 source files), pinned CPython runtime SHA256 validation, Full/Update construction, and remote four-asset size/SHA256 verification. Public Release `v0.9.1` is published. Local 0.9.1 verification, `dba validate`, PowerShell parsing, and package smoke evidence are recorded in Acceptance §59–60. No DB E2E.
-LAST_COMPLETED_TASK: `BUG-WINDOWS-CI-FAILURES-001` — VERIFIED in Backlog; post-fix Actions evidence is in Acceptance §60. `SQL-REGISTRY-SAFETY-001` remains VERIFIED in Backlog; its final offline audit is in Acceptance §58.
-NEXT_READY_TASK: Continue `PORTABLE-UPDATE-001` formal cross-version Update acceptance on a disposable Python-absent Windows host when available; current release publication is complete but the task remains E2E_PENDING. `V091-P5-WORKBENCH-001` remains IN_PROGRESS for real four-database report generation and real-report JSON/HTML parity; no DB host/session gate was exercised. Do not start Top SQL Delta.
-WAITING_FOR_USER_REVIEW: NO — the user authorized 0.9.1 version change, commit, push, tag, and Release in this request.
-WAITING_FOR_USER_ACTION: None. No database, Inventory, Credential Store, credential, or Docker was accessed in local validation.
-FOLLOWING_ORDER: Preserve existing Oracle, SQL Registry, Top SQL, and P5 evidence. The v0.9.1 Actions build, remote asset checks, and public Release verification succeeded; remaining E2E acceptance is tracked in the owning Backlog rows.
+BASE_HEAD_FOR_CURRENT_CHECKPOINT: 1332b7b16365ab4caccecab3530432932e71df16
+CURRENT_TASK_DELIVERY: User-provided `WINDOWS_LOCAL_REAL_E2E`: SQL Server 2022 Docker, version 16.0.4305.5, asset sqlserver2022/environment=test; one active request had all four normalized identities populated, top/all parity, and Top SQL rank 3 MATCHED from slow.active_requests. `ISOLATED_OFFLINE_TEST`: 121 targeted tests passed; Ruff and strict MyPy (78 dba sources) passed. Scope and the uninspected HTML visual state are recorded in Acceptance §63.
+LAST_COMPLETED_TASK: `V091-P2-TOPSQL-INTEGRATION-001` — DONE, user-accepted for the recorded scope in Acceptance §63. `BUG-WINDOWS-CI-FAILURES-001` and `SQL-REGISTRY-SAFETY-001` remain VERIFIED in Backlog; evidence remains in Acceptance §§58 and 60.
+NEXT_READY_TASK: No new task started by this documentation closeout; await user selection. `PORTABLE-UPDATE-001` remains E2E_PENDING and `V091-P5-WORKBENCH-001` remains IN_PROGRESS for real four-database reports and real-report JSON/HTML parity. Do not start Top SQL Delta.
+WAITING_FOR_USER_REVIEW: NO — the user explicitly requested formal closure of this task based on the supplied E2E evidence.
+WAITING_FOR_USER_ACTION: Select the next task. Other Backlog states remain unchanged; no next task was started.
+FOLLOWING_ORDER: Preserve all pre-existing Oracle, SQL Registry, Top SQL, P5, release artifacts, untracked files, and current worktree changes. SQL Server Top SQL integration is DONE for the accepted scope in Acceptance §63; all other task states and release evidence remain as recorded in their owning Backlog rows.
 ```
 
 ### BUG-WINDOWS-CI-FAILURES-001 — code-complete local acceptance — 2026-11-03
@@ -285,3 +285,7 @@ Added `tests/test_slow_report_interactions.py`, which executes the actual inline
 ### Root-cause and resource-attribution planning supplement — 2026-11-07
 
 A documentation-only planning update is recorded in Roadmap Phase 2/3/5, Backlog, and docs/design/performance-triage-and-sql-analysis-v0.9.1.md §18. V091-P2-ROOT-CAUSE-DESIGN-001 is VERIFIED for static design/document scope; V091-P2-RESOURCE-CONTEXT-CONTRACT-001 remains BACKLOG and requires separate authorization before implementation. No Collector, Registry SQL, Adapter, Profile, permission, database, Credential Store, Inventory, host probe, test workload, or telemetry was changed or accessed. The canonical Top SQL integration state remains BLOCKED; the current PORTABLE-UPDATE-001 pointer and Phase 5 workbench status are unchanged.
+
+### V091-P2-TOPSQL-INTEGRATION-001 formal closure — 2026-11-08
+
+The user accepted the integration task as `DONE` based on the SQL Server 2022 Docker E2E report in Acceptance §63. Evidence is limited to version `16.0.4305.5`, asset `sqlserver2022`, and `environment=test`; other server versions and databases are not promoted. The 121 offline regression tests, Ruff, and Strict MyPy remain separate evidence. No manual HTML visual inspection was performed. `PORTABLE-UPDATE-001` remains `E2E_PENDING`; `V091-P5-WORKBENCH-001` remains `IN_PROGRESS`. No other task status changed and no new task was started.

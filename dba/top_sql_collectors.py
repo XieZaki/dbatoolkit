@@ -199,8 +199,13 @@ class SQLServerTopSQLCollector:
             fields: dict[str, str | int | None] = {"sql_handle": handle,
                                                    "statement_start_offset": start,
                                                    "statement_end_offset": end}
-            if type(row.get("database_id")) is int:
-                fields["database_id"] = row["database_id"]
+            database_id = row.get("database_id")
+            if type(database_id) is int:
+                fields["database_id"] = database_id
+            else:
+                partial = True
+                if Limitation.IDENTITY_AMBIGUOUS not in limitations:
+                    limitations.append(Limitation.IDENTITY_AMBIGUOUS)
             for key in ("query_hash",):
                 if isinstance(row.get(key), str) and row[key]:
                     fields[key] = row[key]
@@ -212,6 +217,10 @@ class SQLServerTopSQLCollector:
                 plan_fields["query_plan_hash"] = row["query_plan_hash"]
             if type(row.get("plan_generation_num")) is int:
                 plan_fields["plan_generation_num"] = row["plan_generation_num"]
+            if not {"plan_handle", "query_plan_hash", "plan_generation_num"}.issubset(plan_fields):
+                partial = True
+                if Limitation.IDENTITY_AMBIGUOUS not in limitations:
+                    limitations.append(Limitation.IDENTITY_AMBIGUOUS)
             plan_identity = (NativeSQLIdentity(DatabaseType.SQLSERVER, IdentityKind.PLAN, plan_fields)
                              if plan_fields else None)
             value = _numeric(row.get("ranking_value"))

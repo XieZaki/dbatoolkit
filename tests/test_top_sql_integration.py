@@ -53,7 +53,8 @@ def test_exact_native_identity_match_for_all_four_engines(engine: DatabaseType) 
         item["plan_identity"] = {"database_engine": engine.value, "kind": "PLAN", "fields": {
             "plan_handle": "0x03", "query_plan_hash": "0x04", "plan_generation_num": 8,
         }}
-        changes = {"plan_handle": "0x03", "query_plan_hash": "0x04", "plan_generation_num": 8}
+        changes = {"plan_handle": "0x03", "query_plan_hash": "0x04",
+                   "plan_generation_num": 8, "plan_generation_match_count": 1}
     associated = integration.associate_slow_sql_text(
         engine, [item], {integration._SLOW_REQUEST_KEYS[engine]: [_slow_row(engine, **changes)]})
     assert associated[0]["sql_text_association"] == {
@@ -91,10 +92,131 @@ def test_sqlserver_plan_generation_mismatch_is_not_associated() -> None:
     }}
     item = {"sql_identity": sql_identity, "plan_identity": plan_identity}
     row = _slow_row(DatabaseType.SQLSERVER, plan_handle="0x03", query_plan_hash="0x04",
-                    plan_generation_num=9)
+                    plan_generation_num=9, plan_generation_match_count=1)
     result = integration.associate_slow_sql_text(
         DatabaseType.SQLSERVER, [item], {"all_requests": [row]})
     assert result[0]["sql_text_association"]["status"] == "UNMATCHED"
+    assert result[0]["sql_text_association"]["reason"] == "PLAN_IDENTITY_MISMATCH"
+
+
+def test_sqlserver_missing_database_id_is_identity_incomplete_and_never_leaks_sql() -> None:
+    identity = _identity(DatabaseType.SQLSERVER)
+    identity["fields"].pop("database_id")
+    item = {"sql_identity": identity, "plan_identity": {
+        "database_engine": "sqlserver", "kind": "PLAN", "fields": {
+            "plan_handle": "0x03", "query_plan_hash": "0x04", "plan_generation_num": 8,
+        },
+    }}
+    result = integration.associate_slow_sql_text(DatabaseType.SQLSERVER, [item], {
+        "all_requests": [_slow_row(DatabaseType.SQLSERVER, plan_handle="0x03",
+                                    query_plan_hash="0x04", plan_generation_num=8,
+                                    plan_generation_match_count=1)],
+    })[0]["sql_text_association"]
+
+    assert result == {
+        "status": "IDENTITY_INCOMPLETE", "source": None,
+        "reason": "TOP_SQL_IDENTITY_INCOMPLETE", "missing_fields": ["sql_identity.database_id"],
+    }
+    assert "sql_text" not in result
+
+
+@pytest.mark.parametrize("change", [
+    {"sql_handle": "0x99"},
+    {"statement_start_offset": 2},
+    {"statement_end_offset": 22},
+    {"database_id": 8},
+    {"query_hash": "0x99"},
+])
+def test_sqlserver_statement_mismatch_is_unmatched_even_with_same_text_and_hash(
+    change: dict[str, Any],
+) -> None:
+    identity = _identity(DatabaseType.SQLSERVER)
+    item = {"sql_identity": identity, "plan_identity": {
+        "database_engine": "sqlserver", "kind": "PLAN", "fields": {
+            "plan_handle": "0x03", "query_plan_hash": "0x04", "plan_generation_num": 8,
+        },
+    }}
+    source = _slow_row(DatabaseType.SQLSERVER, plan_handle="0x03", query_plan_hash="0x04",
+                       plan_generation_num=8, plan_generation_match_count=1, **change)
+
+    result = integration.associate_slow_sql_text(
+        DatabaseType.SQLSERVER, [item], {"all_requests": [source]})[0]["sql_text_association"]
+
+    assert result == {"status": "UNMATCHED", "source": None,
+                      "reason": "STATEMENT_IDENTITY_MISMATCH"}
+    assert "sql_text" not in result
+
+
+@pytest.mark.parametrize(("match_count", "reason"), [
+    (0, "PLAN_GENERATION_UNAVAILABLE"),
+    (2, "PLAN_GENERATION_AMBIGUOUS"),
+])
+def test_sqlserver_missing_or_ambiguous_query_stats_generation_stays_incomplete(
+    match_count: int, reason: str,
+) -> None:
+    item = {"sql_identity": _identity(DatabaseType.SQLSERVER), "plan_identity": {
+        "database_engine": "sqlserver", "kind": "PLAN", "fields": {
+            "plan_handle": "0x03", "query_plan_hash": "0x04", "plan_generation_num": 8,
+        },
+    }}
+    row = _slow_row(DatabaseType.SQLSERVER, plan_handle="0x03", query_plan_hash="0x04",
+                    plan_generation_num=8, plan_generation_match_count=match_count)
+
+    result = integration.associate_slow_sql_text(
+        DatabaseType.SQLSERVER, [item], {"all_requests": [row]})[0]["sql_text_association"]
+
+    assert result == {"status": "IDENTITY_INCOMPLETE", "source": None, "reason": reason}
+    assert "sql_text" not in result
+
+
+def test_sqlserver_missing_query_stats_match_count_stays_incomplete() -> None:
+    item = {"sql_identity": _identity(DatabaseType.SQLSERVER), "plan_identity": {
+        "database_engine": "sqlserver", "kind": "PLAN", "fields": {
+            "plan_handle": "0x03", "query_plan_hash": "0x04", "plan_generation_num": 8,
+        },
+    }}
+    row = _slow_row(DatabaseType.SQLSERVER, plan_handle="0x03", query_plan_hash="0x04",
+                    plan_generation_num=8, plan_generation_match_count=1)
+    row.pop("plan_generation_match_count")
+
+    result = integration.associate_slow_sql_text(
+        DatabaseType.SQLSERVER, [item], {"all_requests": [row]})[0]["sql_text_association"]
+
+    assert result == {"status": "IDENTITY_INCOMPLETE", "source": None,
+                      "reason": "SLOW_REQUEST_IDENTITY_INCOMPLETE"}
+    assert "sql_text" not in result
+
+
+def test_sqlserver_absent_active_requests_is_not_reported_as_connection_failure() -> None:
+    item = {"sql_identity": _identity(DatabaseType.SQLSERVER), "plan_identity": {
+        "database_engine": "sqlserver", "kind": "PLAN", "fields": {
+            "plan_handle": "0x03", "query_plan_hash": "0x04", "plan_generation_num": 8,
+        },
+    }}
+    result = integration.associate_slow_sql_text(
+        DatabaseType.SQLSERVER, [item], {"all_requests": []})[0]["sql_text_association"]
+
+    assert result == {"status": "NO_ACTIVE_REQUESTS", "source": None,
+                      "reason": "NO_ACTIVE_REQUESTS"}
+
+
+def test_sqlserver_active_request_without_required_identity_is_incomplete() -> None:
+    item = {"sql_identity": _identity(DatabaseType.SQLSERVER), "plan_identity": {
+        "database_engine": "sqlserver", "kind": "PLAN", "fields": {
+            "plan_handle": "0x03", "query_plan_hash": "0x04", "plan_generation_num": 8,
+        },
+    }}
+    row = _slow_row(DatabaseType.SQLSERVER, plan_handle="0x03", query_plan_hash="0x04",
+                    plan_generation_num=8, plan_generation_match_count=1)
+    row.pop("statement_end_offset")
+
+    result = integration.associate_slow_sql_text(
+        DatabaseType.SQLSERVER, [item], {"all_requests": [row]})[0]["sql_text_association"]
+
+    assert result["status"] == "IDENTITY_INCOMPLETE"
+    assert result["reason"] == "SLOW_REQUEST_IDENTITY_INCOMPLETE"
+    assert result["missing_fields"] == ["statement_end_offset"]
+    assert "sql_text" not in result
 
 
 def test_identity_must_be_complete_and_source_sql_must_not_be_truncated() -> None:
@@ -118,7 +240,8 @@ def test_identity_must_be_complete_and_source_sql_must_not_be_truncated() -> Non
         DatabaseType.SQLSERVER, [sqlserver_item], {"all_requests": [
             _slow_row(DatabaseType.SQLSERVER),
         ]})
-    assert sqlserver[0]["sql_text_association"]["status"] == "UNMATCHED"
+    assert sqlserver[0]["sql_text_association"]["status"] == "IDENTITY_INCOMPLETE"
+    assert sqlserver[0]["sql_text_association"]["reason"] == "TOP_SQL_IDENTITY_INCOMPLETE"
 
 
 def test_ambiguous_native_identity_is_unmatched_and_never_displays_candidate_sql() -> None:

@@ -165,6 +165,7 @@ def _top_sql_section(value: Any,
     fields = tuple(fields_list)
     rows: list[tuple[str, ...]] = []
     code_blocks: list[ReportCodeBlock] = []
+    sqlserver_reason_column = integrated and payload.get("database_engine") == "sqlserver"
     for item in raw_items[:10]:
         if not isinstance(item, dict) or item.get("rank") is None:
             continue
@@ -204,7 +205,16 @@ def _top_sql_section(value: Any,
         association_status = (association.get("status") if isinstance(association, dict)
                               else "NOT_ATTEMPTED")
         base_row = (str(item.get("rank")), identity_text, _human(item.get("metric_value")))
-        rows.append((*base_row, _human(association_status)) if integrated else base_row)
+        if sqlserver_reason_column:
+            reason_values = ([association.get("reason"), association.get("request_state")]
+                             if isinstance(association, dict) else [])
+            reason_text = "；".join(display_label(value) for value in reason_values
+                                  if isinstance(value, str) and value != association_status)
+            rows.append((*base_row, _human(association_status), reason_text or "—"))
+        elif integrated:
+            rows.append((*base_row, _human(association_status)))
+        else:
+            rows.append(base_row)
         if integrated and isinstance(association, dict) and association_status == "MATCHED":
             sql_text = association.get("sql_text")
             if isinstance(sql_text, str) and sql_text:
@@ -214,7 +224,9 @@ def _top_sql_section(value: Any,
                 code_blocks.append(ReportCodeBlock(
                     f"Top SQL 排名 {item.get('rank')} — 与慢 SQL 精确匹配",
                     str(redact(clipped)), "sql", True))
-    headers = (("Rank", "SQL identity", "Metric value", "SQL text association") if integrated else
+    headers = (("Rank", "SQL identity", "Metric value", "SQL text association", "Association reason")
+               if sqlserver_reason_column else
+               ("Rank", "SQL identity", "Metric value", "SQL text association") if integrated else
                ("Rank", "SQL identity", "Metric value"))
     table = ReportTable(headers, tuple(rows)) if rows else None
     if payload.get("collection_status") == "COLLECTED" and not raw_items:

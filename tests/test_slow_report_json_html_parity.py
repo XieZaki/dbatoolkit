@@ -10,7 +10,8 @@ import pytest
 from test_html_reports import _report
 
 from dba.cli import _redact_diagnostic_json
-from dba.core import DatabaseType
+from dba.collectors import CollectorResult
+from dba.core import DatabaseInstance, DatabaseType
 from dba.incident import IncidentSummary, build_incident_summary
 from dba.logging import redact
 from dba.presentation import render_json
@@ -23,7 +24,8 @@ from dba.reporting import (
     render_bounded,
 )
 from dba.reporting.normalizers import display_label, display_report_value
-from dba.slow import SlowReport
+from dba.settings import SQLServerSettings
+from dba.slow import SlowReport, build_slow_report
 from dba.top_sql import (
     CollectionScope,
     CollectionStatus,
@@ -145,7 +147,7 @@ def _identity_and_source(engine: DatabaseType, *, identifier: str | None = None,
             "plan_handle": "plan-handle-001", "query_plan_hash": "plan-hash-001",
             "plan_generation_num": 1, "database_id": 7,
         })
-        row: dict[str, Any] = {**fields, **plan.fields}
+        row: dict[str, Any] = {**fields, **plan.fields, "plan_generation_match_count": 1}
     elif engine is DatabaseType.POSTGRESQL:
         fields = {"queryid": identifier or 8107, "dbid": 16384, "userid": 10, "toplevel": 1}
         plan = None
@@ -327,7 +329,7 @@ def test_slow_report_json_html_semantic_parity_for_four_engines(
         assert json_top_sql["collection_status"] == "COLLECTED"
         assert json_top_sql["completeness"] == "COMPLETE"
         assert association["status"] == "MATCHED"
-        assert section.tables[0].rows[0][-1] == "MATCHED"
+        assert section.tables[0].rows[0][-2 if engine is DatabaseType.SQLSERVER else -1] == "MATCHED"
         assert len(section.code_blocks) == 1
         assert section.code_blocks[0].content == association["sql_text"]
         assert " ".join(_MATCHED_SQL.split()) in html_top_sql
@@ -342,10 +344,16 @@ def test_slow_report_json_html_semantic_parity_for_four_engines(
         assert fields["Completeness"] != "完整"
         assert fields["Completeness"] == "PARTIAL"
         assert "证据完整性 部分可用" in html_top_sql
-        assert association["status"] == "UNMATCHED"
-        assert association["reason"] == "NO_EXACT_NATIVE_IDENTITY_MATCH"
+        if engine is DatabaseType.SQLSERVER:
+            assert association["status"] == "IDENTITY_INCOMPLETE"
+            assert association["reason"] == "SLOW_REQUEST_IDENTITY_INCOMPLETE"
+            assert "活动请求身份字段不完整" in html_top_sql
+            assert section.tables[0].rows[0][-2] == "身份信息不完整"
+        else:
+            assert association["status"] == "UNMATCHED"
+            assert association["reason"] == "NO_EXACT_NATIVE_IDENTITY_MATCH"
+            assert section.tables[0].rows[0][-1] == "UNMATCHED"
         assert "sql_text" not in association
-        assert section.tables[0].rows[0][-1] == "UNMATCHED"
         assert all(reason in fields["Limitations"] for reason in
                    json_top_sql["limitations"])
         assert _UNMATCHED_SQL not in json.dumps(json_document, ensure_ascii=False)
@@ -398,6 +406,8 @@ def test_report_boundary_values_stay_bounded_escaped_and_structured(engine: Data
     assert association["truncated_by_report_policy"] is True
     assert "\n-- multiline synthetic query\n" in association["sql_text"]
     assert _UNMATCHED_SQL not in html
+
+
     section = _top_sql_section(model)
     identity_text = section.tables[0].rows[0][1]
     assert section.code_blocks[0].content == association["sql_text"]
@@ -410,6 +420,110 @@ def test_report_boundary_values_stay_bounded_escaped_and_structured(engine: Data
     assert "TAIL_MARKER_NOT_RENDERED" not in html_top_sql
     assert "SQL 文本因人工报告长度上限而省略。" in html_top_sql
     assert "PARITY_BOUNDARY_<script>&\"quote\"" in html_top_sql
+
+
+@pytest.mark.parametrize(("state", "expected_status", "expected_reason_labels"), [
+    ("no_active_requests", "NO_ACTIVE_REQUESTS", ("无活动请求",)),
+    ("incomplete_top_identity", "IDENTITY_INCOMPLETE",
+     ("Top SQL 身份字段不完整", "无活动请求")),
+])
+def test_sqlserver_identity_state_has_json_html_parity(
+    state: str, expected_status: str, expected_reason_labels: tuple[str, ...],
+) -> None:
+    report = _slow_snapshot(DatabaseType.SQLSERVER)
+    result, _ = _top_sql_result(DatabaseType.SQLSERVER, "complete_matched")
+    payload = result.to_dict()
+    item = payload["items"][0]
+    if state == "incomplete_top_identity":
+        item["sql_identity"]["fields"].pop("database_id")
+    payload["items"] = associate_slow_sql_text(
+        DatabaseType.SQLSERVER, payload["items"], {"all_requests": []})
+    report.details.update({
+        "all_requests": [],
+        "top_sql": payload,
+        "top_sql_integration": {"status": "COLLECTED", "database_engine": "sqlserver",
+                                "top_sql": payload},
+    })
+
+    summary = build_incident_summary(report, "reports/sqlserver-identity-parity.html")
+    model = build_report_model(report, summary)
+    html = render_bounded(model, HtmlReportRenderer().render)
+    json_document = _json_report(report, summary)
+    json_association = json_document["report"]["details"]["top_sql"]["items"][0]["sql_text_association"]
+    section = _top_sql_section(model)
+
+    assert json_association["status"] == expected_status
+    assert json_association["reason"] == (
+        "NO_ACTIVE_REQUESTS" if state == "no_active_requests" else "TOP_SQL_IDENTITY_INCOMPLETE")
+    assert section.tables is not None
+    assert section.tables[0].headers[-1] == "Association reason"
+    for label in expected_reason_labels:
+        assert label in html
+    assert display_label(expected_status) in html
+    assert _UNMATCHED_SQL not in json.dumps(json_document, ensure_ascii=False)
+    assert _UNMATCHED_SQL not in html
+
+
+def test_sqlserver_session_identity_is_consistent_in_json_and_html() -> None:
+    now = _STAMP
+    instance = DatabaseInstance(
+        "synthetic-sqlserver", "Synthetic SQL Server", DatabaseType.SQLSERVER,
+        "localhost", 1433, "synthetic-monitor", environment="test",
+    )
+    sessions = [{
+        "session_id": 51,
+        "login_name": "sa",
+        "host_name": "ZAKKY",
+        "client_net_address": "172.17.0.1",
+        "program_name": "Navicat",
+        "status": "running",
+    }]
+    request = {
+        "session_id": 51,
+        "status": "running",
+        "elapsed_ms": 30000,
+        "blocking_session_id": 0,
+        "normalized": {
+            "session_id": 51,
+            "username": None,
+            "client_host": None,
+            "client_ip": None,
+            "application": None,
+        },
+    }
+    results = tuple(
+        CollectorResult("synthetic-sqlserver", name, now, now, 0.0, tuple(rows),
+                        len(rows), False, True)
+        for name, rows in (
+            ("active_sessions", sessions),
+            ("active_requests", [request]),
+            ("transactions", []),
+            ("connections", []),
+        )
+    )
+    report = build_slow_report(
+        instance, results, SQLServerSettings(long_running_seconds=1, slow_top_n=10),
+    )
+    json_document = json.loads(render_json(_redact_diagnostic_json({"report": asdict(report)})))
+    details = json_document["report"]["details"]
+    normalized = details["all_requests"][0]["normalized"]
+    assert normalized == details["top_requests"][0]["normalized"]
+
+    identity_values = {
+        "username": "sa",
+        "client_host": "ZAKKY",
+        "client_ip": "172.17.0.1",
+        "application": "Navicat",
+    }
+    assert {key: normalized[key] for key in identity_values} == identity_values
+
+    summary = build_incident_summary(report, "reports/session-identity.html")
+    html = render_bounded(
+        build_report_model(report, summary), HtmlReportRenderer().render,
+    )
+    html_identity = _section_text(html, "session-sources")
+    for value in identity_values.values():
+        assert value in html_identity
 
 
 @pytest.mark.parametrize("engine", _ENGINES, ids=lambda item: item.value)

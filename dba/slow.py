@@ -121,6 +121,47 @@ def descendants(root: int, children: dict[int, list[int]]) -> set[int]:
     return seen - {root}
 
 
+def _attach_session_identity_to_normalized_requests(
+    requests: list[dict[str, Any]], sessions: list[dict[str, Any]],
+) -> None:
+    """Fill missing SQL Server normalized identity from one exact session row."""
+    sessions_by_id: dict[int, dict[str, Any]] = {}
+    ambiguous_session_ids: set[int] = set()
+    for session_row in sessions:
+        session_id = session_row.get("session_id")
+        if type(session_id) is not int:
+            continue
+        if session_id in sessions_by_id:
+            ambiguous_session_ids.add(session_id)
+        else:
+            sessions_by_id[session_id] = session_row
+
+    identity_sources = (
+        ("username", "login_name"),
+        ("client_host", "host_name"),
+        ("client_ip", "client_net_address"),
+        ("application", "program_name"),
+    )
+    for request in requests:
+        session_id = request.get("session_id")
+        if type(session_id) is not int or session_id in ambiguous_session_ids:
+            continue
+        matched_session = sessions_by_id.get(session_id)
+        normalized_value = request.get("normalized")
+        if matched_session is None or not isinstance(normalized_value, dict):
+            continue
+
+        normalized = dict(normalized_value)
+        changed = False
+        for target, source in identity_sources:
+            source_value = matched_session.get(source)
+            if normalized.get(target) in (None, "") and source_value not in (None, ""):
+                normalized[target] = source_value
+                changed = True
+        if changed:
+            request["normalized"] = normalized
+
+
 def build_slow_report(
     instance: DatabaseInstance,
     results: tuple[CollectorResult, ...],
@@ -150,6 +191,7 @@ def build_slow_report(
         return [dict(row) for row in result.rows]
 
     requests, sessions = rows("active_requests"), rows("active_sessions")
+    _attach_session_identity_to_normalized_requests(requests, sessions)
     transactions, connections = rows("transactions"), rows("connections")
     session_map = {number(r.get("session_id")): r for r in sessions}
     connection_map: dict[int, list[dict[str, Any]]] = {}

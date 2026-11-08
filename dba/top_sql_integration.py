@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from dba.core import DatabaseType
 from dba.logging import redact
@@ -113,6 +113,176 @@ def _identity_matches(engine: DatabaseType, item: dict[str, Any], row: dict[str,
     return True
 
 
+_SQLSERVER_STATEMENT_IDENTITY_FIELDS = frozenset({
+    "sql_handle", "statement_start_offset", "statement_end_offset", "database_id",
+})
+_SQLSERVER_PLAN_IDENTITY_FIELDS = frozenset({
+    "plan_handle", "query_plan_hash", "plan_generation_num",
+})
+_SQLSERVER_STRING_IDENTITY_FIELDS = frozenset({"sql_handle", "query_hash", "plan_handle", "query_plan_hash"})
+
+
+def _sqlserver_identity_fields(identity: Any) -> dict[str, Any]:
+    if not isinstance(identity, dict):
+        return {}
+    fields = identity.get("fields")
+    return cast(dict[str, Any], fields) if isinstance(fields, dict) else {}
+
+
+def _sqlserver_identity_missing(identity: Any, kind: str) -> list[str]:
+    required = (_SQLSERVER_STATEMENT_IDENTITY_FIELDS if kind == "STATEMENT"
+                else _SQLSERVER_PLAN_IDENTITY_FIELDS)
+    if (not isinstance(identity, dict) or identity.get("database_engine") != DatabaseType.SQLSERVER.value
+            or identity.get("kind") != kind or not isinstance(identity.get("fields"), dict)):
+        return sorted(required)
+    fields = identity["fields"]
+    missing = set(required.difference(fields))
+    for key, value in fields.items():
+        if (value is None or value == "" or isinstance(value, bool)
+                or not isinstance(value, (str, int))):
+            missing.add(str(key))
+            continue
+        if key in _SQLSERVER_STRING_IDENTITY_FIELDS and not isinstance(value, str):
+            missing.add(str(key))
+        elif key not in _SQLSERVER_STRING_IDENTITY_FIELDS and key in required and type(value) is not int:
+            missing.add(str(key))
+    return sorted(missing)
+
+
+def _sqlserver_row_missing(fields: dict[str, Any], row: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for key, expected in fields.items():
+        value = row.get(key)
+        if (key not in row or value is None or value == "" or isinstance(value, bool)
+                or type(value) is not type(expected)):
+            missing.append(key)
+    return missing
+
+
+def _sqlserver_association(
+    item: dict[str, Any], rows: list[dict[str, Any]], raw_rows: Any,
+    request_data_present: bool, slow_details: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    statement_identity = item.get("sql_identity")
+    plan_identity = item.get("plan_identity")
+    statement_missing = _sqlserver_identity_missing(statement_identity, "STATEMENT")
+    plan_missing = _sqlserver_identity_missing(plan_identity, "PLAN")
+    top_missing = ([f"sql_identity.{key}" for key in statement_missing]
+                   + [f"plan_identity.{key}" for key in plan_missing])
+    identity_fields = _sqlserver_identity_fields(statement_identity)
+    plan_fields = _sqlserver_identity_fields(plan_identity)
+
+    if not request_data_present:
+        return ({"status": "IDENTITY_INCOMPLETE", "source": None,
+                 "reason": "SLOW_REQUEST_SNAPSHOT_UNAVAILABLE"}, [])
+
+    request_sample = next((sample for sample in slow_details.get("samples", [])
+                           if isinstance(sample, dict) and sample.get("collector") == "active_requests"), None)
+    if isinstance(request_sample, dict) and (
+        request_sample.get("success") is False or request_sample.get("truncated") is True
+    ):
+        return ({"status": "IDENTITY_INCOMPLETE", "source": None,
+                 "reason": "SLOW_REQUEST_SNAPSHOT_UNAVAILABLE"}, [])
+
+    if isinstance(raw_rows, list) and not raw_rows:
+        if top_missing:
+            return ({"status": "IDENTITY_INCOMPLETE", "source": None,
+                     "reason": "TOP_SQL_IDENTITY_INCOMPLETE", "missing_fields": top_missing,
+                     "request_state": "NO_ACTIVE_REQUESTS"}, [])
+        return ({"status": "NO_ACTIVE_REQUESTS", "source": None,
+                 "reason": "NO_ACTIVE_REQUESTS"}, [])
+    if not isinstance(raw_rows, list) or not rows:
+        return ({"status": "IDENTITY_INCOMPLETE", "source": None,
+                 "reason": "SLOW_REQUEST_IDENTITY_INCOMPLETE"}, [])
+    if top_missing:
+        return ({"status": "IDENTITY_INCOMPLETE", "source": None,
+                 "reason": "TOP_SQL_IDENTITY_INCOMPLETE", "missing_fields": top_missing}, [])
+
+    statement_matches: list[dict[str, Any]] = []
+    incomplete_rows: list[dict[str, Any]] = []
+    any_complete_statement = False
+    for row in rows:
+        row_missing = _sqlserver_row_missing(identity_fields, row)
+        required_source_missing = sorted(_SQLSERVER_STATEMENT_IDENTITY_FIELDS.difference(row))
+        row_missing = sorted(set(row_missing).union(required_source_missing))
+        if row_missing:
+            incomplete_rows.append(row)
+            continue
+        any_complete_statement = True
+        if all(_same_native_value(row[key], value) for key, value in identity_fields.items()):
+            statement_matches.append(row)
+
+    if not statement_matches:
+        if incomplete_rows:
+            missing_fields = sorted({key for row in incomplete_rows
+                                     for key in _sqlserver_row_missing(identity_fields, row)}
+                                    .union(key for row in incomplete_rows
+                                           for key in _SQLSERVER_STATEMENT_IDENTITY_FIELDS.difference(row)))
+            return ({"status": "IDENTITY_INCOMPLETE", "source": None,
+                     "reason": "SLOW_REQUEST_IDENTITY_INCOMPLETE", "missing_fields": missing_fields}, [])
+        reason = "STATEMENT_IDENTITY_MISMATCH" if any_complete_statement else "NO_EXACT_NATIVE_IDENTITY_MATCH"
+        return ({"status": "UNMATCHED", "source": None, "reason": reason}, [])
+
+    plan_matches: list[dict[str, Any]] = []
+    plan_incomplete_reasons: list[str] = []
+    plan_mismatch = False
+    for row in statement_matches:
+        match_count = row.get("plan_generation_match_count")
+        if type(match_count) is not int:
+            plan_incomplete_reasons.append("SLOW_REQUEST_IDENTITY_INCOMPLETE")
+            continue
+        if match_count == 0:
+            plan_incomplete_reasons.append("PLAN_GENERATION_UNAVAILABLE")
+            continue
+        if match_count > 1:
+            plan_incomplete_reasons.append("PLAN_GENERATION_AMBIGUOUS")
+            continue
+        missing = _sqlserver_row_missing(plan_fields, row)
+        if missing:
+            plan_incomplete_reasons.append("SLOW_REQUEST_IDENTITY_INCOMPLETE")
+        elif all(_same_native_value(row[key], value) for key, value in plan_fields.items()):
+            plan_matches.append(row)
+        else:
+            plan_mismatch = True
+
+    if not plan_matches:
+        if plan_incomplete_reasons:
+            reason = ("PLAN_GENERATION_AMBIGUOUS" if "PLAN_GENERATION_AMBIGUOUS" in plan_incomplete_reasons
+                      else "PLAN_GENERATION_UNAVAILABLE" if "PLAN_GENERATION_UNAVAILABLE" in plan_incomplete_reasons
+                      else "SLOW_REQUEST_IDENTITY_INCOMPLETE")
+            return ({"status": "IDENTITY_INCOMPLETE", "source": None, "reason": reason}, [])
+        if plan_mismatch:
+            return ({"status": "UNMATCHED", "source": None,
+                     "reason": "PLAN_IDENTITY_MISMATCH"}, [])
+        return ({"status": "UNMATCHED", "source": None,
+                 "reason": "NO_EXACT_NATIVE_IDENTITY_MATCH"}, [])
+    if len(plan_matches) > 1:
+        return ({"status": "UNMATCHED", "source": None,
+                 "reason": "AMBIGUOUS_NATIVE_IDENTITY_MATCH"}, [])
+    return ({"status": "MATCHED", "source": None}, plan_matches)
+
+
+def _matched_sql_text(
+    matches: list[dict[str, Any]], text_field: str, truncated_field: str,
+    policy: HumanReportPolicy,
+) -> dict[str, Any]:
+    if len(matches) > 1:
+        return {"status": "UNMATCHED", "source": None,
+                "reason": "AMBIGUOUS_NATIVE_IDENTITY_MATCH"}
+    row = matches[0]
+    sql_text = row.get(text_field)
+    if row.get(truncated_field) in (True, 1, "1"):
+        return {"status": "UNMATCHED", "source": None, "reason": "SOURCE_SQL_TEXT_TRUNCATED"}
+    if not isinstance(sql_text, str) or not sql_text:
+        return {"status": "UNMATCHED", "source": None, "reason": "SOURCE_SQL_TEXT_UNAVAILABLE"}
+    clipped = sql_text[:policy.max_sql_chars]
+    was_truncated = len(sql_text) > policy.max_sql_chars
+    if was_truncated:
+        clipped += "\n[SQL 文本因人工报告长度上限而省略。]"
+    return {"status": "MATCHED", "source": "slow.active_requests",
+            "sql_text": str(redact(clipped)), "truncated_by_report_policy": was_truncated}
+
+
 def associate_slow_sql_text(
     engine: DatabaseType,
     items: list[dict[str, Any]],
@@ -120,35 +290,27 @@ def associate_slow_sql_text(
     policy: HumanReportPolicy = DEFAULT_HUMAN_REPORT_POLICY,
 ) -> list[dict[str, Any]]:
     """Attach bounded SQL text only when complete native statement/plan identities match."""
-    raw_rows = slow_details.get(_SLOW_REQUEST_KEYS[engine], [])
+    request_key = _SLOW_REQUEST_KEYS[engine]
+    request_data_present = request_key in slow_details
+    raw_rows = slow_details.get(request_key, [])
     rows = [row for row in raw_rows if isinstance(row, dict)] if isinstance(raw_rows, list) else []
     text_field, truncated_field = _SQL_TEXT_FIELDS[engine]
     associated: list[dict[str, Any]] = []
     for raw_item in items:
         item = dict(raw_item)
-        matches = [row for row in rows if _identity_matches(engine, item, row)]
-        association: dict[str, Any] = {"status": "UNMATCHED", "source": None,
-                                       "reason": "NO_EXACT_NATIVE_IDENTITY_MATCH"}
-        if len(matches) > 1:
-            association["reason"] = "AMBIGUOUS_NATIVE_IDENTITY_MATCH"
-        elif matches:
-            row = matches[0]
-            sql_text = row.get(text_field)
-            if row.get(truncated_field) in (True, 1, "1"):
-                association["reason"] = "SOURCE_SQL_TEXT_TRUNCATED"
-            elif not isinstance(sql_text, str) or not sql_text:
-                association["reason"] = "SOURCE_SQL_TEXT_UNAVAILABLE"
-            else:
-                clipped = sql_text[:policy.max_sql_chars]
-                was_truncated = len(sql_text) > policy.max_sql_chars
-                if was_truncated:
-                    clipped += "\n[SQL 文本因人工报告长度上限而省略。]"
-                association = {
-                    "status": "MATCHED",
-                    "source": "slow.active_requests",
-                    "sql_text": str(redact(clipped)),
-                    "truncated_by_report_policy": was_truncated,
-                }
+        if engine is DatabaseType.SQLSERVER:
+            association, matches = _sqlserver_association(
+                item, rows, raw_rows, request_data_present, slow_details)
+            if matches:
+                association = _matched_sql_text(matches, text_field, truncated_field, policy)
+        else:
+            matches = [row for row in rows if _identity_matches(engine, item, row)]
+            association = {"status": "UNMATCHED", "source": None,
+                           "reason": "NO_EXACT_NATIVE_IDENTITY_MATCH"}
+            if len(matches) > 1:
+                association["reason"] = "AMBIGUOUS_NATIVE_IDENTITY_MATCH"
+            elif matches:
+                association = _matched_sql_text(matches, text_field, truncated_field, policy)
         item["sql_text_association"] = association
         associated.append(item)
     return associated

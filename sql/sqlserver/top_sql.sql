@@ -6,7 +6,7 @@ SELECT TOP (?)
     qs.plan_generation_num,
     qs.statement_start_offset,
     qs.statement_end_offset,
-    st.dbid AS database_id,
+    COALESCE(st.dbid, plan_text.dbid) AS database_id,
     CASE WHEN st.text IS NULL THEN 0 ELSE 1 END AS sql_text_available,
     qs.total_worker_time AS total_cpu_time,
     qs.total_logical_reads AS total_logical_reads,
@@ -20,6 +20,7 @@ SELECT TOP (?)
     ranking.ranking_value
 FROM sys.dm_exec_query_stats AS qs
 CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+OUTER APPLY sys.dm_exec_sql_text(qs.plan_handle) AS plan_text
 CROSS APPLY (SELECT CASE ?
     WHEN N'cpu_time' THEN CONVERT(decimal(38, 4), qs.total_worker_time)
     WHEN N'logical_reads' THEN CONVERT(decimal(38, 4), qs.total_logical_reads)

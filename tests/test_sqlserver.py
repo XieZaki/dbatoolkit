@@ -574,6 +574,41 @@ def test_results_collectors_threshold(adapter: SQLServerAdapter, driver: FakeDri
         assert LongRunningRequestsCollector(adapter).collect(adapter.instance).row_count == 0
 
 
+def test_active_requests_registry_and_collector_preserve_native_identity(
+    adapter: SQLServerAdapter, driver: FakeDriver,
+) -> None:
+    script = adapter.registry.get("active_requests", DatabaseType.SQLSERVER)
+    normalized_sql = " ".join(script.text.split())
+    assert "r.database_id" in normalized_sql
+    assert "r.statement_start_offset" in normalized_sql
+    assert "r.statement_end_offset" in normalized_sql
+    assert "CONVERT(varchar(130), r.plan_handle, 1) AS plan_handle" in normalized_sql
+    assert "CONVERT(varchar(130), r.query_plan_hash, 1) AS query_plan_hash" in normalized_sql
+    assert "LEFT JOIN (" in normalized_sql
+    assert "LEFT JOIN sys.dm_exec_query_stats AS qs" in normalized_sql
+    assert "COUNT(qs.plan_generation_num)" in normalized_sql
+    assert "COUNT(DISTINCT qs.plan_generation_num)" not in normalized_sql
+    assert script.metadata.max_rows == 5000
+
+    driver.connection.results["active_requests"] = [{
+        "session_id": 52, "database_id": 7, "sql_handle": "0x01",
+        "statement_start_offset": 0, "statement_end_offset": 42,
+        "plan_handle": "0x02", "query_hash": "0x03", "query_plan_hash": "0x04",
+        "plan_generation_num": 8, "plan_generation_match_count": 1,
+        "sql_text": "SELECT 1", "sql_text_truncated": 0,
+    }]
+    with adapter:
+        result = ActiveRequestsCollector(adapter).collect(adapter.instance)
+
+    assert result.success and result.row_count == 1
+    row = result.rows[0]
+    assert row["database_id"] == 7 and type(row["database_id"]) is int
+    assert row["sql_handle"] == "0x01"
+    assert row["statement_start_offset"] == 0 and row["statement_end_offset"] == 42
+    assert row["plan_handle"] == "0x02" and row["query_plan_hash"] == "0x04"
+    assert row["plan_generation_num"] == 8 and row["plan_generation_match_count"] == 1
+
+
 @pytest.mark.parametrize("size,truncated", [(0, False), (1, False), (2, True), (100, True)])
 def test_bounded_fetch(
     adapter: SQLServerAdapter, driver: FakeDriver, size: int, truncated: bool

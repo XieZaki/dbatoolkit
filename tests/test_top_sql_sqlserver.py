@@ -74,6 +74,8 @@ def test_sqlserver_top_sql_routes_are_explicit_and_2025_unverified() -> None:
     }
     assert "sys.dm_exec_query_stats" in script.text
     assert "sys.dm_exec_sql_text" in script.text
+    assert "COALESCE(st.dbid, plan_text.dbid) AS database_id" in script.text
+    assert "OUTER APPLY sys.dm_exec_sql_text(qs.plan_handle) AS plan_text" in script.text
     assert "query_plan_hash" in script.text and "statement_start_offset" in script.text
     assert "TOP (?)" in script.text and "ORDER BY ranking.ranking_value DESC" in script.text
     assert "sys.dm_exec_query_plan" not in script.text
@@ -204,6 +206,25 @@ def test_collector_rejects_rows_that_violate_descending_server_rank_order(
     adapter.connect()
     with pytest.raises(ToolkitError, match="not in declared rank order"):
         SQLServerTopSQLCollector(adapter, profile()).collect(adapter.instance, "cpu_time", 2)
+    adapter.disconnect()
+
+
+@pytest.mark.parametrize("database_id", [None, "7", 7.0, True])
+def test_missing_or_wrong_type_database_id_is_preserved_as_incomplete_identity(
+    adapter: Any, driver: Any, database_id: Any,
+) -> None:
+    driver.connection.results["top_sql"] = [row(database_id=database_id)]
+    adapter.connect()
+
+    result = SQLServerTopSQLCollector(adapter, profile()).collect(adapter.instance)
+
+    assert result.collection_status is CollectionStatus.COLLECTED
+    assert result.completeness is Completeness.PARTIAL
+    assert result.data_visibility is DataVisibility.PARTIAL
+    assert Limitation.IDENTITY_AMBIGUOUS in result.limitations
+    assert len(result.items) == 1
+    assert result.items[0].sql_identity is not None
+    assert "database_id" not in result.items[0].sql_identity.fields
     adapter.disconnect()
 
 

@@ -122,6 +122,100 @@ def test_concurrency_and_ranking() -> None:
     }
 
 
+def _request_with_empty_normalized_identity(session_id: int, **values: Any) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "status": "running",
+        "elapsed_ms": 30000,
+        "blocking_session_id": 0,
+        "normalized": {
+            "session_id": session_id,
+            "username": None,
+            "client_host": None,
+            "client_ip": None,
+            "application": None,
+            **values,
+        },
+    }
+
+
+def test_active_request_normalized_identity_uses_matching_session_and_stays_equal() -> None:
+    request = _request_with_empty_normalized_identity(51)
+    original_normalized = dict(request["normalized"])
+    session = {
+        "session_id": 51,
+        "login_name": "sa",
+        "host_name": "ZAKKY",
+        "client_net_address": "172.17.0.1",
+        "program_name": "Navicat",
+    }
+
+    value = report([request], [session], slow_top_n=1)
+
+    expected = {
+        "username": "sa",
+        "client_host": "ZAKKY",
+        "client_ip": "172.17.0.1",
+        "application": "Navicat",
+    }
+    top_request = value.details["top_requests"][0]
+    all_request = value.details["all_requests"][0]
+    assert {key: top_request["normalized"][key] for key in expected} == expected
+    assert top_request["normalized"] == all_request["normalized"]
+    assert request["normalized"] == original_normalized
+    assert all_request["status"] == "running"
+    assert all_request["blocking_session_id"] == 0
+
+
+def test_active_request_without_matching_session_keeps_normalized_identity_null() -> None:
+    request = _request_with_empty_normalized_identity(52)
+
+    value = report([request], [{"session_id": 51, "login_name": "sa"}])
+
+    normalized = value.details["all_requests"][0]["normalized"]
+    assert {key: normalized[key] for key in (
+        "username", "client_host", "client_ip", "application",
+    )} == {"username": None, "client_host": None, "client_ip": None, "application": None}
+
+
+def test_active_request_missing_session_source_fields_remain_null() -> None:
+    request = _request_with_empty_normalized_identity(51)
+    session = {
+        "session_id": 51,
+        "host_name": "ZAKKY",
+        "program_name": "Navicat",
+    }
+
+    value = report([request], [session])
+
+    normalized = value.details["all_requests"][0]["normalized"]
+    assert normalized["username"] is None
+    assert normalized["client_host"] == "ZAKKY"
+    assert normalized["client_ip"] is None
+    assert normalized["application"] == "Navicat"
+
+
+def test_active_request_normalized_identity_does_not_overwrite_existing_values() -> None:
+    request = _request_with_empty_normalized_identity(
+        51, username="request-user", client_ip="192.0.2.4",
+    )
+    session = {
+        "session_id": 51,
+        "login_name": "session-user",
+        "host_name": "ZAKKY",
+        "client_net_address": "172.17.0.1",
+        "program_name": "Navicat",
+    }
+
+    value = report([request], [session])
+
+    normalized = value.details["all_requests"][0]["normalized"]
+    assert normalized["username"] == "request-user"
+    assert normalized["client_host"] == "ZAKKY"
+    assert normalized["client_ip"] == "192.0.2.4"
+    assert normalized["application"] == "Navicat"
+
+
 def test_idle_transaction_evidence_source_age_and_last_sql() -> None:
     value = report(
         [edge(52, 51, wait_type="LCK_M_X")],
