@@ -887,13 +887,14 @@ Fake/Mock、静态检查、自动化测试、历史 E2E、当前 HEAD E2E 和用
 | 文档 | 唯一职责 |
 |---|---|
 | docs/PROJECT_PLAN.md | 产品定位、目标、范围、原则、能力地图和长期规划 |
+| docs/PROJECT_MEMORY.md | 项目背景、历史决策、技术约束、用户偏好和新会话恢复指南 |
+| docs/TODO.md | 当前行动、关键等待项和后续待办的精简入口；不维护独立任务状态 |
 | docs/roadmap/DBA_TOOLKIT_V0.9.1_ROADMAP.md | 当前规划流的阶段边界、依赖、进入/退出条件和非目标 |
 | docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md | 任务状态的唯一来源 |
 | docs/roadmap/DBA_TOOLKIT_V0.9.1_PROGRESS.md | 当前开发位置、下一步和恢复指针 |
 | docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md | 自动化、实机、版本、报告和验收证据 |
-| docs/PROJECT_MEMORY.md | 项目背景、历史决策、技术约束、用户偏好和新会话恢复指南 |
 
-同一任务状态不得在多份文档重复维护。PROJECT_PLAN 不承担每日进度或任务状态台账职责。
+同一任务状态不得在多份文档重复维护。TODO 仅为 Backlog 的可读摘要；如有冲突，以 Backlog 为准。PROJECT_PLAN 不承担每日进度或任务状态台账职责。
 
 ## 15.2 新功能启动流程
 
