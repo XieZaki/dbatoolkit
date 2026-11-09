@@ -2,6 +2,13 @@
 
 企业内部运维机器上的跨数据库只读诊断基础框架。**工具负责查清楚，DBA 负责做决定。**
 
+## 项目规划与开发状态
+
+- [产品规划书](docs/PROJECT_PLAN.md)：产品目标、能力地图和长期路线。
+- [当前待办](docs/TODO.md)：当前行动和关键等待项。
+- [项目记忆与会话恢复](docs/PROJECT_MEMORY.md)：架构、安全边界、历史决策和新会话交接。
+- [Roadmap](docs/roadmap/DBA_TOOLKIT_V0.9.1_ROADMAP.md) · [Backlog（任务状态唯一来源）](docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md) · [Progress](docs/roadmap/DBA_TOOLKIT_V0.9.1_PROGRESS.md) · [Acceptance](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)
+
 正式产品目标版本为：MySQL 5.7、8.0+；Oracle 11gR2+；PostgreSQL 14+；SQL Server 2008 R2+；MongoDB 4.0+；Redis 4.0+。前四种关系型数据库是当前开发主线，MongoDB/Redis 是长期 Backlog。`TARGET` 只表示产品方向，`IMPLEMENTED` 要求对应数据库/版本/功能有受审查的 Profile 与代码路径，`E2E_VERIFIED` 只表示明确记录的具体版本/功能/环境通过真实端到端验证；三者不可互相推导。新发布的更高版本不会因“+”自动获得正式支持。
 V0.7 历史版本摘要：当时保留 SQL Server、PostgreSQL 和 MySQL 诊断，并新增 Oracle 12c+ 连接、基础采集和 Slow Diagnose。该历史句不代表当前 Oracle 最低版本；当前正式目标见上方版本范围。运行不依赖 Internet。
 V0.7.1 已在隔离 Oracle Free 23 容器使用 python-oracledb Thin 及专用监控账号完成真实 CLI 端到端验证；结果见 [验证记录](docs/VERIFICATION_V0_7_1.md)。
