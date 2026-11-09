@@ -12,7 +12,7 @@
 
 # 1. 当前优先事项
 
-## P0 — 继续完成 Phase 5 HTML Incident Workbench
+## 当前重点 — 继续完成 Phase 5 HTML Incident Workbench
 
 **正式任务：** V091-P5-WORKBENCH-001  
 **Backlog 状态：** IN_PROGRESS  
