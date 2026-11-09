@@ -580,22 +580,28 @@ def test_active_requests_registry_and_collector_preserve_native_identity(
     script = adapter.registry.get("active_requests", DatabaseType.SQLSERVER)
     normalized_sql = " ".join(script.text.split())
     assert "r.database_id" in normalized_sql
+    assert "r.request_id" in normalized_sql
     assert "r.statement_start_offset" in normalized_sql
     assert "r.statement_end_offset" in normalized_sql
+    assert "SUBSTRING( t.text" in normalized_sql
+    assert "(r.statement_start_offset / 2) + 1" in normalized_sql
+    assert "(r.statement_end_offset - r.statement_start_offset) / 2" in normalized_sql
+    assert "r.statement_end_offset = -1" in normalized_sql
+    assert "AS statement_sql_text_truncated" in normalized_sql
     assert "CONVERT(varchar(130), r.plan_handle, 1) AS plan_handle" in normalized_sql
     assert "CONVERT(varchar(130), r.query_plan_hash, 1) AS query_plan_hash" in normalized_sql
-    assert "LEFT JOIN (" in normalized_sql
-    assert "LEFT JOIN sys.dm_exec_query_stats AS qs" in normalized_sql
-    assert "COUNT(qs.plan_generation_num)" in normalized_sql
-    assert "COUNT(DISTINCT qs.plan_generation_num)" not in normalized_sql
+    assert normalized_sql.count("sys.dm_exec_requests") == 1
+    assert "sys.dm_exec_query_stats" not in normalized_sql
+    assert "plan_generation" not in normalized_sql
+    assert "r.query_hash" in normalized_sql
     assert script.metadata.max_rows == 5000
 
     driver.connection.results["active_requests"] = [{
         "session_id": 52, "database_id": 7, "sql_handle": "0x01",
         "statement_start_offset": 0, "statement_end_offset": 42,
         "plan_handle": "0x02", "query_hash": "0x03", "query_plan_hash": "0x04",
-        "plan_generation_num": 8, "plan_generation_match_count": 1,
-        "sql_text": "SELECT 1", "sql_text_truncated": 0,
+        "request_id": 3, "sql_text": "batch: SELECT 1", "sql_text_truncated": 0,
+        "statement_sql_text": "SELECT 1", "statement_sql_text_truncated": 0,
     }]
     with adapter:
         result = ActiveRequestsCollector(adapter).collect(adapter.instance)
@@ -606,7 +612,22 @@ def test_active_requests_registry_and_collector_preserve_native_identity(
     assert row["sql_handle"] == "0x01"
     assert row["statement_start_offset"] == 0 and row["statement_end_offset"] == 42
     assert row["plan_handle"] == "0x02" and row["query_plan_hash"] == "0x04"
-    assert row["plan_generation_num"] == 8 and row["plan_generation_match_count"] == 1
+    assert row["query_hash"] == "0x03" and row["session_id"] == 52
+    assert "plan_generation_num" not in row and "plan_generation_match_count" not in row
+    assert row["request_id"] == 3 and row["statement_sql_text"] == "SELECT 1"
+    assert row["sql_text"] == "batch: SELECT 1"
+
+    sessions = adapter.registry.get("active_sessions", DatabaseType.SQLSERVER)
+    normalized_sessions_sql = " ".join(sessions.text.split())
+    assert "s.original_login_name" in normalized_sessions_sql
+    assert "s.nt_user_name" in normalized_sessions_sql
+    assert "s.host_process_id" in normalized_sessions_sql
+    assert normalized_sessions_sql.count("s.client_interface_name") == 2
+    assert "c.client_interface_name" not in normalized_sessions_sql
+    assert normalized_sessions_sql.count("sys.dm_exec_connections") == 1
+    legacy = adapter.registry.get("active_sessions_legacy", DatabaseType.SQLSERVER)
+    assert legacy.text.count("s.client_interface_name") == 2
+    assert "c.client_interface_name" not in legacy.text
 
 
 @pytest.mark.parametrize("size,truncated", [(0, False), (1, False), (2, True), (100, True)])

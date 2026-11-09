@@ -391,8 +391,8 @@ def test_failed_show_grants_preserves_sanitized_vendor_error() -> None:
         target.connect()
     assert caught.value.error_type == "PermissionInspectionFailed"
     detail = caught.value.database_error
-    assert detail is not None and detail.vendor_code == 1142
-    assert "SHOW command denied" in detail.message
+    assert isinstance(detail, dict) and detail["vendor_code"] == 1142
+    assert "SHOW command denied" in detail["message"]
     assert PASSWORD not in repr(caught.value)
 
 

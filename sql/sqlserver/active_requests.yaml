@@ -4,10 +4,9 @@ risk: READ_ONLY
 timeout_seconds: 10
 max_rows: 5000
 reviewed: true
-description: Reviewed request DMV read; emits native statement and plan identity, uses
-  an exact query-stats left join that preserves requests and counts every matching
-  statistics row for ambiguity, and bounds batch SQL text to 16384 characters with
-  an explicit truncation flag.
+description: Reviewed request DMV read; emits native request, statement and plan
+  identity, extracts the active statement using DMV byte offsets, and returns
+  batch and statement text with explicit truncation flags.
 feature: slow
 version_families:
 - 2008r2

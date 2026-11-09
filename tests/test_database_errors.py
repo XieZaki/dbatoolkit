@@ -11,6 +11,7 @@ from dba.database_errors import (
     normalize_oracle_error,
     normalize_postgresql_error,
     normalize_sqlserver_error,
+    sanitize_vendor_text,
 )
 from dba.logging import SafeFormatter
 from dba.presentation import render_human, render_json
@@ -63,6 +64,26 @@ def test_sqlserver_error_extracts_sqlstate_and_native_code() -> None:
     assert detail.classification == "AUTHENTICATION_FAILED"
 
 
+def test_sqlserver_combined_odbc_diagnostic_keeps_native_207() -> None:
+    detail = normalize_sqlserver_error(
+        Exception("[42S22] [Microsoft][SQL Server]Invalid column name 'client_interface_name'. (207) "
+                  "(SQLExecDirectW)"), driver="ODBC Driver 17 for SQL Server")
+    assert (detail.sqlstate, detail.vendor_code) == ("42S22", 207)
+    assert detail.driver == "ODBC Driver 17 for SQL Server"
+    assert "Invalid column name 'client_interface_name'." in detail.message
+    assert normalize_sqlserver_error(Exception("an error on object (123)")).vendor_code is None
+
+
+def test_vendor_error_sanitizes_quoted_and_escaped_connection_credentials() -> None:
+    message = (
+        """connection failed; UID={SYNTHETIC_USER}; PWD={SYNTHETIC_A}};SYNTHETIC_B}; """
+        """passwd='SYNTHETIC_C SYNTHETIC_D'; "token": "SYNTHETIC_E SYNTHETIC_F"; invalid column"""
+    )
+    safe = sanitize_vendor_text(message)
+    assert "invalid column" in safe
+    assert "SYNTHETIC_" not in safe
+
+
 def test_postgresql_error_uses_diag_fields() -> None:
     diag = SimpleNamespace(message_primary="authentication failed", message_detail="role monitor",
                            message_hint="check pg_hba", context=None)
@@ -75,6 +96,18 @@ def test_postgresql_error_uses_diag_fields() -> None:
     assert detail.detail == "role monitor"
     assert detail.hint == "check pg_hba"
     assert detail.classification == "AUTHENTICATION_FAILED"
+
+
+def test_postgresql_diag_sqlstate_and_oracle_driver_code_remain_distinct() -> None:
+    exc = Exception("error")
+    exc.diag = SimpleNamespace(sqlstate="42703")  # type: ignore[attr-defined]
+    pg_error = normalize_postgresql_error(exc)
+    assert pg_error.sqlstate == "42703" and pg_error.vendor_code is None
+
+    oracle_error = normalize_oracle_error(Exception(
+        SimpleNamespace(code=0, full_code="DPY-4011", message="DPY-4011: connection closed")))
+    assert oracle_error.vendor_code == "DPY-4011" and oracle_error.sqlstate is None
+    assert normalize_oracle_error(Exception(SimpleNamespace(code=0, message="unknown"))).vendor_code is None
 
 
 def test_oracle_error_extracts_ora_code_and_message() -> None:

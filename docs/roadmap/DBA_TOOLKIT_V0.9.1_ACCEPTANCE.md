@@ -1909,3 +1909,115 @@ The pre-fix observation and post-fix acceptance evidence are distinct. The user 
 The first sample returned zero active requests due to sampling timing and is a normal empty sample, not a collection failure. A second sample used a sustained test SQL statement and verified the positive Top SQL association. This is user-provided real E2E evidence; the agent did not repeat the database connection. It verifies SQL Server 2022 `16.0.4305.5` only and does not establish real compatibility for SQL Server 2008 R2 or other versions/databases.
 
 `ISOLATED_OFFLINE_TEST` remains separate: 121 targeted tests passed; Ruff and Strict MyPy (78 `dba` source files) passed; `git diff --check` passed. These automated checks are not counted as real E2E. The HTML report was generated, but no additional manual visual inspection was performed. No database connection, Docker action, Inventory or Credential Store access, credential read, or permission change was performed by the agent during this documentation closeout. The task is formally accepted as `DONE` in Backlog for the approved integration scope, with the live version scope limited as stated above.
+
+## 64. Slow current active-request evidence and HTML grouping — offline checkpoint — 2026-11-08
+
+This checkpoint extends the shared Slow report presentation. It does not change Top SQL collection, identity matching, findings, or database permissions.
+
+The SQL Server `active_requests` Registry query now returns the request ID and a bounded `statement_sql_text` derived from `statement_start_offset` / `statement_end_offset` byte offsets in `sys.dm_exec_sql_text`. It keeps the original bounded batch text in JSON, marks statement truncation, and returns an explicit reason when the current statement offsets or text are unavailable. The `active_sessions` query already reads `sys.dm_exec_connections` once; it now also returns original login, Windows user, client interface, and client process ID. The Slow report fills only absent request-source fields from one unique row with the same `session_id`; duplicate session IDs are treated as ambiguous and are not used for identity enrichment.
+
+The HTML report has a current-activity panel before blocker analysis. It presents each request separately with its SQL text, database/session/request identity, available execution-source fields, request-level time/resource metrics, wait, and blocker in one record. Multiple requests from one session remain separate. SQL Server batch text is not presented as the active statement when statement offsets exist but the statement projection is missing. An empty successful sample is distinguished from a failed or unknown sample. Other engines use only fields already exposed by their current collectors; no additional cross-engine Collector query was added. JSON retains the raw batch and native DMV fields alongside the statement projection.
+
+`ISOLATED_OFFLINE_TEST`: focused Slow, SQL Server, HTML, and four-engine JSON/HTML Parity tests passed **221 tests**. Targeted Ruff passed; Strict MyPy passed for all **78 `dba` source files**. The complete default suite reported **1346 passed, 3 skipped, 9 failed**. All nine failures are in the pre-existing Top SQL HTML presentation worktree: those assertions still expect internal native identity labels in HTML, while the existing local presentation change omits them. This Slow checkpoint did not change that Top SQL presentation contract. No test failure was in the Slow/SQL Server current-request test set.
+
+Real database evidence is `NOT_EXECUTED`. The shell reported Windows 10 and machine `ZAKKY`, but the PowerShell executable was under `C:\Users\xieji\.cache\codex-runtimes\codex-primary-runtime`; this does not establish the authorized Windows host context. No Inventory asset was inspected for an E2E run, no credential-session status was queried, and no database or Docker connection was attempted. SQL Server 2022 live statement-offset behavior and active-request source values remain unverified on this worktree. `V091-P5-WORKBENCH-001` remains `IN_PROGRESS` in Backlog.
+
+## 65. V091-P5-WORKBENCH-001 — separate current Slow diagnosis from cumulative Top SQL — 2026-11-09
+
+`diagnose slow` no longer calls the Top SQL integration or emits its section in HTML or its payload in newly collected JSON. The retired `--include-top-sql` option and explicit `--metric` or `--top` on Slow return an argument error before Inventory access, with migration guidance in console and JSON output. The independent `diagnose top-sql` retains its ranking parameters and results. `active-sql` retains its row limit option.
+
+The SQL Server `active_requests` Registry script no longer reads `sys.dm_exec_query_stats` or returns plan generation and match counts. It retains current DMV identities, statement offsets, statement and batch text, truncation indicators, and request runtime and wait evidence. Session identity and blocker analysis retain their existing rules. Top SQL Collectors, ranking SQL, and strict SQL/plan association rules for previously captured evidence were left in place. The other three engines retain their current Collector routes and incident context.
+
+The nine earlier HTML failures reproduced together. Seven tests expected native identifiers in standalone HTML. The revised assertions verify that JSON preserves those identities, HTML keeps its statistics and container context, and native identities stay out of standalone HTML. The other two tested the retired Slow route and now verify that Slow does not collect or display cumulative Top SQL. Coverage also checks that rendering a legacy snapshot leaves its stored association evidence intact.
+
+`ISOLATED_OFFLINE_TEST`: **489 focused tests passed**. Full pytest: **1359 passed, 3 skipped** with the real system test opt-in disabled. Ruff passed for tracked Python files. The broad `ruff check .` found five lint issues in the existing untracked load-test directory. Strict MyPy passed for 78 source files. `dba validate` passed for 4 example assets and 118 Registry scripts. `git diff --check` passed.
+
+Real database E2E is `NOT_EXECUTED`. The PowerShell process was part of the Codex-managed runtime and did not establish authorized Windows host access. The unique test asset and credential-session gates were not attempted. The historical live evidence in §63 remains recorded for that checkpoint. Current-head live SQL Server behavior and four-engine real-report parity still require verification. Backlog retains `V091-P5-WORKBENCH-001` as `IN_PROGRESS`.
+
+## 66. V091-P5-WORKBENCH-001 — SQL Server Slow session query and database error propagation — 2026-11-09
+
+The reported SQL Server 2022 failure was native error 207 with SQLSTATE `42S22`. Both active session Registry variants now obtain `client_interface_name` from `sys.dm_exec_sessions`, including the missing-value check. `sys.dm_exec_connections` continues to provide the client network address. The SQL Server 2022 offline fixture asserts all ten requested fields with two distinct sessions and reversed request order.
+
+The SQL Server query wrapper had omitted normalized driver details from general failures and timeouts. The four adapters now serialize the same sanitized error structure for Collector results and populate the existing JSONL fields from it. Tests exercise native SQL Server errors 207 and 229, PyMySQL numeric errors, psycopg SQLSTATE and diagnostic fields, and python-oracledb codes. Unknown codes and SQLSTATE values remain null.
+
+The staged SQL Server, PostgreSQL and MySQL report builders use the version captured before any query can close the adapter. Oracle already captured its report context before collection. The CLI preserves successful samples and the first Collector error. JSON includes a separate report error when assembly or rendering fails. HTML and terminal output identify the failed Collector and show the sanitized vendor error. Tests also verify incomplete incident status and credential redaction.
+
+`ISOLATED_OFFLINE_TEST`: **390 focused tests passed**. Full pytest reported **1371 passed and 3 skipped** with the real-system opt-in disabled. Ruff passed for tracked Python sources and the new regression test. Strict MyPy passed for 78 source files. `dba validate` passed for 4 example assets and 118 Registry scripts. `git diff --check` passed.
+
+`WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED**. PowerShell ran from the Codex managed runtime, so the authorized host, unique asset and credential-session gates were not established. No database connection was attempted. P5 remains `IN_PROGRESS`.
+
+### Windows SQL Server 2022 verification
+
+Run the preflight in Windows PowerShell on the authorized host. Select the existing Inventory YAML for the one approved test asset. Confirm the actual host, project executables, approved Docker host and port, `environment=test`, and monitoring credential session before continuing.
+
+```powershell
+Set-Location D:\DBA\DBAToolKit
+$repo = (Get-Location).Path
+(Get-Process -Id $PID).Path
+[System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+Resolve-Path .\.venv\Scripts\python.exe, .\.venv\Scripts\dba.exe
+$dba = (Resolve-Path .\.venv\Scripts\dba.exe).Path
+$sql = (Resolve-Path .\sql).Path
+$testInventory = (Resolve-Path -LiteralPath (Read-Host 'Approved single-asset test Inventory YAML')).Path
+& $dba --inventory $testInventory show sqlserver2022 --json
+& $dba credentials status --json
+```
+
+Continue in the same PowerShell session after the gates pass. The unique output directory keeps reports and JSONL separate from earlier evidence.
+
+```powershell
+$verification = Join-Path $repo ('.tmp\slow-207-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $verification -ErrorAction Stop | Out-Null
+Set-Location $verification
+$connection = & $dba --inventory $testInventory --sql-root $sql test-connection sqlserver2022 --json |
+    ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or -not $connection.success -or $connection.version -ne '16.0.4305.5') {
+    throw 'Test connection or expected SQL Server build did not pass.'
+}
+$check = & $dba --inventory $testInventory --sql-root $sql check sqlserver2022 --json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $check.status -ne 'READY') { throw 'check did not report READY.' }
+& $dba --inventory $testInventory --sql-root $sql diagnose sqlserver2022 slow --json --report slow.html |
+    Set-Content -Encoding utf8 slow.json
+if ($LASTEXITCODE -ne 0) { throw 'Slow returned a failure. Inspect slow.json.' }
+$slow = Get-Content -Raw slow.json | ConvertFrom-Json
+$sessions = $slow.report.details.samples | Where-Object collector -eq 'active_sessions'
+if (-not $sessions.success) { throw 'active_sessions did not succeed.' }
+```
+
+Compare the request cards in `slow.html` to `all_requests` in `slow.json` by session and request ID. Compare source fields to the corresponding `all_sessions` row. A sample with no active request cannot verify live request/source parity.
+
+To reproduce error 207 on the same verified asset, restore the invalid alias in a disposable copy of the read-only Registry query.
+
+```powershell
+$faultRegistry = Join-Path $verification 'registry-fault-207'
+Copy-Item -LiteralPath $sql -Destination $faultRegistry -Recurse -ErrorAction Stop
+$faultScript = Join-Path $faultRegistry 'sqlserver\active_sessions.sql'
+$original = [IO.File]::ReadAllText($faultScript)
+if ([regex]::Matches($original, '\bs\.client_interface_name\b').Count -ne 2) {
+    throw 'Expected exactly two session aliases in the copied SQL.'
+}
+[IO.File]::WriteAllText($faultScript, $original.Replace('s.client_interface_name', 'c.client_interface_name'))
+$example = Join-Path $repo 'examples\inventory\demo.yaml'
+& $dba --inventory $example --sql-root $faultRegistry validate
+if ($LASTEXITCODE -ne 0) { throw 'Fault Registry failed static validation.' }
+& $dba --inventory $testInventory --sql-root $faultRegistry diagnose sqlserver2022 slow --json --report slow-207.html |
+    Set-Content -Encoding utf8 slow-207.json
+if ($LASTEXITCODE -ne 1) { throw 'Expected a failed Slow collection.' }
+$fault = Get-Content -Raw slow-207.json | ConvertFrom-Json
+if ($fault.collector_name -ne 'active_sessions' -or $fault.error_type -ne 'QueryFailed' -or
+    $fault.error.sqlstate -ne '42S22' -or $fault.error.vendor_code -ne 207) {
+    throw 'The original SQL Server error was not preserved.'
+}
+$fault.error | Select-Object error_type, database_type, driver, sqlstate, vendor_code, message
+Get-Content .\logs\dba.jsonl | ForEach-Object { $_ | ConvertFrom-Json } |
+    Where-Object { $_.sql_script -eq 'active_sessions' -and $_.vendor_code -eq 207 } |
+    Select-Object sql_script, error_type, driver, sqlstate, vendor_code, sanitized_message
+```
+
+## 67. V091-P5-WORKBENCH-001 — SQL Server Slow WAITFOR classification — 2026-11-09
+
+- Prior SQL Server 2022 evidence supplied by the user shows that `WAITFOR DELAY '00:00:30';` was captured with its SQL text and execution source. The prior diagnostic classified it as `WAITING_SQL` and reported `DEGRADED`. This evidence records the original behavior.
+- `ISOLATED_OFFLINE_TEST` — SQL Server requests with both `command` and `wait_type` set to `WAITFOR` retain their SQL text, execution source, resource metrics and wait details. A standalone wait with sufficient evidence of no blocking or open transaction is excluded from the abnormal-wait and long-running findings. Missing or truncated blocking and transaction evidence keeps the result incomplete and the incident `UNKNOWN` when no independent issue is observed.
+- Regression cases cover idle and short-running snapshots, WAITFOR with open transaction or blocking evidence, native lock, I/O and memory grant waits, the existing slow threshold, the blocking chain, and failed or incomplete collectors. A mixed snapshot retains the genuine abnormal wait in the finding, triage and incident summary while the WAITFOR stays in the current-request display. Unproven causes remain undetermined.
+- Before changes, the focused baseline passed 181 tests. After changes, the focused suite passed 200 tests and full pytest passed 1390 tests with 3 skipped. Ruff, strict MyPy (78 source files), `dba validate` (4 example assets, 118 Registry scripts) and `git diff --check` passed.
+- New `WINDOWS_LOCAL_REAL_E2E` — `NOT_EXECUTED`. This checkpoint used offline fixtures only. A live retest of the revised classification and the existing four-engine real-report and parity requirements remain open.

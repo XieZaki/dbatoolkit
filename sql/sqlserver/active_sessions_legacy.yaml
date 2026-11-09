@@ -5,7 +5,8 @@ timeout_seconds: 10
 max_rows: 5000
 reviewed: true
 description: Reviewed legacy session read using sys.sysprocesses dbid/open_tran; explicit
-  source columns describe compatibility semantics, no fabricated defaults.
+  source columns describe compatibility semantics. The session DMV supplies the client
+  interface name and the connection DMV supplies the client address.
 feature: slow
 version_families:
 - 2008r2

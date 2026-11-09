@@ -22,6 +22,7 @@ from dba.slow_profiles import (
     optional_collectors_for_adapter,
     profile_for_adapter,
     required_collectors_for_adapter,
+    slow_reconnect_failure,
 )
 from dba.sqlserver import SQLServerAdapter
 from dba.sqlserver_collectors import (
@@ -121,10 +122,10 @@ def descendants(root: int, children: dict[int, list[int]]) -> set[int]:
     return seen - {root}
 
 
-def _attach_session_identity_to_normalized_requests(
-    requests: list[dict[str, Any]], sessions: list[dict[str, Any]],
-) -> None:
-    """Fill missing SQL Server normalized identity from one exact session row."""
+def _unique_session_rows(
+    sessions: list[dict[str, Any]],
+) -> tuple[dict[int, dict[str, Any]], set[int]]:
+    """Index only unambiguous session IDs from the separately sampled session set."""
     sessions_by_id: dict[int, dict[str, Any]] = {}
     ambiguous_session_ids: set[int] = set()
     for session_row in sessions:
@@ -135,6 +136,16 @@ def _attach_session_identity_to_normalized_requests(
             ambiguous_session_ids.add(session_id)
         else:
             sessions_by_id[session_id] = session_row
+    for session_id in ambiguous_session_ids:
+        sessions_by_id.pop(session_id, None)
+    return sessions_by_id, ambiguous_session_ids
+
+
+def _attach_session_identity_to_normalized_requests(
+    requests: list[dict[str, Any]], sessions: list[dict[str, Any]],
+) -> None:
+    """Fill missing request identity from one exact, unambiguous session row."""
+    sessions_by_id, ambiguous_session_ids = _unique_session_rows(sessions)
 
     identity_sources = (
         ("username", "login_name"),
@@ -193,25 +204,65 @@ def build_slow_report(
     requests, sessions = rows("active_requests"), rows("active_sessions")
     _attach_session_identity_to_normalized_requests(requests, sessions)
     transactions, connections = rows("transactions"), rows("connections")
-    session_map = {number(r.get("session_id")): r for r in sessions}
+    session_map, ambiguous_session_ids = _unique_session_rows(sessions)
     connection_map: dict[int, list[dict[str, Any]]] = {}
     for connection in connections:
         connection_map.setdefault(number(connection.get("session_id")), []).append(connection)
     for request in requests:
-        session = session_map.get(number(request.get("session_id")), {})
-        for key in (
-            "login_name",
-            "host_name",
-            "program_name",
-            "client_net_address",
-            "open_transaction_count",
-        ):
-            request.setdefault(key, session.get(key))
+        session_id = number(request.get("session_id"))
+        session = session_map.get(session_id, {})
+        if session_id not in ambiguous_session_ids:
+            for key in (
+                "login_name",
+                "original_login_name",
+                "nt_user_name",
+                "host_name",
+                "program_name",
+                "client_net_address",
+                "client_interface_name",
+                "host_process_id",
+                "open_transaction_count",
+            ):
+                if request.get(key) in (None, "") and session.get(key) not in (None, ""):
+                    request[key] = session[key]
         request.setdefault("cpu_time", request.get("cpu_ms"))
         request.setdefault("wait_time_ms", request.get("wait_ms"))
     requests.sort(key=lambda row: number(row.get("elapsed_ms")), reverse=True)
     waiting = [r for r in requests if r.get("wait_type") or r.get("status") == "suspended"]
     blocked = [r for r in requests if number(r.get("blocking_session_id")) > 0]
+    graph = blocking_graph(requests)
+    blocking_sessions = set(graph["children"]) | {
+        r.get("session_id") for r in requests if number(r.get("blocking_session_id")) != 0
+    }
+    open_transaction_sessions = {
+        r.get("session_id") for r in sessions if number(r.get("open_transaction_count")) > 0
+    } | {
+        r.get("session_id") for r in transactions
+        if r.get("transaction_type") != 3 and r.get("transaction_state") not in (6, 8)
+    }
+    wait_evidence_incomplete, _ = collection_completeness(
+        results, ("active_requests", "active_sessions", "transactions"))
+    unverified_waitfor = False
+    for request in requests:
+        if (str(request.get("command", "")).strip().upper() != "WAITFOR"
+                or str(request.get("wait_type", "")).strip().upper() != "WAITFOR"):
+            continue
+        sid = request.get("session_id")
+        if (sid in blocking_sessions or sid in open_transaction_sessions
+                or number(request.get("open_transaction_count")) > 0):
+            request["request_interpretation"] = "WAITFOR 同时存在阻塞或未结束事务证据，需复核。"
+            continue
+        request["request_kind"] = "ACTIVE_WAIT"
+        blocker = request.get("blocking_session_id")
+        transaction_count = session_map.get(sid, {}).get("open_transaction_count") if type(sid) is int else None
+        if (wait_evidence_incomplete or type(sid) is not int or sid <= 0
+                or type(blocker) is not int or blocker != 0
+                or type(transaction_count) is not int or transaction_count != 0):
+            unverified_waitfor = True
+            request["request_interpretation"] = "已识别 WAITFOR 主动等待，阻塞或事务证据不足，需复核。"
+        else:
+            request["request_interpretation"] = "WAITFOR 主动等待，本次采样未发现该会话的阻塞或未结束事务。"
+    diagnostic_waits = [r for r in waiting if r.get("request_kind") != "ACTIVE_WAIT"]
     concurrency = {
         "connected_sessions": len(session_map),
         "active_sessions": len({r.get("session_id") for r in requests}),
@@ -220,7 +271,6 @@ def build_slow_report(
         "waiting_requests": len(waiting),
         "blocked_requests": len(blocked),
     }
-    graph = blocking_graph(requests)
     findings: list[Finding] = []
     if blocked:
         findings.append(
@@ -382,7 +432,8 @@ def build_slow_report(
                 )
             )
     long = [
-        r for r in requests if number(r.get("elapsed_ms")) >= settings.long_running_seconds * 1000
+        r for r in requests if r.get("request_kind") != "ACTIVE_WAIT"
+        and number(r.get("elapsed_ms")) >= settings.long_running_seconds * 1000
     ]
     if long:
         findings.append(
@@ -409,18 +460,21 @@ def build_slow_report(
                 "核对业务并发基线和连接池；不将 connected sessions 当作并发 SQL。",
             )
         )
-    if waiting:
+    if diagnostic_waits:
         findings.append(
             Finding(
                 "WAITING_SQL",
                 Severity.WARNING,
-                {"count": len(waiting), "requests": waiting[: settings.slow_top_n]},
+                {"count": len(diagnostic_waits), "requests": diagnostic_waits[: settings.slow_top_n]},
                 "结合 wait_type 和阻塞链解释当前等待，不据单次快照推断资源根因。",
             )
         )
     incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
     if visibility == "PARTIAL":
         quality.append("Optional evidence is unavailable or truncated; visibility is partial.")
+    if unverified_waitfor:
+        incomplete, visibility = True, "PARTIAL"
+        quality.append("WAITFOR 已观测到，但阻塞或事务证据不足，无法确认该会话没有伴随异常。")
     if incomplete:
         findings.append(
             Finding(
@@ -519,9 +573,11 @@ def collect_slow_phase(adapter: SQLServerAdapter, names: tuple[str, ...],
         if name in have:
             continue
         if reconnect_pending:
+            started_at = datetime.now(timezone.utc)
             try:
                 adapter.connect()
-            except Exception:
+            except ToolkitError as exc:
+                results.append(slow_reconnect_failure(adapter.instance.id, started_at, exc))
                 break
             reconnect_pending = False
         collector = _STAGED_COLLECTORS.get(name)
@@ -539,8 +595,7 @@ def collect_slow_phase(adapter: SQLServerAdapter, names: tuple[str, ...],
 
 
 def build_slow_phase_report(adapter: SQLServerAdapter, results: tuple[CollectorResult, ...],
-                            *, emergency: bool) -> SlowReport:
-    version = adapter.get_server_version()
+                            *, emergency: bool, version: str) -> SlowReport:
     required = (emergency_collectors_for_adapter(adapter) if emergency else
                 required_collectors_for_adapter(
                     adapter, ("active_requests", "active_sessions", "transactions", "connections")))
@@ -551,7 +606,7 @@ def build_slow_phase_report(adapter: SQLServerAdapter, results: tuple[CollectorR
     emergency_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
                              for name in core)
     full_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
-                        for name in required + optional)
+                        for name in required + optional) and not report.details["incomplete"]
     report.details.update({
         "diagnostic_phase": "EMERGENCY" if emergency else "FINAL",
         "emergency_evidence_complete": emergency_complete,

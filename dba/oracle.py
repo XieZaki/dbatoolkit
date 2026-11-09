@@ -17,7 +17,7 @@ from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import CredentialProvider, Mode, validate_monitoring_credential
 from dba.database_errors import normalize_oracle_error
-from dba.errors import ToolkitError
+from dba.errors import ToolkitError, database_error_log_fields
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
 from dba.oracle_identity import OraclePrincipal
@@ -183,6 +183,7 @@ class OracleAdapter(Adapter):
             "sql_script": script, "result": "failed" if error else "ok",
             "elapsed_time": time.monotonic() - started,
             "error_type": error.error_type if error else None,
+            **database_error_log_fields(error.database_error_payload() if error else None),
         }})
 
     def connect(self) -> None:
@@ -456,7 +457,6 @@ class OracleAdapter(Adapter):
         started = time.monotonic()
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
-        database_error: dict[str, Any] | None = None
         truncated = False
         result_bytes = 0
         error: ToolkitError | None = None
@@ -490,9 +490,9 @@ class OracleAdapter(Adapter):
             error = exc
         except (ValidationError, OSError, UnicodeError) as exc:
             error = (ToolkitError("RegistryRejected", "SQL is not an unchanged reviewed script from this registry.")
-                     if not authorized else _driver_error(exc, "Query"))
+                     if not authorized else _driver_error(exc, "Query", self._password))
         except Exception as exc:
-            error = _driver_error(exc, "Query")
+            error = _driver_error(exc, "Query", self._password)
         except BaseException:
             self._close()
             raise
@@ -506,14 +506,6 @@ class OracleAdapter(Adapter):
                 rows = ()
                 truncated = False
                 result_bytes = 0
-                if error.database_error is not None:
-                    to_dict = getattr(error.database_error, "to_dict", None)
-                    if callable(to_dict):
-                        payload = to_dict()
-                        if isinstance(payload, dict):
-                            database_error = payload
-                    elif isinstance(error.database_error, dict):
-                        database_error = error.database_error
                 self._close()
             details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
                                        "result_bytes": result_bytes}
@@ -528,7 +520,7 @@ class OracleAdapter(Adapter):
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,
                                rows, len(rows), truncated, error is None,
                                error.error_type if error else None, str(error) if error else None,
-                               database_error)
+                               error.database_error_payload() if error else None)
 
     def get_server_version(self) -> str:
         if not self._ready:

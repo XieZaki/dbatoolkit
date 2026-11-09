@@ -13,7 +13,12 @@ from dba.capabilities import ServerCapabilities
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import CredentialProvider, Mode, validate_monitoring_credential
-from dba.errors import ToolkitError, driver_error, sqlserver_connection_error
+from dba.errors import (
+    ToolkitError,
+    database_error_log_fields,
+    driver_error,
+    sqlserver_connection_error,
+)
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
 from dba.registry import SqlScript, SqlScriptRegistry, fetch_bounded_rows
@@ -408,16 +413,6 @@ class SQLServerAdapter(Adapter):
                     }
                 )
             self._audit(script_name, started, error, details)
-        database_error_payload: dict[str, Any] | None = None
-        if error is not None and error.database_error is not None:
-            detail = error.database_error
-            if isinstance(detail, dict):
-                database_error_payload = detail
-            else:
-                to_dict = getattr(detail, "to_dict", None)
-                payload = to_dict() if callable(to_dict) else None
-                if isinstance(payload, dict):
-                    database_error_payload = payload
         return CollectorResult(
             self.instance.id,
             script_name,
@@ -430,7 +425,7 @@ class SQLServerAdapter(Adapter):
             error is None,
             error.error_type if error else None,
             str(error) if error else None,
-            database_error_payload,
+            error.database_error_payload() if error else None,
         )
 
     def _audit(
@@ -451,6 +446,7 @@ class SQLServerAdapter(Adapter):
                     "result": "failed" if error else "ok",
                     "elapsed_time": time.monotonic() - started,
                     "error_type": error.error_type if error else None,
+                    **database_error_log_fields(error.database_error_payload() if error else None),
                 }
             },
         )

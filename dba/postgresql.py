@@ -15,7 +15,7 @@ from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import CredentialProvider, Mode, validate_monitoring_credential
 from dba.database_errors import normalize_postgresql_error
-from dba.errors import ToolkitError
+from dba.errors import ToolkitError, database_error_log_fields
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
 from dba.registry import SqlScript, SqlScriptRegistry, fetch_bounded_rows
@@ -55,7 +55,7 @@ def load_driver() -> Driver:
 
 def _driver_error(exc: Exception, phase: str, secret: str = "", *, top_sql: bool = False) -> ToolkitError:
     detail = normalize_postgresql_error(exc, (secret,))
-    state = getattr(exc, "sqlstate", None)
+    state = detail.sqlstate
     if isinstance(exc, TimeoutError) or state == "57014":
         return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.", database_error=detail)
     if state == "42501":
@@ -66,7 +66,8 @@ def _driver_error(exc: Exception, phase: str, secret: str = "", *, top_sql: bool
         )
     if top_sql and state == "55000":
         return ToolkitError("TopSQLSourceNotConfigured",
-                            "pg_stat_statements is not active; verify its reviewed module configuration manually.")
+                            "pg_stat_statements is not active; verify its reviewed module configuration manually.",
+                            database_error=detail)
     error_type = "ConnectionFailed" if phase == "Connection" else f"{phase}Failed"
     message = (f"{phase} failed; vendor error details are available below."
                if detail is not None else
@@ -108,6 +109,7 @@ class PostgreSQLAdapter(Adapter):
             "sql_script": script, "result": "failed" if error else "ok",
             "elapsed_time": time.monotonic() - started,
             "error_type": error.error_type if error else None,
+            **database_error_log_fields(error.database_error_payload() if error else None),
         }})
 
     def connect(self) -> None:
@@ -285,9 +287,9 @@ class PostgreSQLAdapter(Adapter):
         except (ValidationError, OSError, UnicodeError) as exc:
             error = (ToolkitError("RegistryRejected", "SQL is not an unchanged reviewed script from this registry.")
                      if not authorized else _driver_error(
-                         exc, "Query", top_sql=script_name == "top_sql"))
+                         exc, "Query", self._password, top_sql=script_name == "top_sql"))
         except Exception as exc:
-            error = _driver_error(exc, "Query", top_sql=script_name == "top_sql")
+            error = _driver_error(exc, "Query", self._password, top_sql=script_name == "top_sql")
         except BaseException:
             self._close()
             raise
@@ -311,21 +313,11 @@ class PostgreSQLAdapter(Adapter):
                                 "max_rows": script.metadata.max_rows})
                 details["max_result_bytes"] = script.metadata.max_result_bytes
             self._audit(script_name, started, error, details)
-        database_error_payload: dict[str, Any] | None = None
-        if error is not None and error.database_error is not None:
-            detail = error.database_error
-            if isinstance(detail, dict):
-                database_error_payload = detail
-            else:
-                to_dict = getattr(detail, "to_dict", None)
-                payload = to_dict() if callable(to_dict) else None
-                if isinstance(payload, dict):
-                    database_error_payload = payload
         return CollectorResult(self.instance.id, script_name, started_at,
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,
                                rows, len(rows), truncated, error is None,
                                error.error_type if error else None, str(error) if error else None,
-                               database_error_payload)
+                               error.database_error_payload() if error else None)
 
     def get_server_version(self) -> str:
         if not self._ready:

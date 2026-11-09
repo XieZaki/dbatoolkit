@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any
 
 from dba.collectors import CollectorResult
@@ -248,6 +249,15 @@ def validate_slow_profiles(registry: Any, bindings: tuple[Any, ...]) -> tuple[st
 def profile_for_adapter(adapter: Any) -> ResolvedDiagnosticProfile | None:
     profile = getattr(adapter, "slow_profile", None)
     return profile if isinstance(profile, ResolvedDiagnosticProfile) and profile.feature == "slow" else None
+
+
+def slow_reconnect_failure(database_id: str, started_at: datetime, error: ToolkitError) -> CollectorResult:
+    finished_at = datetime.now(timezone.utc)
+    return CollectorResult(
+        database_id, "reconnect", started_at, finished_at,
+        (finished_at - started_at).total_seconds() * 1000, (), 0, False, False,
+        error.error_type, str(error), error.database_error_payload(),
+    )
 
 
 def required_collectors_for_adapter(adapter: Any, fallback: tuple[str, ...]) -> tuple[str, ...]:

@@ -138,35 +138,7 @@ class HtmlReportRenderer:
             else:
                 blocks.append(code)
         summary = f"<p>{_escape(display_report_summary(section.summary))}</p>" if section.summary else ""
-        if slow and section.section_id == "top-sql" and section.title == "Top SQL 资源排序":
-            metric_labels = {
-                "cpu_time": "累计 CPU", "logical_reads": "累计逻辑读",
-                "physical_reads": "累计物理读", "execution_count": "执行次数",
-                "elapsed_time": "累计耗时", "average_cpu_time": "平均 CPU",
-                "average_elapsed_time": "平均耗时",
-            }
-            selected = {"Ranking Metric", "Ranking Direction", "Collection Scope", "Returned Records"}
-            meta_items: list[str] = []
-            for label, raw_value in section.fields:
-                if label not in selected:
-                    continue
-                value = raw_value
-                if label == "Ranking Metric":
-                    value = metric_labels.get(value, "指标值")
-                elif label == "Ranking Direction":
-                    value = {"DESCENDING": "降序", "ASCENDING": "升序"}.get(value.upper(), "未知")
-                elif label == "Collection Scope":
-                    value = {"INSTANCE": "实例级", "DATABASE": "数据库级"}.get(value.upper(), "未知")
-                elif label == "Returned Records":
-                    value = f"{value} 条"
-                meta_items.append(
-                    f"<span><strong>{_escape(_label(label))}：</strong>"
-                    f"{_escape(_report_value(label, value))}</span>"
-                )
-            field_markup = (f'<div class="top-sql-meta">{"".join(meta_items)}</div>'
-                            if meta_items else "")
-        else:
-            field_markup = f'<dl class="fields">{fields}</dl>' if fields else ""
+        field_markup = f'<dl class="fields">{fields}</dl>' if fields else ""
         body = summary + field_markup + tables + "".join(blocks)
         severity = _escape(section.severity.upper())
         section_html = self._fragment("section.html", ID=_escape(section.section_id),
@@ -378,14 +350,23 @@ class HtmlReportRenderer:
         chain = render_section("blocking")
         recovery = render_section("immediate-recovery")
         quality = render_section("collection-quality")
+        current_requests_html = "".join(
+            self._section(section, slow=True)
+            for section in model.sections
+            if section.section_id == "request-runtime"
+            or section.section_id.startswith("current-request-")
+        )
         appendix_sections = "".join(render_section(item, collapsed=True)
                                     for item in ("session-sources", "appendix") if item in sections)
         reserved = {"root-blockers", "root-cause", "blocking", "immediate-recovery",
-                    "collection-quality", "session-sources", "appendix"}
+                    "collection-quality", "session-sources", "appendix", "request-runtime"}
+        reserved.update(section.section_id for section in model.sections
+                        if section.section_id.startswith("current-request-"))
         evidence_sections = "".join(
-            render_section(section.section_id, collapsed=section.section_id != "top-sql")
+            render_section(section.section_id, collapsed=True)
             for section in model.sections if section.section_id not in reserved)
-        toc_items = [("summary", "故障概况"), ("root-assessment", "根阻塞判断"),
+        toc_items = [("summary", "故障概况"), ("current-requests", "当前活动 SQL"),
+                     ("root-assessment", "根阻塞判断"),
                      ("blocking-chain", "阻塞传播链"), ("manual-action", "人工处置参考"),
                      ("evidence", "诊断证据"), ("collection-quality", "采集完整性"),
                      ("session-appendix", "会话附录")]
@@ -402,6 +383,7 @@ class HtmlReportRenderer:
                 "Snapshot Consistency", "快照一致性", default="UNKNOWN"))),
             "METADATA": metadata_html, "METRICS": metric_html,
             "TOC": toc, "ROOT_ASSESSMENT": root_blockers + root_cause,
+            "CURRENT_REQUESTS": current_requests_html,
             "BLOCKING_CHAIN": chain, "RECOVERY": recovery,
             "EVIDENCE": evidence_sections, "QUALITY": quality,
             "APPENDIX": appendix_sections, "SUMMARY_COPY": _escape(summary_copy),

@@ -327,14 +327,15 @@ def test_sqlserver_top_sql_cli_json_and_html_share_the_contract() -> None:
     model = build_report_model(report, incident)
     html = HtmlReportRenderer().render(model)
     assert "Top SQL" in html and "appdb" in html and "累计统计" in html
-    assert "原生身份与执行计划标识" in html and "0x01" in html
+    assert "原生身份与执行计划标识" not in html and "0x01" not in html
     assert "采集范围" in html and "实例级" in html
     assert "SELECT " not in html
     from dba.presentation import render_human
     cli = render_human("top-sql", result)
     assert "total_cpu_time" in cli
     assert "采集范围" in cli and "实例级" in cli
-    assert "sqlserver:sql_handle=0x01" in cli
+    assert "sql_handle=0x01" in cli
+    assert "原生身份（用于精确关联）" not in cli
     assert "0x01" in cli and "1000" in cli
 
 
@@ -363,6 +364,6 @@ def test_top_sql_diagnose_cli_executes_registered_route_and_writes_offline_html(
     assert driver.connection.bound_parameters[-1] == (7, "cpu_time")
     html = report_path.read_text(encoding="utf-8")
     assert "Top SQL" in html and "appdb" in html and "microseconds" in html
-    assert "原生身份与执行计划标识" in html and "0x01" in html
+    assert "原生身份与执行计划标识" not in html and "0x01" not in html
     assert "SELECT " not in html
     assert driver.connection.closed

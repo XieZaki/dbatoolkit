@@ -29,11 +29,13 @@ class DatabaseErrorDetail:
 
 
 _SECRET = re.compile(
-    r"(?i)(?P<key>password|passwd|pwd|secret|token|access_token)"
-    r"(?P<sep>\s*[:=]\s*)(?P<value>[^\s;,]+)"
+    r"""(?i)(?P<key>\b(?:password|passwd|pwd|secret|token|access_token|uid|user(?:name|\s+id)?))"""
+    r"""(?P<sep>["']?\s*[:=]\s*)(?:\{(?:[^}]|}})*\}|N?"(?:[^"\\]|\\.|"")*"|"""
+    r"""N?'(?:[^'\\]|\\.|'')*'|[^;\s,)]+)"""
 )
-_ODBC_PWD = re.compile(r"(?i)(\bPWD\s*=\s*)(?:\{[^}]*\}|[^;\s)]+)")
-_ORA_CODE = re.compile(r"\bORA-(\d{5})\b", re.I)
+_ORACLE_CODE = re.compile(r"\b(?:ORA-\d{5}|(?:DPI|DPY|TNS)-\d{4,5})\b", re.I)
+_SQLSTATE = re.compile(r"[0-9A-Z]{5}")
+_ODBC_NATIVE_CODE = re.compile(r"\((-?\d{1,9})\)(?=\s*(?:\(SQL\w+\)\s*)?(?:[.;]|$))")
 _PASSWORD_USED = re.compile(r"(?i)using password:\s*YES")
 _MAX_TEXT = 4000
 
@@ -52,8 +54,7 @@ def sanitize_vendor_text(value: object, secrets: tuple[str, ...] = ()) -> str:
         return marker
 
     text = _PASSWORD_USED.sub(preserve_password_used, text)
-    text = _ODBC_PWD.sub(r"\1<REDACTED>", text)
-    text = _SECRET.sub(lambda match: f"{match.group('key')}{match.group('sep')}<REDACTED>", text)
+    text = _SECRET.sub(r"\g<key>\g<sep>[REDACTED]", text)
     safe = redact(text)
     if isinstance(safe, str):
         for index, phrase in enumerate(password_used):
@@ -72,9 +73,13 @@ def _message(exc: Exception, secrets: tuple[str, ...] = ()) -> str:
     return sanitize_vendor_text(value, secrets)
 
 
+def _sqlstate(value: object) -> str | None:
+    return value if isinstance(value, str) and _SQLSTATE.fullmatch(value) else None
+
+
 def normalize_mysql_error(exc: Exception, secrets: tuple[str, ...] = ()) -> DatabaseErrorDetail:
     code = exc.args[0] if exc.args and type(exc.args[0]) is int else None
-    state = getattr(exc, "sqlstate", None)
+    state = _sqlstate(getattr(exc, "sqlstate", None))
     known: Mapping[int, tuple[str, str | None]] = {
         1045: ("AUTHENTICATION_FAILED", "Check the stored monitoring credential and MySQL user@host grants."),
         1044: ("ACCESS_DENIED", "Review docs/DATABASE_PERMISSIONS.md for this MySQL version and denied operation."),
@@ -89,7 +94,7 @@ def normalize_mysql_error(exc: Exception, secrets: tuple[str, ...] = ()) -> Data
     classification, guidance = known.get(code if code is not None else -1, ("UNKNOWN", None))
     if isinstance(exc, (TimeoutError, socket.timeout)):
         classification, guidance = "TIMEOUT", "Check the configured connection timeout and network path."
-    return DatabaseErrorDetail("mysql", "PyMySQL", code, state if isinstance(state, str) else None,
+    return DatabaseErrorDetail("mysql", "PyMySQL", code, state,
                                _message(exc, secrets), classification, guidance)
 
 
@@ -97,9 +102,12 @@ def normalize_sqlserver_error(
     exc: Exception, secrets: tuple[str, ...] = (), driver: str = "pyodbc"
 ) -> DatabaseErrorDetail:
     args = exc.args
-    state = next((item for item in args if isinstance(item, str) and re.fullmatch(r"[0-9A-Z]{5}", item)), None)
-    joined = " ".join(str(item) for item in args)
-    code_match = re.search(r"\((\d{3,6})\)", joined)
+    state = next((item for item in args if _sqlstate(item) is not None), None)
+    joined = " ".join(str(item) for item in args if _sqlstate(item) is None)
+    if state is None:
+        state_match = re.match(r"\s*\[([0-9A-Z]{5})\]", joined)
+        state = state_match.group(1) if state_match else None
+    code_match = _ODBC_NATIVE_CODE.search(joined) if state is not None else None
     code: str | int | None = int(code_match.group(1)) if code_match else None
     message = sanitize_vendor_text(joined or str(exc), secrets)
     if state in {"HYT00", "HYT01"} or isinstance(exc, TimeoutError):
@@ -118,8 +126,8 @@ def normalize_sqlserver_error(
 
 
 def normalize_postgresql_error(exc: Exception, secrets: tuple[str, ...] = ()) -> DatabaseErrorDetail:
-    state = getattr(exc, "sqlstate", None)
     diag = getattr(exc, "diag", None)
+    state = _sqlstate(getattr(exc, "sqlstate", None)) or _sqlstate(getattr(diag, "sqlstate", None))
     primary = getattr(diag, "message_primary", None)
     message = sanitize_vendor_text(primary or str(exc), secrets)
     raw_detail = getattr(diag, "message_detail", None)
@@ -136,8 +144,8 @@ def normalize_postgresql_error(exc: Exception, secrets: tuple[str, ...] = ()) ->
         "08006": ("CONNECTION_LOST", "Check server availability and network stability."),
         "57014": ("TIMEOUT", "Check the configured query or connection limits."),
     }
-    classification, guidance = known.get(state if isinstance(state, str) else "", ("UNKNOWN", None))
-    return DatabaseErrorDetail("postgresql", "psycopg", None, state if isinstance(state, str) else None,
+    classification, guidance = known.get(state or "", ("UNKNOWN", None))
+    return DatabaseErrorDetail("postgresql", "psycopg", None, state,
                                message, classification, guidance, detail, hint, context)
 
 
@@ -147,10 +155,12 @@ def normalize_oracle_error(exc: Exception, secrets: tuple[str, ...] = ()) -> Dat
     code_value = getattr(vendor, "code", None)
     raw_message = getattr(vendor, "message", None) or str(exc)
     message = sanitize_vendor_text(raw_message, secrets)
-    code_match = _ORA_CODE.search(message)
-    code: str | int | None = f"ORA-{code_match.group(1)}" if code_match else None
-    if code_value is not None and code is None:
-        code = f"ORA-{code_value:05d}" if type(code_value) is int else str(code_value)
+    full_code = getattr(vendor, "full_code", None)
+    code_match = (_ORACLE_CODE.fullmatch(full_code) if isinstance(full_code, str) else None)
+    code_match = code_match or _ORACLE_CODE.search(str(raw_message))
+    code = code_match.group(0).upper() if code_match else None
+    if code is None and type(code_value) is int and 0 < code_value <= 99999:
+        code = f"ORA-{code_value:05d}"
     classification = ("AUTHENTICATION_FAILED" if code == "ORA-01017" else
                       "ACCESS_DENIED" if code in {"ORA-01031", "ORA-01045"} else "UNKNOWN")
     guidance = ("Check the stored monitoring credential." if classification == "AUTHENTICATION_FAILED" else

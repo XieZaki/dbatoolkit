@@ -437,7 +437,7 @@ def test_postgresql_cli_default_routes_to_shared_json_and_html_top_sql(
     assert "SELECT " not in html
 
 
-def test_slow_top_sql_is_opt_in_and_appends_one_existing_collector_result(
+def test_slow_cli_collects_only_current_evidence(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     inventory = tmp_path / "inventory.yaml"
@@ -457,40 +457,43 @@ def test_slow_top_sql_is_opt_in_and_appends_one_existing_collector_result(
                  "--report", str(default_report)],
                 provider=MemoryCredentialProvider(), driver=driver) == 0
     default_payload = json.loads(capsys.readouterr().out)
-    assert "top_sql" not in default_payload["report"]["details"]
-    assert "top_sql" not in driver.connection.executed
+    details = default_payload["report"]["details"]
+    assert "top_sql" not in details and "top_sql_integration" not in details
+    assert default_payload["success"] is True
+    assert {"active_sessions", "blocking", "transactions", "long_running"} <= set(driver.connection.executed)
+    assert not any(name.startswith("top_sql") for name in driver.connection.executed)
+    assert driver.connection.executed.count("version_detect") == 1
+    assert 'id="top-sql"' not in default_report.read_text(encoding="utf-8")
 
-    before = len(driver.connection.executed)
-    report_path = tmp_path / "slow-with-top-sql.html"
-    assert main([*common, "diagnose", "pg-lab", "slow", "--include-top-sql",
-                 "--metric", "total_exec_time", "--top", "5", "--format", "json",
-                 "--report", str(report_path)],
-                provider=MemoryCredentialProvider(), driver=driver) == 0
-    payload = json.loads(capsys.readouterr().out)
-    executed = driver.connection.executed[before:]
-    top_sql_position = executed.index("top_sql_source")
-    core_positions = [executed.index(name) for name in
-                      ("active_sessions", "blocking", "transactions", "long_running")]
-    assert max(core_positions) < top_sql_position
-    assert executed.count("top_sql_source") == 1
-    assert executed.count("top_sql_info") == 1
-    assert executed.count("top_sql") == 1
-    top_sql = payload["report"]["details"]["top_sql"]
-    integrated_details = payload["report"]["details"]
-    default_details = default_payload["report"]["details"]
-    assert integrated_details["priority_candidates"] == default_details["priority_candidates"]
-    integrated_triage = dict(integrated_details["performance_triage"])
-    default_triage = dict(default_details["performance_triage"])
-    integrated_triage.pop("snapshot_time", None)
-    default_triage.pop("snapshot_time", None)
-    assert integrated_triage == default_triage
-    assert payload["success"] is True and default_payload["success"] is True
-    assert top_sql["ranking_metric"] == "total_exec_time"
-    assert top_sql["metric_semantics"] == "CUMULATIVE"
-    assert top_sql["items"][0]["sql_text_association"]["status"] == "UNMATCHED"
-    html = report_path.read_text(encoding="utf-8")
-    assert "Top SQL 排名反映数据库统计视图中的累计表现" in html
-    assert "queryid=77" in html and "累计统计" in html
+
+@pytest.mark.parametrize(("options", "rejected_flag"), [
+    (["--include-top-sql", "--metric", "total_exec_time", "--top", "5"], "--include-top-sql"),
+    (["--metric", "total_exec_time"], "--metric"),
+    (["--top", "10"], "--top"),
+])
+def test_slow_rejects_retired_top_sql_options_before_inventory(
+    options: list[str], rejected_flag: str, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["--inventory", str(tmp_path / "missing.yaml"),
+                 "diagnose", "unused", "slow", *options, "--json"]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["error_type"] == "InvalidArgument"
+    assert rejected_flag in output["error_message"]
+    assert "dba diagnose <database_id> top-sql" in output["guidance"]
+
+    assert main(["--inventory", str(tmp_path / "missing.yaml"),
+                 "diagnose", "unused", "slow", *options]) == 1
+    assert "dba diagnose <database_id> top-sql" in capsys.readouterr().out
+
+
+def test_diagnose_help_explains_ranking_options(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["diagnose", "--help"])
+    assert stopped.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--include-top-sql" not in help_text
+    assert "--metric" in help_text and "仅用于 top-sql" in help_text
+    assert "--top" in help_text and "top-sql 或 active-sql" in help_text
 
 
 def test_pg_top_sql_one_result_drives_json_cli_and_offline_html() -> None:
@@ -506,5 +509,7 @@ def test_pg_top_sql_one_result_drives_json_cli_and_offline_html() -> None:
     html = HtmlReportRenderer().render(build_report_model(report, incident))
     assert json_payload["items"] == payload["items"]
     assert "queryid=89" in cli and "55.5" in cli and "planning_time_included=False" in cli
-    assert "queryid=89" in html and "55.5" in html and "是否包含规划耗时" in html and "否" in html
+    assert json_payload["items"][0]["sql_identity"]["fields"]["queryid"] == 89
+    assert "queryid=89" not in html
+    assert "<td>55.5</td>" in html and "是否包含规划耗时" in html and "否" in html
     assert fake.parameters == (10, "total_exec_time")

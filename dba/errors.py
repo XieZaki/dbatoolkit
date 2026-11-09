@@ -1,4 +1,6 @@
-from dba.database_errors import normalize_sqlserver_error
+from typing import Any
+
+from dba.database_errors import DatabaseErrorDetail, normalize_sqlserver_error
 
 
 class ToolkitError(RuntimeError):
@@ -13,12 +15,29 @@ class ToolkitError(RuntimeError):
         self.trigger_reason = trigger_reason
         self.database_error = database_error
 
+    def database_error_payload(self) -> dict[str, Any] | None:
+        detail = self.database_error
+        if isinstance(detail, DatabaseErrorDetail):
+            return {"error_type": self.error_type, **detail.to_dict()}
+        if isinstance(detail, dict):
+            return {"error_type": self.error_type, **detail}
+        return None
+
+
+def database_error_log_fields(detail: dict[str, Any] | None) -> dict[str, Any]:
+    """Project sanitized driver diagnostics onto the JSONL event contract."""
+    if detail is None:
+        return {}
+    return {**{key: detail.get(key) for key in (
+        "database_type", "driver", "vendor_code", "sqlstate", "classification",
+    )}, "sanitized_message": detail.get("message")}
+
 
 def driver_error(exc: Exception, phase: str, *, secret: str = "", driver: str = "pyodbc") -> ToolkitError:
-    state = exc.args[0] if exc.args else None
-    if isinstance(exc, TimeoutError) or state in ("HYT00", "HYT01"):
-        return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.")
     detail = normalize_sqlserver_error(exc, (secret,), driver)
+    if detail.classification == "TIMEOUT":
+        return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.",
+                            database_error=detail)
     if detail.classification == "ACCESS_DENIED":
         return ToolkitError(
             "QueryDenied",
@@ -27,7 +46,8 @@ def driver_error(exc: Exception, phase: str, *, secret: str = "", driver: str = 
         )
     return ToolkitError(
         f"{phase}Failed",
-        f"{phase} failed; check connectivity, driver, certificate and monitoring account configuration.",
+        f"{phase} failed; vendor error details are available below.",
+        database_error=detail,
     )
 
 
@@ -40,10 +60,8 @@ def sqlserver_connection_error(
     secret: str = "",
 ) -> ToolkitError:
     """Map an ODBC connection error without returning driver-controlled text."""
-    error = driver_error(exc, "Connection")
-    detail = normalize_sqlserver_error(exc, (secret,), driver)
+    error = driver_error(exc, "Connection", secret=secret, driver=driver)
     if error.error_type == "ConnectionTimeout":
-        error.database_error = detail
         return error
 
     # pyodbc commonly reports TLS failures as 08001 with the useful evidence
@@ -71,5 +89,5 @@ def sqlserver_connection_error(
         "Check network, account and certificate settings; pass an approved --settings file "
         "when the target requires different explicit TLS settings. Toolkit did not retry with "
         "weaker TLS settings.",
-        database_error=detail,
+        database_error=error.database_error,
     )

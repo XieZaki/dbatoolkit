@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import replace
 from datetime import datetime
@@ -135,28 +134,14 @@ def _omitted(total: int, displayed: int, noun: str) -> str:
     return text
 
 
-def _top_sql_section(value: Any,
-                     policy: HumanReportPolicy = DEFAULT_HUMAN_REPORT_POLICY,
-                     *, integrated: bool = False) -> ReportSection | None:
-    """Present cumulative Top SQL separately from current Slow evidence."""
+def _top_sql_section(value: Any) -> ReportSection | None:
+    """Present the standalone cumulative Top SQL snapshot."""
     payload = _top_sql_payload(value)
     if payload is None:
         return None
     raw_items: list[Any] = payload.get("items", [])
     if not isinstance(raw_items, list):
         raw_items = []
-    sqlserver_slow = integrated and payload.get("database_engine") == "sqlserver"
-    sqlserver_metric_labels = {
-        "cpu_time": "累计 CPU",
-        "logical_reads": "累计逻辑读",
-        "physical_reads": "累计物理读",
-        "execution_count": "执行次数",
-        "elapsed_time": "累计耗时",
-        "average_cpu_time": "平均 CPU",
-        "average_elapsed_time": "平均耗时",
-    }
-    sqlserver_metric_label = sqlserver_metric_labels.get(
-        payload.get("ranking_metric"), "指标值")
     metadata = ("collection_status", "completeness", "data_visibility",
                 "database_engine", "database_version", "profile_id", "collection_timestamp",
                 "ranking_metric", "ranking_direction", "metric_name", "metric_unit",
@@ -177,98 +162,25 @@ def _top_sql_section(value: Any,
             fields_list.append((_label(key), _human(field_value)[:256]))
     fields = tuple(fields_list)
     rows: list[tuple[str, ...]] = []
-    code_blocks: list[ReportCodeBlock] = []
-    sqlserver_reason_column = integrated and payload.get("database_engine") == "sqlserver"
     for item in raw_items[:10]:
         if not isinstance(item, dict) or item.get("rank") is None:
             continue
         identity = item.get("sql_identity")
-        if isinstance(identity, dict):
-            native_fields = identity.get("fields", {})
-            if not isinstance(native_fields, dict):
-                native_fields = {}
-            # Only native identity fields are rendered; SQL text and arbitrary payload keys are excluded.
-            native_keys = {"sql_handle", "plan_handle", "query_hash", "query_plan_hash",
-                           "statement_start_offset", "statement_end_offset", "database_id",
-                           "plan_generation_num", "queryid", "dbid", "userid", "pid",
-                           "backend_start", "digest", "toplevel", "schema_name",
-                           "processlist_id", "thread_id", "sql_id", "child_number",
-                           "inst_id", "plan_hash_value"}
-            is_oracle = identity.get("database_engine") == "oracle"
-            if is_oracle:
-                native_keys.add("con_id")
-            native = ", ".join(f"{key}={_human(val)[:100]}" for key, val in native_fields.items()
-                                if key in native_keys)
-            if is_oracle:
-                plan_identity = item.get("plan_identity")
-                plan_fields = (plan_identity.get("fields", {})
-                               if isinstance(plan_identity, dict)
-                               and plan_identity.get("database_engine") == "oracle"
-                               and plan_identity.get("kind") == "PLAN" else {})
-                if not isinstance(plan_fields, dict):
-                    plan_fields = {}
-                plan_hash = plan_fields.get("plan_hash_value")
-                if type(plan_hash) is not int or plan_hash <= 0:
-                    plan_hash = None
-                native += f"{', ' if native else ''}plan_hash_value={_human(plan_hash)}"
-            identity_text = f"{identity.get('database_engine', 'UNKNOWN')}:{native or '身份不可用'}"[:256]
-        else:
-            identity_text = "身份不可用"
         database_name = item.get("database_name")
+        identity_fields = identity.get("fields", {}) if isinstance(identity, dict) else {}
         if not isinstance(database_name, str) or not database_name.strip():
-            database_name = "名称未采集" if sqlserver_slow else "未知"
-        primary_identity = database_name if sqlserver_slow else identity_text
-        # Non-SQL Server Slow and standalone Top SQL retain the established
-        # native-identity presentation and acceptance-parser contract.
-        primary_identity = primary_identity[:180]
-        if identity_text != "身份不可用" and not sqlserver_slow:
-            detail_title = f"排名 {item.get('rank')} — 原生身份与执行计划标识"
-            if isinstance(identity, dict) and identity.get("database_engine") == "sqlserver":
-                detail_title = f"排名 {item.get('rank')} — 数据库 {database_name} — 原生身份与执行计划标识"
-            code_blocks.append(ReportCodeBlock(
-                detail_title, identity_text, "text", True))
-        association = item.get("sql_text_association") if integrated else None
-        association_status = (association.get("status") if isinstance(association, dict)
-                              else "NOT_ATTEMPTED")
-        metric_value = _human(item.get("metric_value"))
-        if sqlserver_slow:
-            raw_value = item.get("metric_value")
-            unit = payload.get("metric_unit")
-            if type(raw_value) in (int, float) and math.isfinite(raw_value):
-                if unit == "microseconds":
-                    metric_value = f"{raw_value / 1_000_000:,.2f} 秒"
-                elif unit == "microseconds/execution":
-                    metric_value = f"{raw_value:,.2f} 微秒/次"
-                elif unit == "pages":
-                    metric_value = f"{raw_value:,.0f} 页"
-                elif unit == "executions":
-                    metric_value = f"{raw_value:,.0f} 次"
-        base_row = (str(item.get("rank")), primary_identity, metric_value)
-        if sqlserver_reason_column:
-            reason_values = ([association.get("reason"), association.get("request_state")]
-                             if isinstance(association, dict) else [])
-            reason_text = "；".join(display_label(value) for value in reason_values
-                                  if isinstance(value, str) and value != association_status)
-            rows.append((*base_row, _human(association_status), reason_text or "—"))
-        elif integrated:
-            rows.append((*base_row, _human(association_status)))
-        else:
-            rows.append(base_row)
-        if integrated and isinstance(association, dict) and association_status == "MATCHED":
-            sql_text = association.get("sql_text")
-            if isinstance(sql_text, str) and sql_text:
-                clipped = sql_text[:policy.max_sql_chars]
-                if len(sql_text) > policy.max_sql_chars:
-                    clipped += "\n[SQL 文本因人工报告长度上限而省略。]"
-                code_blocks.append(ReportCodeBlock(
-                    f"Top SQL 排名 {item.get('rank')} — 与慢 SQL 精确匹配",
-                    str(redact(clipped)), "sql", True))
-    headers = (("Rank", "Database Name", sqlserver_metric_label,
-                "SQL text association", "Association reason") if sqlserver_slow else
-               ("Rank", "SQL identity", "Metric value", "SQL text association", "Association reason")
-               if sqlserver_reason_column else
-               ("Rank", "SQL identity", "Metric value", "SQL text association") if integrated else
-               ("Rank", "SQL identity", "Metric value"))
+            # MySQL's schema_name is its collected database name; numeric DBIDs
+            # and other native statement identifiers are never name fallbacks.
+            schema_name = (identity_fields.get("schema_name")
+                           if isinstance(identity_fields, dict)
+                           and isinstance(identity, dict)
+                           and identity.get("database_engine") == "mysql" else None)
+            database_name = (
+                schema_name if isinstance(schema_name, str) and schema_name.strip()
+                else "名称未采集"
+            )
+        rows.append((str(item["rank"]), database_name[:180], _human(item.get("metric_value"))))
+    headers = ("Rank", "Database Name", "Metric value")
     table = ReportTable(headers, tuple(rows)) if rows else None
     if payload.get("collection_status") == "COLLECTED" and not raw_items:
         summary = "已完成采集，但没有匹配记录；不生成虚假排名。"
@@ -276,90 +188,14 @@ def _top_sql_section(value: Any,
         summary = "当前没有可用的已排名 Top SQL 记录；状态和限制见契约字段。"
     else:
         summary = _omitted(len(raw_items), len(rows), "Top SQL rows")
-    if sqlserver_slow:
-        summary = (
-            "Top SQL 排名反映数据库统计视图中的累计表现，不代表当前故障根因；"
-            "它与当前活动会话、等待和阻塞证据分开呈现。"
-            "SQL 文本仅在严格原生身份匹配时展示；未匹配时不展示 SQL 文本。"
-            "SQL Handle、Plan Handle、Query Hash 等内部标识不占用默认报告版面，"
-            "完整值保留在原始 JSON 中。数据库名称以采集结果为准；未取得名称时显示“名称未采集”，不以 DBID 代替。 "
-            + summary
-        )
-    elif integrated:
-        summary = ("Top SQL 排名反映数据库统计视图中的累计表现，不代表当前故障根因。 "
-                   "它与当前活动会话、等待和阻塞证据分开呈现。 "
-                   "此处完整性仅描述 Top SQL 附加快照，不改变 Slow 核心证据完整性。 " + summary)
-    title = "Top SQL 资源排序" if sqlserver_slow else "Top SQL"
-    return ReportSection("top-sql", title, summary=summary, fields=fields,
-                         tables=(table,) if table else (), code_blocks=tuple(code_blocks))
+    return ReportSection("top-sql", "Top SQL", summary=summary, fields=fields,
+                         tables=(table,) if table else ())
 
 
 def _top_sql_payload(value: Any) -> dict[str, Any] | None:
     if hasattr(value, "to_dict"):
         value = value.to_dict()
     return value if isinstance(value, dict) else None
-
-
-def _top_sql_quality_row(value: Any, collector: str | None = None) -> dict[str, str] | None:
-    payload = _top_sql_payload(value)
-    if payload is None:
-        return None
-    collection_status = str(payload.get("collection_status") or "UNKNOWN")
-    completeness = str(payload.get("completeness") or "UNKNOWN")
-    visibility = str(payload.get("data_visibility") or "UNKNOWN")
-    if collection_status == "COLLECTED":
-        if completeness == "COMPLETE" and visibility == "COMPLETE":
-            status = "COMPLETE"
-        elif completeness == "PARTIAL" or visibility == "PARTIAL":
-            status = "PARTIAL"
-        else:
-            status = "UNKNOWN"
-    else:
-        status = collection_status
-    engine = payload.get("database_engine")
-    name = collector or (f"{engine}_top_sql" if isinstance(engine, str) else "top_sql")
-    impact = (f"采集状态={_human(collection_status)}；证据完整性={_human(completeness)}；"
-              f"数据可见性={_human(visibility)}。")
-    limitations = payload.get("limitations")
-    if limitations:
-        impact += f"限制原因：{_human(limitations)}。"
-    return {"collector": name, "status": status, "impact": impact}
-
-
-def _top_sql_integration_quality_row(value: Any) -> dict[str, str] | None:
-    if not isinstance(value, dict):
-        return None
-    raw_status = value.get("status")
-    if not isinstance(raw_status, str):
-        return None
-    impact = value.get("reason") or value.get("error_type") or "未采集 Top SQL。"
-    return {"collector": "top_sql", "status": raw_status, "impact": _human(impact)}
-
-
-def _top_sql_integration_section(value: Any) -> ReportSection | None:
-    if not isinstance(value, dict):
-        return None
-    status = value.get("status")
-    if not isinstance(status, str):
-        return None
-    reason = value.get("reason")
-    error_type = value.get("error_type")
-    fields = [("采集状态", _human(status))]
-    for key, label in (("database_engine", "数据库类型"),
-                       ("database_version", "数据库版本"),
-                       ("ranking_metric", "指标")):
-        if isinstance(value.get(key), str):
-            fields.append((label, value[key][:128]))
-    if isinstance(reason, str):
-        fields.append(("原因", str(display_message(reason))))
-    if isinstance(error_type, str):
-        fields.append(("错误类型", error_type[:128]))
-    summary = ("Top SQL 作为附加证据未采集；Slow 核心证据保持原样。"
-               if status == "NOT_COLLECTED" else
-               "Top SQL 采集器返回错误；慢 SQL 核心诊断不受影响。"
-               if status == "FAILED" else
-               "Top SQL 附加采集未成功；Slow 核心诊断不受影响。")
-    return ReportSection("top-sql", "Top SQL", summary=summary, fields=tuple(fields))
 
 
 def render_report_section_text(section: ReportSection) -> str:
@@ -385,16 +221,237 @@ def render_report_section_text(section: ReportSection) -> str:
 
 
 def _sql_block(row: dict[str, Any], policy: HumanReportPolicy, label: str = "SQL") -> ReportCodeBlock | None:
-    sql = _first(row, "sql_text", "query", "sql_fulltext", "current_sql", "previous_sql")
+    sql = (row.get("statement_sql_text") if "statement_sql_text" in row else
+           _first(row, "sql_text", "query", "sql_fulltext", "current_sql", "previous_sql"))
     if not isinstance(sql, str) or not sql:
         return None
     clipped = sql[:policy.max_sql_chars]
-    is_truncated = clipped != sql or bool(_first(row, "sql_text_truncated", "query_truncated"))
+    truncated_key = ("statement_sql_text_truncated" if "statement_sql_text" in row else
+                     "sql_text_truncated")
+    is_truncated = clipped != sql or bool(_first(row, truncated_key, "query_truncated"))
     title = f"会话 {_session_id(row) or '未知'} {label}"
     if is_truncated:
         title += "（已截断）"
         clipped += "\n[SQL 文本因人工报告长度上限而省略。]" if len(sql) > policy.max_sql_chars else ""
     return ReportCodeBlock(title, str(redact(clipped)), "sql", True)
+
+
+def _current_request_sections(
+    report: DiagnosticReport, details: dict[str, Any], requests: list[dict[str, Any]],
+    sessions: list[dict[str, Any]], policy: HumanReportPolicy,
+) -> list[ReportSection]:
+    """Present each active request with its exact session source and request evidence."""
+    database_type = report.instance.db_type.value
+    session_rows: dict[str, list[dict[str, Any]]] = {}
+    for row in sessions:
+        sid = _session_id(row)
+        if sid is not None:
+            session_rows.setdefault(sid, []).append(row)
+    ambiguous = {sid for sid, rows in session_rows.items() if len(rows) != 1}
+    session_by_id = {sid: rows[0] for sid, rows in session_rows.items() if len(rows) == 1}
+
+    samples = _dict_rows(details.get("samples"))
+    names = (("active_sessions", "long_running") if database_type == "postgresql" else
+             ("active_requests",))
+    matching_samples = [row for row in samples if row.get("collector") in names]
+    sample = next((row for row in matching_samples if row.get("success") is True),
+                  matching_samples[0] if matching_samples else None)
+    if requests:
+        summary = (f"当前采集到 {len(requests)} 条活动请求；每条记录将 SQL、执行来源和请求级指标放在一起。"
+                   "各 Collector 为顺序采样，不构成原子快照。")
+    elif sample is not None and sample.get("success") is False:
+        summary = "活动请求采集失败；本次不能据此判断实例没有活动 SQL。"
+    elif sample is not None and sample.get("success") is True:
+        summary = "本次采样没有活动请求。"
+    else:
+        summary = "没有活动请求行，且采集状态未知；不能据此判断实例没有活动 SQL。"
+
+    visible = requests[:policy.max_related_sessions]
+    summary += _omitted(len(requests), len(visible), "active requests")
+    sections = [ReportSection("request-runtime", "当前活动 SQL（请求运行信息）", summary=summary)]
+
+    def missing_reason(sid: str | None, label: str) -> str:
+        if sid is None:
+            return "会话 ID 未采集，无法关联会话来源"
+        if sid in ambiguous:
+            return "会话快照中的会话 ID 不唯一，未关联身份"
+        if sid not in session_by_id:
+            return "没有找到相同会话 ID 的会话采样"
+        return f"{label} 在会话采样中为空或不可见"
+
+    def field(
+        request: dict[str, Any], session: dict[str, Any], sid: str | None,
+        label: str, keys: tuple[str, ...], *, required: bool = False,
+        reason: str | None = None, request_only: bool = False,
+    ) -> tuple[str, str] | None:
+        value = _first(request, *keys)
+        if value in (None, "") and sid not in ambiguous and not request_only:
+            value = _first(session, *keys)
+        available = any(key in request or (not request_only and key in session) for key in keys)
+        if value in (None, ""):
+            if not required and not available:
+                return None
+            return label, f"未采集（原因：{reason or missing_reason(sid, label)}）"
+        return label, _human(value)
+
+    source_fields: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+        "sqlserver": (
+            ("登录账号", ("login_name",)), ("原始登录账号", ("original_login_name",)),
+            ("Windows 用户", ("nt_user_name",)), ("客户端主机", ("host_name",)),
+            ("客户端 IP", ("client_net_address",)), ("应用程序", ("program_name",)),
+            ("客户端接口", ("client_interface_name",)), ("客户端进程 ID", ("host_process_id",)),
+        ),
+        "mysql": (("登录账号", ("user_name", "processlist_user")),
+                  ("客户端主机", ("host_raw", "processlist_host", "host_name"))),
+        "postgresql": (("登录账号", ("usename", "user_name")),
+                       ("客户端主机", ("client_hostname",)),
+                       ("客户端地址", ("client_addr",)),
+                       ("应用程序", ("application_name",))),
+        "oracle": (("登录账号", ("username", "user_name")), ("操作系统用户", ("osuser",)),
+                   ("客户端主机", ("machine",)), ("应用模块", ("module",)),
+                   ("客户端程序", ("program",)), ("客户端标识", ("client_identifier",)),
+                   ("会话序列号", ("serial_number", "serial_num", "serial#"))),
+    }
+    for index, request in enumerate(visible, start=1):
+        sid = _session_id(request)
+        session = session_by_id.get(sid or "", {})
+        fields: list[tuple[str, str]] = []
+        db = field(request, session, sid, "数据库", ("database_name", "datname", "processlist_db"),
+                   required=database_type == "sqlserver",
+                   reason="请求数据库名称不可见；未使用 database_id 代替数据库名称",
+                   request_only=database_type == "sqlserver")
+        if db is not None:
+            fields.append(db)
+        fields.append(("会话 ID", sid or "未采集（原因：当前请求没有会话标识）"))
+        request_id = _first(request, "request_id", "request")
+        if request_id is not None:
+            fields.append(("请求 ID", _human(request_id)))
+        elif database_type == "sqlserver":
+            fields.append(("请求 ID", "未采集（原因：当前请求没有返回 request_id）"))
+        status = _first(request, "status", "session_status", "state", "state_name")
+        fields.append(("执行状态", _human(status) if status not in (None, "") else
+                       "未采集（原因：当前请求没有返回状态）"))
+        started = (_first(request, "start_time", "query_start", "sql_exec_start") or
+                   (_first(session, "start_time", "query_start", "sql_exec_start")
+                    if sid not in ambiguous else None))
+        if started is not None:
+            fields.append(("开始时间", _human(started)))
+        else:
+            start_reason = ("当前 Collector 未返回开始时间" if database_type == "sqlserver" else
+                            "当前 Collector 只提供已执行时间，未提供开始时间")
+            fields.append(("开始时间", f"未采集（原因：{start_reason}）"))
+        elapsed_ms = _first(request, "elapsed_ms", "duration_ms")
+        elapsed_seconds = request.get("duration_seconds")
+        if type(elapsed_ms) in (int, float) and elapsed_ms >= 0:
+            fields.append(("已执行时间", f"{_duration_ms(elapsed_ms)}（{_human(elapsed_ms)} 毫秒）"))
+        elif isinstance(elapsed_seconds, (int, float)) and not isinstance(elapsed_seconds, bool) \
+                and elapsed_seconds >= 0:
+            fields.append(("已执行时间", f"{_duration_seconds(elapsed_seconds)}（{_human(elapsed_seconds)} 秒）"))
+        elif database_type == "sqlserver":
+            fields.append(("已执行时间", "未采集（原因：当前请求没有返回耗时）"))
+
+        for label, keys in source_fields.get(database_type, ()):
+            item = field(request, session, sid, label, keys, required=database_type == "sqlserver")
+            if item is not None:
+                fields.append(item)
+
+        metric_fields: tuple[tuple[str, tuple[str, ...]], ...]
+        if database_type == "sqlserver":
+            metric_fields = (
+                ("CPU 时间（毫秒）", ("cpu_ms", "cpu_time")),
+                ("逻辑读取（8 KiB 页）", ("logical_reads",)),
+                ("物理读取（页）", ("reads",)), ("写入（页）", ("writes",)),
+            )
+        elif database_type == "mysql":
+            metric_fields = (("检查行数", ("rows_examined",)), ("影响行数", ("rows_affected",)))
+        else:
+            metric_fields = ()
+        for label, keys in metric_fields:
+            item = field(request, session, sid, label, keys, required=database_type == "sqlserver")
+            if item is not None:
+                fields.append(item)
+
+        if database_type == "oracle":
+            item = field(request, session, sid, "SQL_ID", ("sql_id",))
+            if item is not None:
+                fields.append(item)
+        wait_keys = ("wait_type", "wait_event", "wait_event_type", "current_wait", "event")
+        wait = field(request, session, sid, "等待类型", wait_keys)
+        if wait is not None:
+            raw_wait = _first(request, *wait_keys)
+            if raw_wait not in (None, ""):
+                wait_value = wait[1]
+            elif any(key in request for key in wait_keys):
+                wait_value = "当前未报告等待"
+            else:
+                wait_value = wait[1]
+            fields.append((wait[0], wait_value))
+        wait_time = field(request, session, sid, "等待时间（毫秒）", ("wait_ms", "wait_time_ms"))
+        if wait_time is not None:
+            fields.append(wait_time)
+        blocker_keys = ("blocking_session_id", "blocking_pid", "blocking_sid")
+        blocker = _first(request, *blocker_keys)
+        if database_type == "oracle" and request.get("blocking_session") is not None:
+            blocker = f"{request.get('blocking_instance', '未知')}:{request['blocking_session']}"
+        if any(key in request for key in (*blocker_keys, "blocking_session")):
+            fields.append(("阻塞者", "未阻塞" if blocker in (None, "", 0, "0") else _human(blocker)))
+        if database_type == "sqlserver":
+            resource = (("等待资源", "当前未等待，无等待资源")
+                        if request.get("wait_type") in (None, "") else
+                        field(request, session, sid, "等待资源", ("wait_resource",), required=True))
+            if resource is not None:
+                fields.append(resource)
+            interpretation = request.get("request_interpretation")
+            if isinstance(interpretation, str):
+                fields.append(("诊断观察", _human(interpretation)))
+
+        has_sqlserver_offsets = (database_type == "sqlserver" and
+                                 any(key in request for key in
+                                     ("statement_start_offset", "statement_end_offset")))
+        sqlserver_statement_missing = (has_sqlserver_offsets and "statement_sql_text" not in request)
+        sql_text = (request.get("statement_sql_text") if "statement_sql_text" in request else
+                    None if sqlserver_statement_missing else
+                    _first(request, "sql_text", "query", "sql_fulltext", "current_sql"))
+        if isinstance(sql_text, str) and sql_text:
+            sql_truncated = bool(request.get(
+                "statement_sql_text_truncated" if "statement_sql_text" in request else
+                "sql_text_truncated")) or len(sql_text) > policy.max_sql_chars
+            sql_note = "采集文本已截断；请展开下方内容查看当前语句" if sql_truncated else \
+                "请展开下方文本查看当前执行语句"
+            fields.append(("SQL 文本", sql_note))
+        else:
+            offset_reason = request.get("statement_sql_text_unavailable_reason")
+            if isinstance(offset_reason, str) and "offset" in offset_reason.lower():
+                reason = "当前语句偏移不可用或无效，无法确认正在执行的语句"
+            elif isinstance(offset_reason, str) and "no text" in offset_reason.lower():
+                reason = "采样偏移位置没有可用 SQL 文本"
+            elif sqlserver_statement_missing:
+                reason = "Collector 未返回按当前语句偏移提取的 SQL 文本"
+            else:
+                reason = "Collector 未返回当前语句文本"
+            fields.append(("SQL 文本", f"未采集（原因：{reason}）"))
+
+        sql_row = dict(request)
+        if "statement_sql_text" in request:
+            sql_row["sql_text"] = request.get("statement_sql_text")
+            sql_row["sql_text_truncated"] = request.get("statement_sql_text_truncated")
+        elif sqlserver_statement_missing:
+            sql_row["statement_sql_text"] = None
+        block = _sql_block(sql_row, policy, "当前执行语句")
+        if block is not None:
+            suffix = "（已截断）" if "已截断" in block.title else ""
+            block = replace(block, title=f"会话 {sid or '未知'} / 请求 "
+                            f"{request_id if request_id is not None else '未知'} · 当前执行语句{suffix}")
+        title = f"会话 {sid or '未知'}"
+        if request_id is not None:
+            title += f" / 请求 {request_id}"
+        if database_type == "oracle" and request.get("sql_id"):
+            title += f" / SQL_ID {request['sql_id']}"
+        sections.append(ReportSection(
+            f"current-request-{index:03d}", title,
+            fields=tuple(fields),
+            code_blocks=(block,) if block is not None else ()))
+    return sections
 
 
 def _role_map(roots: list[Any], children: dict[str, list[Any]]) -> dict[str, str]:
@@ -529,6 +586,9 @@ def _blocking_state(report: DiagnosticReport, details: dict[str, Any]) -> tuple[
 
 def _long_running_rows(report: DiagnosticReport, details: dict[str, Any]) -> list[dict[str, Any]]:
     configured = _dict_rows(details.get("long_running"))
+    sqlserver = report.instance.db_type.value == "sqlserver"
+    if sqlserver:
+        configured = [row for row in configured if row.get("request_kind") != "ACTIVE_WAIT"]
     if report.instance.db_type.value in {"mysql", "oracle"}:
         # These analyzers exclude confirmed blocked victims and exact intentional waits.
         return configured
@@ -539,6 +599,8 @@ def _long_running_rows(report: DiagnosticReport, details: dict[str, Any]) -> lis
     requests = _dict_rows(details.get("all_requests", details.get("active_requests")))
     long_rows = []
     for row in requests:
+        if sqlserver and row.get("request_kind") == "ACTIVE_WAIT":
+            continue
         elapsed = _first(row, "elapsed_ms", "duration_ms")
         duration_seconds = row.get("duration_seconds")
         if elapsed is None and isinstance(duration_seconds, (int, float)) \
@@ -564,7 +626,12 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
     raw_children_dict: dict[Any, Any] = raw_children if isinstance(raw_children, dict) else {}
     children: dict[str, list[Any]] = {
         str(key): value for key, value in raw_children_dict.items() if isinstance(value, list)}
-    session_by_id = {(_session_id(row) or ""): row for row in sessions_list}
+    session_rows_by_id: dict[str, list[dict[str, Any]]] = {}
+    for row in sessions_list:
+        sid = _session_id(row)
+        if sid is not None:
+            session_rows_by_id.setdefault(sid, []).append(row)
+    session_by_id = {sid: rows[0] for sid, rows in session_rows_by_id.items() if len(rows) == 1}
     request_by_id = {(_session_id(row) or ""): row for row in requests_list}
     sections, related = _blocking_sections(roots, children, session_by_id, request_by_id, policy)
     blocking_complete, blocking_participants = _blocking_state(report, details)
@@ -643,59 +710,8 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                 _omitted(related_total, len(related_rows), "incident-related sessions"),
         tables=(identity_table,) if identity_table else ()))
 
-    runtime_rows = []
-    database_type = report.instance.db_type.value
-    visible_related_ids = {str(row["session"]) for row in related_rows}
-    for sid in sorted(related, key=session_order):
-        if sid not in visible_related_ids:
-            continue
-        row = request_by_id.get(sid, {})
-        if not row:
-            continue
-        runtime_rows.append({"session": sid, "status": _first(row, "session_status", "status", "state"),
-                             "elapsed": _duration_ms(_first(row, "elapsed_ms", "duration_ms"))
-                                       if _first(row, "elapsed_ms", "duration_ms") is not None else
-                                       _duration_seconds(row.get("duration_seconds")),
-                             "wait": _first(row, "wait_type", "wait_event", "event", "current_wait"),
-                             "wait_resource": row.get("wait_resource"),
-                             "blocked_by": (f"{row.get('blocking_instance')}:{row.get('blocking_session')}"
-                                            if database_type == "oracle" and row.get("blocking_session") is not None
-                                            else _first(row, "blocking_session_id", "blocking_pid",
-                                                        "blocking_sid")),
-                             "sql_id": row.get("sql_id"), "sql": row.get("sql_text"),
-                             "cpu": _first(row, "cpu_time_ms", "cpu_ms", "cpu_time"),
-                             "logical_reads": _first(row, "logical_reads"),
-                             "reads": _first(row, "reads"), "writes": _first(row, "writes")})
-    runtime_columns = [("Session", ("session",)), ("Status", ("status",)),
-                       ("Elapsed", ("elapsed",)), ("Wait", ("wait",)),
-                       ("Blocked By", ("blocked_by",))]
-    if database_type == "oracle":
-        runtime_columns.extend([("SQL ID", ("sql_id",)), ("SQL", ("sql",))])
-    elif database_type == "sqlserver":
-        runtime_columns.extend([("Wait Resource", ("wait_resource",)), ("CPU", ("cpu",)),
-                                ("Logical Reads", ("logical_reads",)), ("Reads", ("reads",)),
-                                ("Writes", ("writes",))])
-    runtime_states = tuple(
-        "blocked" if str(row["session"]) in blocking_participants else
-        "clear" if blocking_complete and str(row["session"]) in request_by_id else "partial"
-        for row in runtime_rows)
-    runtime_table = _table(runtime_rows, tuple(runtime_columns), runtime_states)
-    if runtime_table:
-        runtime_summary = ("MySQL Performance Schema 提供当前语句耗时和可见等待事件；等待 consumer 未启用时等待详情不可用。"
-                           if report.instance.db_type.value == "mysql" else
-                           "PostgreSQL pg_stat_activity 提供当前 backend 的语句耗时与 wait event；不表示累计 CPU 或 I/O 计数。"
-                           if report.instance.db_type.value == "postgresql" else
-                           "Oracle V$SESSION/V$SQL 当前 SQL 与等待信息；耗时为本次执行时长，V$SQL 资源计数在本报告中不投影。"
-                           if report.instance.db_type.value == "oracle" else
-                           "CPU、logical reads、reads、writes 为 DMV 当前累计值；单次采样为零不代表历史没有资源消耗。")
-        current_sql = tuple(
-            block for sid in sorted(related, key=session_order)
-            if (current_request := request_by_id.get(sid)) is not None
-            if (block := _sql_block(current_request, policy, "Current SQL")) is not None)
-        sections.append(ReportSection(
-            "request-runtime", "Request Runtime",
-            summary=runtime_summary,
-            tables=(runtime_table,), code_blocks=current_sql))
+    sections.extend(_current_request_sections(
+        report, details, requests_list, sessions_list, policy))
 
     root_ids = {str(item) for item in roots}
     blocked_ids = {str(child) for values in children.values() for child in values}
@@ -760,7 +776,9 @@ def _session_and_request_sections(report: DiagnosticReport, details: dict[str, A
                      "wait_resource": row.get("wait_resource"),
                      "blocker": _first(row, "blocking_session_id", "blocking_pid", "blocking_sid"),
                      "root_blocker": root_for(str(_session_id(row) or "")),
-                     "interpretation": ("明确的主动等待语句，不代表数据库资源瓶颈" if
+                     "interpretation": (row.get("request_interpretation")
+                         if report.instance.db_type.value == "sqlserver" else
+                         "明确的主动等待语句，不代表数据库资源瓶颈" if
                          row.get("request_kind") == "ACTIVE_WAIT" else
                          "长时间主动等待（WAITFOR）" if
                          str(row.get("wait_type", "")).upper() == "WAITFOR" and
@@ -941,11 +959,24 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
         collector = str(name)
         optional = collector in details.get("optional_unavailable", [])
         required = collector in details.get("required_unavailable", [])
-        status = ("MISSING_REQUIRED" if required else
+        status = ("FAILED" if report.scenario == "slow" and not success else
+                  "MISSING_REQUIRED" if required else
                   "OPTIONAL_UNAVAILABLE" if optional else
                   "FAILED" if not success else "TRUNCATED" if truncated else "COMPLETE")
         impact = (sample.get("error_message") or sample.get("error_type") or
                   ("Collector row limit reached" if truncated else "—"))
+        database_error = sample.get("database_error")
+        if report.scenario == "slow" and not success and isinstance(database_error, dict):
+            vendor_fields = [
+                f"{label}={database_error[key]}" for key, label in (
+                    ("driver", "驱动"), ("sqlstate", "SQLSTATE"), ("vendor_code", "数据库错误码"),
+                ) if database_error.get(key) is not None
+            ]
+            message = database_error.get("message")
+            if isinstance(message, str) and message and message not in str(impact):
+                vendor_fields.append(message)
+            if vendor_fields:
+                impact = f"{impact} {' · '.join(vendor_fields)}"
         quality.append({"collector": name, "status": status, "impact": impact})
     sampled = {str(item.get("collector", item.get("source", "unknown")))
                for item in details.get("samples", []) if isinstance(item, dict)}
@@ -964,11 +995,6 @@ def _quality_section(report: DiagnosticReport, incident: IncidentSummary,
         if isinstance(note, str):
             quality.append({"collector": "Snapshot", "status": "NOTE", "impact": note})
     if report.scenario == "slow":
-        top_sql_row = _top_sql_quality_row(details.get("top_sql"))
-        if top_sql_row is None:
-            top_sql_row = _top_sql_integration_quality_row(details.get("top_sql_integration"))
-        if top_sql_row is not None and top_sql_row["collector"] not in sampled:
-            quality.append(top_sql_row)
         if report.instance.db_type.value == "mysql":
             wait_status = details.get("wait_detail_status")
             if isinstance(wait_status, str) and wait_status not in {"", "AVAILABLE"}:
@@ -1638,7 +1664,7 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
     elif report.scenario == "active-sql":
         sections = active_sql_sections(details.get("active_sql"))
     elif report.scenario == "top-sql":
-        top_sql_section = _top_sql_section(details.get("top_sql"), policy)
+        top_sql_section = _top_sql_section(details.get("top_sql"))
         sections = [top_sql_section] if top_sql_section is not None else []
     elif report.scenario == "memory-grant":
         sections = memory_grant_sections(details.get("memory_grant"))
@@ -1654,12 +1680,6 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
         sections = _disk_growth_sections(details)
         sections.insert(0, _recovery_section(incident, details, report.scenario,
                                              instance.db_type.value, report))
-    top_sql = None if report.scenario == "top-sql" else _top_sql_section(
-        details.get("top_sql"), policy, integrated=report.scenario == "slow")
-    if top_sql is None and report.scenario == "slow":
-        top_sql = _top_sql_integration_section(details.get("top_sql_integration"))
-    if top_sql is not None:
-        sections.append(top_sql)
     findings = _finding_section(report)
     if findings:
         sections.append(findings)

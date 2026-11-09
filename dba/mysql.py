@@ -17,7 +17,7 @@ from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import CredentialProvider, Mode, validate_monitoring_credential
 from dba.database_errors import normalize_mysql_error
-from dba.errors import ToolkitError
+from dba.errors import ToolkitError, database_error_log_fields
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
 from dba.mysql_privileges import classify_mysql_grants
@@ -114,7 +114,6 @@ class MySQLAdapter(Adapter):
         self.statement_history_consumer: bool | None = None
         self.privilege_classification: dict[str, Any] = {"classification": "UNKNOWN"}
         self.current_user: str | None = None
-        self._last_database_error: object | None = None
 
     @property
     def statement_script(self) -> str:
@@ -127,6 +126,7 @@ class MySQLAdapter(Adapter):
             "sql_script": script, "result": "failed" if error else "ok",
             "elapsed_time": time.monotonic() - started,
             "error_type": error.error_type if error else None,
+            **database_error_log_fields(error.database_error_payload() if error else None),
         }})
 
     def connect(self) -> None:
@@ -231,7 +231,7 @@ class MySQLAdapter(Adapter):
         if not grants_result.success or grants_result.truncated or not grants_result.rows:
             raise ToolkitError("PermissionInspectionFailed",
                                "MySQL account grants could not be inspected safely.",
-                               database_error=self._last_database_error)
+                               database_error=grants_result.database_error)
         grants = [str(next(iter(grant.values()))) for grant in grants_result.rows if grant]
         self.privilege_classification = classify_mysql_grants(grants, current_user, active_roles)
         if self.privilege_classification["classification"] == "PRIVILEGED":
@@ -353,7 +353,6 @@ class MySQLAdapter(Adapter):
         started = time.monotonic()
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
-        database_error_payload: dict[str, Any] | None = None
         truncated = False
         result_bytes = 0
         error: ToolkitError | None = None
@@ -407,17 +406,9 @@ class MySQLAdapter(Adapter):
             error = exc
         except (ValidationError, OSError, UnicodeError) as exc:
             error = (ToolkitError("RegistryRejected", "SQL is not an unchanged reviewed script from this registry.")
-                     if not authorized else _driver_error(exc, "Query"))
+                     if not authorized else _driver_error(exc, "Query", self._password))
         except Exception as exc:
-            self._last_database_error = normalize_mysql_error(exc, (self._password,))
             error = _driver_error(exc, "Query", self._password)
-            database_error = error.database_error
-            if database_error is not None:
-                to_dict = getattr(database_error, "to_dict", None)
-                if callable(to_dict):
-                    payload = to_dict()
-                    if isinstance(payload, dict):
-                        database_error_payload = payload
         except BaseException:
             error = ToolkitError("Interrupted", "Query was interrupted; connection will be closed.")
             raise
@@ -458,7 +449,7 @@ class MySQLAdapter(Adapter):
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,
                                rows, len(rows), truncated, error is None,
                                error.error_type if error else None, str(error) if error else None,
-                               database_error_payload)
+                               error.database_error_payload() if error else None)
 
     def get_server_version(self) -> str:
         if not self._ready:

@@ -613,6 +613,7 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
     candidate_labels = {
         "ROOT_BLOCKER": "根阻塞", "IDLE_OPEN_TRANSACTION": "未结束事务",
         "BLOCKED_VICTIM": "被阻塞会话", "LONG_RUNNING_SQL": "长运行 SQL",
+        "WAITING_SQL": "需关注的请求等待",
         "ACTIVE_WAIT": "主动等待语句", "INTERMEDIATE_BLOCKER": "中间阻塞者",
     }
     finding_labels = {
@@ -1025,16 +1026,17 @@ def _render_error(data: dict[str, Any]) -> str:
     kind = str(data.get("error_type", "Operation Failed"))
     title = display_error_title(kind)
     lines = [title, "-" * 42]
-    for key, label in (("database_id", "Database"), ("account", "Account"),
+    for key, label in (("database_id", "Database"), ("collector_name", "Collector"),
+                       ("account", "Account"),
                        ("target", "Target"),
                        ("driver", "Driver"), ("backend", "Backend"),
                        ("tls", "TLS"), ("alias", "Alias"), ("feature", "Feature"),
-                       ("error_message", "Reason")):
+                       ("error_message", "Reason"), ("guidance", "Toolkit Guidance")):
         if data.get(key) is not None:
             detail = (display_error_message(kind, str(data[key])) if key == "error_message"
                       else data[key])
             lines.extend(["", label, f"  {detail}"])
-    vendor = data.get("error")
+    vendor = data.get("error", data.get("database_error"))
     if isinstance(vendor, dict):
         lines.extend(["", "Vendor Error"])
         if vendor.get("vendor_code") is not None:

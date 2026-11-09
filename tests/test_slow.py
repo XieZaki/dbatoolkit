@@ -13,7 +13,9 @@ from dba.cli import main
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType, ReferenceCommand
 from dba.errors import ToolkitError
+from dba.incident import build_incident_summary, build_performance_triage
 from dba.registry import SqlScriptRegistry
+from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.settings import SQLServerSettings
 from dba.slow import blocking_graph, build_slow_report, descendants, diagnose_slow
 from dba.slow_reporter import render_console, render_markdown
@@ -122,6 +124,152 @@ def test_concurrency_and_ranking() -> None:
     }
 
 
+def _waitfor_request(**overrides: Any) -> dict[str, Any]:
+    return {
+        "session_id": 51, "request_id": 0, "blocking_session_id": 0,
+        "command": "WAITFOR", "wait_type": "WAITFOR", "status": "suspended",
+        "elapsed_ms": 29_000, "wait_ms": 29_000, "cpu_ms": 1, "logical_reads": 2,
+        "reads": 0, "writes": 0, "statement_sql_text": "WAITFOR DELAY '00:00:30';",
+        **overrides,
+    }
+
+
+@pytest.mark.parametrize("requests", [
+    [],
+    [edge(51, 0, command="SELECT", status="running", elapsed_ms=2_000)],
+    [_waitfor_request()],
+])
+def test_clear_sqlserver_snapshot_has_no_performance_warning(requests: list[dict[str, Any]]) -> None:
+    value = report(requests, [{"session_id": 51, "open_transaction_count": 0}])
+    summary = build_incident_summary(value)
+    triage = build_performance_triage(value)
+    assert value.findings == ()
+    assert summary.status == "HEALTHY" and summary.severity == "INFO"
+    assert summary.primary_problem == "UNKNOWN" and summary.observed_now == "NOT_DETECTED"
+    assert summary.immediate_action and summary.immediate_action["priority"] == "INFO"
+    assert not summary.recovery_actions
+    assert triage["status"] == "UNKNOWN" and triage["root_cause_status"] == "NOT_ESTABLISHED"
+    assert triage["assessments"] == []
+    assert len(value.details["all_requests"]) == len(requests)
+    if requests and requests[0].get("command") == "WAITFOR":
+        request = value.details["all_requests"][0]
+        assert request["request_kind"] == "ACTIVE_WAIT"
+        assert request["wait_type"] == "WAITFOR" and request["wait_ms"] == 29_000
+        assert request["statement_sql_text"] == requests[0]["statement_sql_text"]
+        assert value.details["concurrency"]["waiting_requests"] == 1
+        assert summary.wait is None
+
+
+@pytest.mark.parametrize(("count", "transactions"), [
+    (1, []),
+    (0, [{"session_id": 51, "transaction_type": 1, "transaction_state": 2}]),
+])
+def test_waitfor_with_open_transaction_evidence_stays_a_warning(
+    count: int, transactions: list[dict[str, Any]],
+) -> None:
+    value = report([_waitfor_request(elapsed_ms=200)], [{"session_id": 51, "open_transaction_count": count}],
+                   transactions)
+    assert {finding.title for finding in value.findings} == {"WAITING_SQL"}
+    assert value.details["all_requests"][0].get("request_kind") != "ACTIVE_WAIT"
+    summary = build_incident_summary(value)
+    assert (summary.status, summary.severity, summary.primary_problem, summary.observed_now) == (
+        "DEGRADED", "WARNING", "WAITING_SQL", "ACTIVE")
+    assert summary.immediate_action and summary.immediate_action["priority"] == "WARNING"
+    assert summary.root_cause_candidate is None
+    assert build_performance_triage(value)["root_cause_status"] == "NOT_ESTABLISHED"
+
+
+@pytest.mark.parametrize(("command", "event"), [
+    ("WAITFOR", "LCK_M_X"), ("WAITFOR", "PAGEIOLATCH_SH"), ("WAITFOR", "RESOURCE_SEMAPHORE"),
+    ("WAITFOR", "CXPACKET"), ("SELECT", "WAITFOR"),
+])
+def test_one_waitfor_marker_does_not_exempt_the_request(command: str, event: str) -> None:
+    value = report([_waitfor_request(command=command, wait_type=event, elapsed_ms=200)],
+                   [{"session_id": 51, "open_transaction_count": 0}])
+    assert [f.title for f in value.findings] == ["WAITING_SQL"]
+    summary = build_incident_summary(value)
+    assert summary.wait and summary.wait["event"] == event
+    assert (summary.status, summary.severity, summary.primary_problem, summary.observed_now) == (
+        "DEGRADED", "WARNING", "WAITING_SQL", "ACTIVE")
+    triage = build_performance_triage(value)
+    assert triage["status"] == "UNKNOWN" and triage["root_cause_status"] == "NOT_ESTABLISHED"
+    assert triage["assessments"][0]["observed_signals"] == ["WAITING_SQL"]
+
+
+def test_waitfor_does_not_hide_blocking_chain_or_blocking_anomalies() -> None:
+    value = report([
+        _waitfor_request(),
+        edge(52, 51, elapsed_ms=100, wait_type="LCK_M_X"),
+        edge(53, 52, elapsed_ms=200, wait_type="LCK_M_S"),
+    ], [{"session_id": sid, "open_transaction_count": 0} for sid in (51, 52, 53)])
+    assert {"BLOCKING", "ROOT_BLOCKER", "WAITING_SQL"} <= {f.title for f in value.findings}
+    summary = build_incident_summary(value)
+    assert summary.primary_problem == "BLOCKING" and summary.observed_now == "ACTIVE"
+    assert summary.root_cause_candidate and summary.root_cause_candidate["session"] == 51
+    assert summary.root_cause_candidate["blocked_sessions"] == 2
+    assert summary.wait == {"category": "LOCK", "event": "LCK_M_S"}
+    assert value.details["all_requests"][0].get("request_kind") != "ACTIVE_WAIT"
+    for blocker in (52, -2):
+        blocked_wait = report([_waitfor_request(blocking_session_id=blocker)],
+                              [{"session_id": 51, "open_transaction_count": 0}])
+        assert "WAITING_SQL" in {f.title for f in blocked_wait.findings}
+        assert blocked_wait.details["all_requests"][0].get("request_kind") != "ACTIVE_WAIT"
+
+
+@pytest.mark.parametrize("elapsed", [9_999, 10_000])
+def test_sqlserver_long_running_threshold_is_unchanged(elapsed: int) -> None:
+    value = report([edge(51, 0, command="SELECT", status="running", elapsed_ms=elapsed)],
+                   long_running_seconds=10)
+    assert ("LONG_RUNNING_SQL" in {f.title for f in value.findings}) is (elapsed >= 10_000)
+
+
+def test_mixed_waitfor_and_real_wait_stay_separate_in_summary_triage_and_html() -> None:
+    value = report([
+        _waitfor_request(database_name="test-db"),
+        edge(52, 0, status="suspended", command="SELECT", elapsed_ms=11_000,
+             wait_type="PAGEIOLATCH_SH", statement_sql_text="SELECT long_io"),
+    ], [{"session_id": 51, "open_transaction_count": 0, "login_name": "fixture-user",
+         "host_name": "fixture-host", "client_net_address": "192.0.2.51", "program_name": "fixture-app"}],
+        slow_top_n=1)
+    assert [r["session_id"] for r in value.details["top_requests"]] == [51]
+    for title in ("WAITING_SQL", "LONG_RUNNING_SQL"):
+        finding = next(f for f in value.findings if f.title == title)
+        assert [r["session_id"] for r in finding.evidence["requests"]] == [52]
+    summary = build_incident_summary(value)
+    assert summary.wait == {"category": "IO", "event": "PAGEIOLATCH_SH"}
+    assert summary.status == "DEGRADED" and summary.primary_problem == "LONG_RUNNING_SQL"
+    triage = build_performance_triage(value)
+    assert [a["native_identity"]["session_id"] for a in triage["assessments"]] == [52]
+    assert triage["assessments"][0]["observed_signals"] == ["LONG_RUNNING_SQL", "WAITING_SQL"]
+    model = build_report_model(value, summary)
+    long_section = next(s for s in model.sections if s.section_id == "nonblocked-long-running")
+    assert [row[0] for row in long_section.tables[0].rows] == ["52"]
+    html = HtmlReportRenderer().render(model)
+    for fragment in ("WAITFOR DELAY", "WAITFOR 主动等待", "fixture-user", "fixture-host",
+                     "192.0.2.51", "fixture-app", "29000", "PAGEIOLATCH_SH"):
+        assert fragment in html
+
+
+@pytest.mark.parametrize("missing", ["failed", "truncated", "missing_counter", "missing_blocker"])
+def test_waitfor_with_incomplete_safety_evidence_remains_unknown(missing: str) -> None:
+    request = _waitfor_request()
+    if missing == "missing_blocker":
+        request.pop("blocking_session_id")
+    session = {"session_id": 51, "open_transaction_count": 0} if missing != "missing_counter" else {"session_id": 51}
+    value = build_slow_report(INSTANCE, (
+        sample("active_requests", [request]), sample("active_sessions", [session]),
+        sample("transactions", [], success=missing != "failed", truncated=missing == "truncated"),
+        sample("connections", []),
+    ), SQLServerSettings())
+    assert {f.title for f in value.findings} == {"INCOMPLETE_SNAPSHOT"}
+    assert value.details["incomplete"] is True
+    summary = build_incident_summary(value)
+    assert summary.data_completeness != "COMPLETE"
+    assert summary.status == summary.primary_problem == summary.observed_now == "UNKNOWN"
+    assert summary.immediate_action is None and not summary.recovery_actions
+    assert build_performance_triage(value)["status"] == "UNKNOWN"
+
+
 def _request_with_empty_normalized_identity(session_id: int, **values: Any) -> dict[str, Any]:
     return {
         "session_id": session_id,
@@ -214,6 +362,51 @@ def test_active_request_normalized_identity_does_not_overwrite_existing_values()
     assert normalized["client_host"] == "ZAKKY"
     assert normalized["client_ip"] == "192.0.2.4"
     assert normalized["application"] == "Navicat"
+
+
+def test_active_request_sources_match_each_session_and_preserve_request_values() -> None:
+    requests = [
+        {"session_id": 51, "request_id": 1, "elapsed_ms": 2000,
+         "login_name": "request-user", "normalized": {"username": "request-user"}},
+        {"session_id": 52, "request_id": 1, "elapsed_ms": 1000,
+         "normalized": {"username": None}},
+    ]
+    sessions = [
+        {"session_id": 51, "login_name": "session-user-a", "original_login_name": "original-a",
+         "nt_user_name": "DOMAIN\\user-a", "host_name": "same-host",
+         "client_net_address": "192.0.2.51", "program_name": "client-a",
+         "client_interface_name": "ODBC", "host_process_id": 5100},
+        {"session_id": 52, "login_name": "session-user-b", "original_login_name": "original-b",
+         "nt_user_name": "DOMAIN\\user-b", "host_name": "same-host",
+         "client_net_address": "192.0.2.52", "program_name": "client-b",
+         "client_interface_name": ".Net SqlClient", "host_process_id": 5200},
+    ]
+
+    value = report(requests, sessions)
+    by_request = {row["session_id"]: row for row in value.details["all_requests"]}
+
+    assert by_request[51]["login_name"] == "request-user"
+    assert by_request[51]["original_login_name"] == "original-a"
+    assert by_request[51]["nt_user_name"] == "DOMAIN\\user-a"
+    assert by_request[51]["client_net_address"] == "192.0.2.51"
+    assert by_request[51]["client_interface_name"] == "ODBC"
+    assert by_request[51]["host_process_id"] == 5100
+    assert by_request[51]["normalized"]["username"] == "request-user"
+    assert by_request[52]["login_name"] == "session-user-b"
+    assert by_request[52]["client_net_address"] == "192.0.2.52"
+    assert by_request[52]["program_name"] == "client-b"
+
+
+def test_duplicate_session_ids_do_not_supply_ambiguous_request_identity() -> None:
+    request = _request_with_empty_normalized_identity(51)
+    value = report([request], [
+        {"session_id": 51, "login_name": "user-a"},
+        {"session_id": 51, "login_name": "user-b"},
+    ])
+
+    row = value.details["all_requests"][0]
+    assert row["normalized"]["username"] is None
+    assert "login_name" not in row
 
 
 def test_idle_transaction_evidence_source_age_and_last_sql() -> None:
@@ -412,9 +605,15 @@ def test_truncated_requests_do_not_claim_idle_or_offer_kill() -> None:
     )
 
 
-def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize("active_wait", [False, True])
+def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str], active_wait: bool) -> None:
     driver = FakeDriver()
     driver.connection.results.update(transactions=[], connections=[])
+    if active_wait:
+        driver.connection.results.update(
+            active_requests=[_waitfor_request()],
+            active_sessions=[{"session_id": 51, "open_transaction_count": 0, "login_name": "fixture-user"}],
+        )
     inventory = tmp_path / "inventory.yaml"
     inventory.write_text(
         yaml.safe_dump(
@@ -454,6 +653,12 @@ def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Non
     assert payload["incident_summary"]["report_path"] == str(output)
     html = output.read_text(encoding="utf-8")
     assert "故障概况" in html and "锁与阻塞链" in html
+    if active_wait:
+        assert payload["report"]["findings"] == []
+        assert payload["report"]["details"]["performance_triage"]["assessments"] == []
+        assert payload["incident_summary"]["status"] == "HEALTHY"
+        assert payload["incident_summary"]["severity"] == "INFO"
+        assert "WAITFOR 主动等待" in html and "fixture-user" in html
     assert set(driver.connection.executed) <= {
         "monitor_capabilities",
         "monitor_permissions",

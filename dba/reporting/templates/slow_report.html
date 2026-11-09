@@ -85,8 +85,6 @@
     .fields { display:grid; grid-template-columns:minmax(150px,230px) minmax(0,1fr); gap:7px 14px; margin:12px 0; }
     .fields dt { color:var(--muted); font-size:10px; font-weight:680; }
     .fields dd { margin:0; color:var(--ink); font-size:10px; overflow-wrap:anywhere; }
-    .top-sql-meta { display:flex; flex-wrap:wrap; gap:7px 18px; margin:10px 0 13px; padding:9px 11px; border:1px solid var(--stroke); border-radius:8px; background:var(--surface-soft); color:var(--muted); font-size:10px; }
-    .top-sql-meta strong { color:var(--ink); font-weight:720; }
     .badge { display:inline-block; border-radius:5px; padding:3px 7px; background:var(--blue-bg); color:var(--blue); font-size:9px; font-weight:780; overflow-wrap:anywhere; }
     .badge.CRITICAL,.badge.HIGH { background:var(--red-bg); color:var(--red); }
     .badge.WARNING { background:var(--amber-bg); color:var(--amber); }
@@ -169,6 +167,7 @@
         <div class="section-heading"><h2 id="overview-heading">故障概况</h2><p>摘要仅呈现本次采集已有证据</p></div>
         <div class="kpi-grid">{{METRICS}}</div>
       </section>
+      <section class="panel-group" id="current-requests"><div class="section-heading"><h2>当前活动 SQL</h2><p>按请求逐条展示 SQL、执行来源、运行指标和等待信息</p></div>{{CURRENT_REQUESTS}}</section>
       <section class="panel-group" id="root-assessment"><div class="section-heading"><h2>根阻塞判断</h2><p>根候选来自已采样阻塞关系</p></div>{{ROOT_ASSESSMENT}}</section>
       <section class="panel-group" id="blocking-chain"><div class="section-heading"><h2>阻塞传播链</h2><p>方向为阻塞者 → 直接受阻者；按实际父子关系保留任意深度和多个根</p></div>{{BLOCKING_CHAIN}}</section>
       <section class="panel-group" id="manual-action"><div class="section-heading"><h2>人工处置参考</h2><p>只展示文本 · Toolkit 不执行 KILL、TERMINATE 或 CANCEL</p></div>{{RECOVERY}}</section>

@@ -10,6 +10,7 @@ from typing import Any
 from dba.collectors import Collector, CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.errors import ToolkitError
+from dba.inventory import ValidationError
 from dba.mysql import MySQLAdapter
 from dba.slow_profiles import normalize_slow_result, profile_for_adapter, script_for_slow
 
@@ -203,6 +204,7 @@ def collect_recent_statements(adapter: MySQLAdapter, report: Any) -> CollectorRe
     rows: list[dict[str, Any]] = []
     failures = False
     truncated = False
+    database_error: dict[str, Any] | None = None
     if not targets:
         rows.append({"status": "NOT_APPLICABLE", "reason": "No confirmed root blocker or idle transaction candidate."})
     for index, (pid, source) in enumerate(targets):
@@ -232,7 +234,9 @@ def collect_recent_statements(adapter: MySQLAdapter, report: Any) -> CollectorRe
         try:
             script = adapter.registry.get(script_name, DatabaseType.MYSQL)
             result = adapter.execute_readonly(script, (tid, pid, tid))
-        except Exception as exc:
+        except (ToolkitError, ValidationError, OSError, UnicodeError) as exc:
+            if isinstance(exc, ToolkitError):
+                database_error = exc.database_error_payload()
             error_type = getattr(exc, "error_type", "QueryFailed")
             target.update(evidence_status=_recent_error_status(str(error_type)),
                           reason="Recent statement history query failed; see sanitized collection evidence.")
@@ -243,6 +247,7 @@ def collect_recent_statements(adapter: MySQLAdapter, report: Any) -> CollectorRe
             failures = True
             break
         if not result.success:
+            database_error = result.database_error
             error_type = result.error_type or "QueryFailed"
             target.update(evidence_status=_recent_error_status(error_type),
                           reason="Recent statement history query failed; see sanitized collection evidence.")
@@ -312,7 +317,8 @@ def collect_recent_statements(adapter: MySQLAdapter, report: Any) -> CollectorRe
                            datetime.now(timezone.utc), (time.perf_counter() - started) * 1000,
                            tuple(rows), len(rows), truncated, not failures,
                            "RecentStatementsPartial" if failures else None,
-                           "Some recent statement history evidence is unavailable." if failures else None)
+                           "Some recent statement history evidence is unavailable." if failures else None,
+                           database_error)
 
 
 def _recent_error_status(error_type: str) -> str:

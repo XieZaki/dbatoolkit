@@ -216,8 +216,7 @@ def _sessions(details: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _wait_summary(details: dict[str, Any]) -> dict[str, str] | None:
-    rows = _sessions(details)
+def _wait_summary(rows: list[dict[str, Any]]) -> dict[str, str] | None:
     for row in rows:
         event = _first(row, "wait_type", "wait_event", "event", "current_wait")
         category = _first(row, "wait_event_type", "wait_class", "wait_category")
@@ -237,10 +236,15 @@ def _wait_summary(details: dict[str, Any]) -> dict[str, str] | None:
 def build_incident_summary(report: DiagnosticReport, report_path: str | None = None) -> IncidentSummary:
     """Normalize slow and disk-growth evidence without inferring missing facts."""
     details = getattr(report, "details", {})
+    sqlserver_slow = report.scenario == "slow" and report.instance.db_type == DatabaseType.SQLSERVER
     oracle_cached_plan_only = (report.scenario == "plan"
                                and report.instance.db_type == DatabaseType.ORACLE)
     incomplete = bool(details.get("incomplete"))
     completeness, missing = _quality(details, report.scenario)
+    if (sqlserver_slow and completeness == "COMPLETE"
+            and (details.get("data_visibility") == "UNKNOWN"
+                 or details.get("full_profile_evidence_status") in {"INCOMPLETE", "UNKNOWN", "FAILED"})):
+        completeness, missing = "INCOMPLETE", ("Required diagnostic samples",)
     findings = list(report.findings)
     title_map = {
         "BLOCKING": "BLOCKING", "ROOT_BLOCKER": "BLOCKING",
@@ -268,6 +272,9 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
     primary = next((name for name in ("BLOCKING", "LONG_RUNNING_SQL", "HIGH_CONCURRENCY",
                                       "IDLE_TRANSACTION", "LOG_PRESSURE", "SPACE_PRESSURE",
                                       "REPLICATION_LAG") if name in problem_candidates), "UNKNOWN")
+    wait_finding = next((f for f in findings if f.title == "WAITING_SQL"), None) if sqlserver_slow else None
+    if primary == "UNKNOWN" and wait_finding is not None:
+        primary = "WAITING_SQL"
     if report.scenario == "disk-growth" and not incomplete:
         primary = "NONE" if primary == "UNKNOWN" else primary
     active_now = (primary not in {"UNKNOWN", "NONE"} or
@@ -287,7 +294,8 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
                 "HIGH" if primary == "BLOCKING" else
                 "INFO" if report.scenario == "disk-growth" else
                 "WARNING" if primary != "UNKNOWN" or incomplete or has_warning_finding else "INFO")
-    status = ("UNKNOWN" if completeness == "INCOMPLETE" else
+    status = ("UNKNOWN" if completeness == "INCOMPLETE"
+              or sqlserver_slow and completeness != "COMPLETE" and not active_now else
               "CRITICAL" if severity == "CRITICAL" else
               "DEGRADED" if active_now or has_warning_finding or severity in {"WARNING", "HIGH"}
               or report.scenario != "disk-growth" and completeness == "PARTIAL" else "HEALTHY")
@@ -380,7 +388,16 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
             blocked_durations.append(value)
     if blocked_durations:
         timing["longest_block"] = max(blocked_durations, key=lambda item: item[0])[1]
-    wait = _wait_summary(details)
+    wait_evidence = wait_finding.evidence.get("requests") if wait_finding else None
+    wait_rows = wait_evidence if isinstance(wait_evidence, list) and wait_evidence else requests
+    if sqlserver_slow:
+        wait_rows = [row for row in wait_rows if isinstance(row, dict) and row.get("request_kind") != "ACTIVE_WAIT"]
+        all_requests = details.get("all_requests")
+        if primary == "BLOCKING" and isinstance(all_requests, list):
+            blocked_waits = [row for row in all_requests
+                             if isinstance(row, dict) and (_int(row.get("blocking_session_id")) or 0) > 0]
+            wait_rows = blocked_waits or wait_rows
+    wait = _wait_summary(wait_rows)
 
     actions: list[RecoveryAction] = []
     for decision in manual_action_decisions(report):
@@ -425,7 +442,7 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
                                 if primary == "BLOCKING" and root_session is not None else
                                 "Review the detailed report and validate the observed database impact."),
                      "approval_required": True}
-    elif completeness == "COMPLETE" and not not_assessed_only:
+    elif completeness == "COMPLETE" and not not_assessed_only and not (sqlserver_slow and has_warning_finding):
         immediate = {"priority": "INFO",
                      "action": "No obvious active database-side issue detected in this snapshot.",
                      "approval_required": False}
@@ -957,6 +974,18 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
         add(row, "LONG_RUNNING_SQL", "达到现有请求时长阈值；耗时不证明资源根因。",
             label="INDEPENDENT_SLOW_SQL" if independent else None,
             evidence_references=(long_ref,), uncertainty_reasons=uncertainty)
+    if db_type == "sqlserver":
+        wait_finding = next((item for item in report.findings if item.title == "WAITING_SQL"), None)
+        for row in wait_finding.evidence.get("requests", []) if wait_finding else ():
+            if not isinstance(row, dict) or row.get("request_kind") == "ACTIVE_WAIT":
+                continue
+            if not include_blocking_victims and str(row.get("session_id")) in blocked_ids:
+                continue
+            wait_ref = _slow_sample_reference(
+                details, "active_requests", "findings.WAITING_SQL.requests",
+                {"wait_type": row.get("wait_type"), "wait_ms": row.get("wait_ms")})
+            add(row, "WAITING_SQL", "已观测到请求等待，根因仍需复核。",
+                evidence_references=(wait_ref,))
     ordered = sorted(selected.values(), key=lambda row: (
         -int(row["blocked_session_count"] or 0),
         -int(row["transaction_age_seconds"] or 0)

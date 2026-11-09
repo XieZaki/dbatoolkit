@@ -3,17 +3,17 @@
 ## Current position
 
 ```text
-CURRENT_PHASE: Phase 2 — SQL Server Top SQL identity integration accepted; remaining scopes unchanged
-CURRENT_TASK: V091-P2-TOPSQL-INTEGRATION-001 — DONE; user-accepted SQL Server 2022 Docker E2E scope recorded in Acceptance §63
+CURRENT_PHASE: Phase 5 — SQL Server Slow WAITFOR classification checkpoint
+CURRENT_TASK: V091-P5-WORKBENCH-001 — IN_PROGRESS; offline classification evidence recorded in Acceptance §67
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.1
-BASE_HEAD_FOR_CURRENT_CHECKPOINT: 1332b7b16365ab4caccecab3530432932e71df16
-CURRENT_TASK_DELIVERY: User-provided `WINDOWS_LOCAL_REAL_E2E`: SQL Server 2022 Docker, version 16.0.4305.5, asset sqlserver2022/environment=test; one active request had all four normalized identities populated, top/all parity, and Top SQL rank 3 MATCHED from slow.active_requests. `ISOLATED_OFFLINE_TEST`: 121 targeted tests passed; Ruff and strict MyPy (78 dba sources) passed. Scope and the uninspected HTML visual state are recorded in Acceptance §63.
+BASE_HEAD_FOR_CURRENT_CHECKPOINT: 1ad7ab2d85fbf9648c4efd4dde788baeb81fa873
+CURRENT_TASK_DELIVERY: `ISOLATED_OFFLINE_TEST` — SQL Server Slow retains WAITFOR request evidence, excludes a verified standalone WAITFOR from wait and long-running findings, and preserves independent anomalies and UNKNOWN for insufficient evidence. Focused pytest baseline 181 passed, updated suite 200 passed, full pytest 1390 passed and 3 skipped. Ruff, strict MyPy, Registry validation and diff check passed. Live retest of the revised classification is `NOT_EXECUTED`. The prior session query and error propagation evidence remains in Acceptance §66.
 LAST_COMPLETED_TASK: `V091-P2-TOPSQL-INTEGRATION-001` — DONE, user-accepted for the recorded scope in Acceptance §63. `BUG-WINDOWS-CI-FAILURES-001` and `SQL-REGISTRY-SAFETY-001` remain VERIFIED in Backlog; evidence remains in Acceptance §§58 and 60.
-NEXT_READY_TASK: No new task started by this documentation closeout; await user selection. `PORTABLE-UPDATE-001` remains E2E_PENDING and `V091-P5-WORKBENCH-001` remains IN_PROGRESS for real four-database reports and real-report JSON/HTML parity. Do not start Top SQL Delta.
-WAITING_FOR_USER_REVIEW: NO — the user explicitly requested formal closure of this task based on the supplied E2E evidence.
-WAITING_FOR_USER_ACTION: Select the next task. Other Backlog states remain unchanged; no next task was started.
-FOLLOWING_ORDER: Preserve all pre-existing Oracle, SQL Registry, Top SQL, P5, release artifacts, untracked files, and current worktree changes. SQL Server Top SQL integration is DONE for the accepted scope in Acceptance §63; all other task states and release evidence remain as recorded in their owning Backlog rows.
+NEXT_READY_TASK: No new task started. `V091-P5-WORKBENCH-001` remains IN_PROGRESS for four-database real report generation and real-report JSON/HTML parity; `PORTABLE-UPDATE-001` remains E2E_PENDING. Do not start Top SQL Delta.
+WAITING_FOR_USER_REVIEW: YES — review the offline SQL Server Slow classification evidence in Acceptance §67.
+WAITING_FOR_USER_ACTION: After review and separate authorization, repeat the standalone WAITFOR and mixed-request checks on the selected SQL Server 2022 test asset after the required Windows host preflight. The §66 live verification remains open.
+FOLLOWING_ORDER: Preserve all pre-existing Oracle, SQL Registry, Top SQL, P5, release artifacts, untracked files, and current worktree changes. SQL Server Top SQL integration remains DONE for the user-accepted scope in Acceptance §63; other task states remain as recorded in Backlog.
 ```
 
 ### BUG-WINDOWS-CI-FAILURES-001 — code-complete local acceptance — 2026-11-03
@@ -289,3 +289,9 @@ A documentation-only planning update is recorded in Roadmap Phase 2/3/5, Backlog
 ### V091-P2-TOPSQL-INTEGRATION-001 formal closure — 2026-11-08
 
 The user accepted the integration task as `DONE` based on the SQL Server 2022 Docker E2E report in Acceptance §63. Evidence is limited to version `16.0.4305.5`, asset `sqlserver2022`, and `environment=test`; other server versions and databases are not promoted. The 121 offline regression tests, Ruff, and Strict MyPy remain separate evidence. No manual HTML visual inspection was performed. `PORTABLE-UPDATE-001` remains `E2E_PENDING`; `V091-P5-WORKBENCH-001` remains `IN_PROGRESS`. No other task status changed and no new task was started.
+
+### V091-P5-WORKBENCH-001 — Slow current-request presentation checkpoint — 2026-11-08
+
+The shared Slow report now presents every bounded active request as its own HTML record, grouping current statement SQL, exact session source, and request-level runtime/wait/block data. SQL Server active statement extraction uses DMV byte offsets and preserves the batch text and native fields in JSON. Session-source enrichment uses only a unique exact `session_id` match. No database Collector outside SQL Server was changed; no historical Top SQL or diagnostic conclusion logic was changed.
+
+`ISOLATED_OFFLINE_TEST`: 221 focused tests passed. Targeted Ruff and Strict MyPy for 78 `dba` source files passed. Full pytest reported 1346 passed, 3 skipped, and 9 failures in existing Top SQL HTML identity presentation tests. Real E2E is `NOT_EXECUTED`: the PowerShell process ran from the Codex-managed runtime and did not pass the authorized Windows host gate. No database, Docker, Inventory, Credential Store, or credential was accessed. The P5 status remains `IN_PROGRESS`; four-database real reports/parity remain pending.
