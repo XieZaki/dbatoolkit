@@ -156,12 +156,13 @@ New Bugs must be registered in the Backlog with `bug_id`, `parent_task_id`, `pha
 ## Resume procedure for the next Codex session
 
 1. Read root `AGENTS.md` and `docs/PROJECT_RULES.md` completely.
-2. Read Roadmap, Backlog, this Progress file, and Acceptance.
-3. Run `git status --short` and `git log -1 --oneline`; preserve user files and record any HEAD drift.
-4. Resume only the task explicitly approved by the user. Oracle and SQL Server evidence is scoped to exact lab/version cells in Acceptance; open optional permissions and old-version gaps do not block Phase 1 triage.
-5. `V091-P0-PLAN-003` is verified for its recorded SQL Server lab scope. The approved OS credential provider works without unlocking the encrypted store. Do not use the administrator test-driver identity in Toolkit. Phase 0 is closed; do not modify lab infrastructure for Phase 1 without need and scope.
-6. Phase 1 `V091-P1-TRIAGE-001`, Phase 2 design/contract tasks, and all four Phase 2 Top SQL engine collectors are VERIFIED in Backlog for their documented scopes. Do not repeat collector work. `V091-P2-TOPSQL-INTEGRATION-001` is BLOCKED in the canonical Backlog; resume only after its recorded authorized-Windows, credential-session and test-asset gate is cleared.
-7. Update task status only in Backlog, add actual evidence only to Acceptance, update this pointer, report the next task, and stop.
+2. Read `docs/PROJECT_PLAN.md`, `docs/PROJECT_MEMORY.md`, and `docs/TODO.md` for product intent, durable context, and the concise action index.
+3. Read Roadmap, Backlog, this Progress file, and Acceptance. Backlog is the sole task-status source; Progress is the current handoff pointer; Acceptance is the evidence ledger.
+4. Run `git status --short`, `git branch --show-current`, and `git log -1 --oneline`; preserve user files and record any HEAD drift.
+5. Resume only the task explicitly approved by the user. Oracle and SQL Server evidence is scoped to exact lab/version cells in Acceptance; open optional permissions and old-version gaps do not block unrelated work.
+6. `V091-P0-PLAN-003` is verified for its recorded SQL Server lab scope. The approved OS credential provider works without unlocking the encrypted store. Do not use the administrator test-driver identity in Toolkit. Phase 0 is closed; do not modify lab infrastructure without need and scope.
+7. Phase 1 triage, Phase 2 design/contract tasks, and the four Phase 2 Top SQL engine collectors are VERIFIED in Backlog for their documented scopes. `V091-P2-TOPSQL-INTEGRATION-001` is DONE for its user-accepted scope in Acceptance §63; do not repeat it or infer wider version support. The current Phase 5 task is `V091-P5-WORKBENCH-001`; follow the current position above and do not start Top SQL Delta.
+8. Update task status only in Backlog, add actual evidence only to Acceptance, update this pointer, and refresh the TODO summary. Report the next action and stop.
 
 ## Historical task summary
 
