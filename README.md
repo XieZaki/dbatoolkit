@@ -2,12 +2,7 @@
 
 企业内部运维机器上的跨数据库只读诊断基础框架。**工具负责查清楚，DBA 负责做决定。**
 
-## 项目规划与开发状态
 
-- [产品规划书](docs/PROJECT_PLAN.md)：产品目标、能力地图和长期路线。
-- [当前待办](docs/TODO.md)：当前行动和关键等待项。
-- [项目记忆与会话恢复](docs/PROJECT_MEMORY.md)：架构、安全边界、历史决策和新会话交接。
-- [Roadmap](docs/roadmap/DBA_TOOLKIT_V0.9.1_ROADMAP.md) · [Backlog（任务状态唯一来源）](docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md) · [Progress](docs/roadmap/DBA_TOOLKIT_V0.9.1_PROGRESS.md) · [Acceptance](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)
 
 正式产品目标版本为：MySQL 5.7、8.0+；Oracle 11gR2+；PostgreSQL 14+；SQL Server 2008 R2+；MongoDB 4.0+；Redis 4.0+。前四种关系型数据库是当前开发主线，MongoDB/Redis 是长期 Backlog。`TARGET` 只表示产品方向，`IMPLEMENTED` 要求对应数据库/版本/功能有受审查的 Profile 与代码路径，`E2E_VERIFIED` 只表示明确记录的具体版本/功能/环境通过真实端到端验证；三者不可互相推导。新发布的更高版本不会因“+”自动获得正式支持。
 V0.7 历史版本摘要：当时保留 SQL Server、PostgreSQL 和 MySQL 诊断，并新增 Oracle 12c+ 连接、基础采集和 Slow Diagnose。该历史句不代表当前 Oracle 最低版本；当前正式目标见上方版本范围。运行不依赖 Internet。
@@ -23,9 +18,9 @@ V0.8.3.2 将详细诊断报告统一为自包含离线 HTML；终端保持事故
 V0.8.3.3 将 Human HTML 收敛为有预算的 DBA 分析报告：恢复动作前置、事故相关会话与请求分表、显式报告省略数量；计划 XML 单独保存为受 `.gitignore` 保护的 `.sqlplan`。新增 Windows/Linux upgrade 流程和只扫描 Git-tracked 文件的敏感数据检查。本版本不会自动 push 或创建 release tag。
 V0.8.3.5 在 V0.8.3.4 的加密 Credential Store 上增加当前 OS 用户短期 Credential Session。使用 `dba credentials unlock` 后，在默认 30 分钟绝对 TTL 内可复用解密凭据；`status` 查看、`lock` 立即清除 Agent 内存。Windows 使用当前 SID ACL 的 Named Pipe，Linux 使用有 peer UID 验证的私有 Unix Socket。秘密不写磁盘、环境变量或日志。安全设计与限制见 [Credential Security](docs/CREDENTIAL_SECURITY.md)。
 
-当前产品版本为 0.9.1。本版统一 CLI 与报告中的中文展示术语，优化离线诊断报告的证据呈现，并提供 Windows x64 Full / Update 便携包。Version-Aware Profile 的路由只说明对应能力路径已实现，不代表所有目标版本或所有能力均已实机验证。矩阵见 [Version Profiles](docs/VERSION_PROFILES.md)，真实验收按版本和场景记录在 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。
+当前产品版本为 0.9.1。本版统一 CLI 与报告中的中文展示术语，优化离线诊断报告的证据呈现，并提供 Windows x64 Full / Update 便携包。Version-Aware Profile 的路由只说明对应能力路径已实现，不代表所有目标版本或所有能力均已实机验证。见 [Version Profiles](docs/VERSION_PROFILES.md)。
 
-截至 2026-10-20 的当前 HEAD 代表性验证：SQL Server 2022 核心诊断与指定 Plan 场景为 `E2E_VERIFIED`；PostgreSQL 16 核心诊断为 `E2E_VERIFIED`；MySQL 8.4 和 Oracle Free 26ai 的四库代表性回归为 `PARTIAL`。Oracle Free 26ai 的 P0.2 指定阻塞诊断场景为 `E2E_VERIFIED`，但 Oracle 可选权限和 Disk-Growth 证据仍有缺口。MySQL 驱动来源不一致已列为 [独立 Backlog 项](docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md)。旧版本兼容矩阵仍需逐版本实机验证；这些结果不扩大为全部目标版本的支持承诺。
+截至 2026-10-20 的当前 HEAD 代表性验证：SQL Server 2022 核心诊断与指定 Plan 场景为 `E2E_VERIFIED`；PostgreSQL 16 核心诊断为 `E2E_VERIFIED`；MySQL 8.4 和 Oracle Free 26ai 的四库代表性回归为 `PARTIAL`。Oracle Free 26ai 的 P0.2 指定阻塞诊断场景为 `E2E_VERIFIED`，但 Oracle 可选权限和 Disk-Growth 证据仍有缺口。MySQL 驱动来源不一致仍待进一步核查。旧版本兼容矩阵仍需逐版本实机验证；这些结果不扩大为全部目标版本的支持承诺。
 
 Python `>=3.11,<3.14`，当前主要验证版本为 3.12。从项目根目录执行：
 
@@ -43,9 +38,9 @@ python -m venv .venv
 .venv/Scripts/dba diagnose <sqlserver_database_id> memory-grant
 ```
 
-SQL Server `top-sql` ranks completed statements retained in the plan cache. Metrics are cumulative for the cached plan/statement lifetime, not live rates; select `--metric` from `cpu_time`, `logical_reads`, `physical_reads`, `execution_count`, `elapsed_time`, `average_cpu_time`, or `average_elapsed_time`. `--top` is limited to 1–100. SQL text is not emitted; native statement/plan identity and cache/reset limitations are reported. SQL Server 2008 R2–2022 routes are implemented, but only exact versions and scenarios listed as E2E-verified in the Acceptance ledger have live evidence; SQL Server 2025 remains unverified.
+SQL Server `top-sql` ranks completed statements retained in the plan cache. Metrics are cumulative for the cached plan/statement lifetime, not live rates; select `--metric` from `cpu_time`, `logical_reads`, `physical_reads`, `execution_count`, `elapsed_time`, `average_cpu_time`, or `average_elapsed_time`. `--top` is limited to 1–100. SQL text is not emitted; native statement/plan identity and cache/reset limitations are reported. SQL Server 2008 R2–2022 routes are implemented, but only exact versions and scenarios listed as E2E-verified have live evidence; SQL Server 2025 remains unverified.
 
-SQL Server `active-sql` ranks requests present in one current snapshot by current-request CPU, logical reads, or elapsed time (`--sort cpu|logical-reads|elapsed`; default `cpu`; `--top` 1–100). Unlike `top-sql`, it does not rank completed plan-cache history or report cumulative cache totals. The offline report contains all three rankings and one bounded SQL Text section; query text is capped at 2,000 characters. This route has automated/static coverage only until a scoped live E2E is recorded in the Acceptance ledger.
+SQL Server `active-sql` ranks requests present in one current snapshot by current-request CPU, logical reads, or elapsed time (`--sort cpu|logical-reads|elapsed`; default `cpu`; `--top` 1–100). Unlike `top-sql`, it does not rank completed plan-cache history or report cumulative cache totals. The offline report contains all three rankings and one bounded SQL Text section; query text is capped at 2,000 characters. This route has automated/static coverage only until a scoped live E2E verification is completed.
 
 SQL Server `memory-grant` reports current requests waiting for or holding a memory grant from two separate, bounded DMV samples. It preserves application-request identity within each sampling query, retains raw KB metrics, and marks missing/conflicting request context as incomplete. The samples are not atomic; no SQL text or execution plan is collected. An empty wait sample is not a database health claim. The MVP is implemented but remains `E2E_PENDING` until the SQL Server 2022 live acceptance is recorded.
 
@@ -82,7 +77,8 @@ SQL Server 真实连接安装 `python -m pip install -e ".[sqlserver]"`，并通
 
 V0.2.1 实机验证前先运行 `dba driver-info`，显示 Python 架构、pyodbc 版本和 ODBC Driver 名称，不读取 Inventory、不获取凭据、不连接数据库。缺少依赖时返回 1，且仅提示企业离线安装需求。`collect <id> long-running` 是 `long-running-requests` 的兼容别名。只对人工指定的一个 database_id 验证，不扫描 Inventory。
 
-每条命令按 Inventory 的 `credential_alias` 从安全存储读取凭据，必要时对当前运行隐藏交互输入，然后连接、完成预检、采集并关闭连接。当前诊断适配器覆盖 SQL Server、PostgreSQL、MySQL 和 Oracle；MongoDB/Redis 仍是长期目标，尚无诊断实现。各数据库各场景的实现和实测边界见 [Version Profiles](docs/VERSION_PROFILES.md) 与 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。默认输出 DBA 可读摘要；在命令后添加 `--json` 获取脱敏结构化结果。SQL 执行审计写入 `logs/dba.jsonl`，不混入正常终端输出，也不包含 SQL 文本或原始驱动异常。
+每条命令按 Inventory 的 `credential_alias` 从安全存储读取凭据，必要时对当前运行隐藏交互输入，然后连接、完成预检、采集并关闭连接。当前诊断适配器覆盖 SQL Server、PostgreSQL、MySQL 和 Oracle；MongoDB/Redis 仍是长期目标，尚无诊断实现。各数据库各场景的实现和实测边界见 [Version Profiles](docs/VERSION_PROFILES.md)。默认输出 DBA 可读摘要；在命令后添加 `--json` 获取脱敏结构化结果。SQL 执行审计写入 `logs/dba.jsonl`，不混入正常终端输出，也不包含 SQL 文本或原始驱动异常。
+
 ## Database Permissions
 
 首次使用前，由数据库管理员按实际数据库版本完成对应监控账号授权。授权 SQL、适用范围和可选权限见 [docs/DATABASE_PERMISSIONS.md](docs/DATABASE_PERMISSIONS.md)。权限不足时诊断会保留数据库返回的访问错误，并提示核对该文档；Toolkit 不逐条预检权限、不生成授权 SQL，也不执行 GRANT/REVOKE。
@@ -145,7 +141,7 @@ PostgreSQL 诊断连接使用 psycopg 3、专用监控账号、autocommit、只�
 
 Slow Diagnose 对 `pg_stat_activity` 客户端连接做有界采样并排除自身 PID；活动 SQL 时长由服务器 `clock_timestamp()` 计算。报告区分总连接、活动查询、等待、被阻塞和 idle in transaction，会列出当前活动 SQL Top N、达到阈值的长 SQL、多层阻塞图、Root Blocker 来源与事务证据。非 active 会话的 `query` 是最后执行的查询，不能当作当前查询；`client_hostname` 为空时明确标记不可得。采样不是原子快照，截断或失败会标记不完整。配置项包括 `long_running_seconds`、`slow_top_n`、`high_concurrency_threshold` 和 `idle_transaction_seconds`。
 
-Root Blocker 存在且会话与阻塞采样完整时，报告可生成 `SELECT pg_cancel_backend(pid);`、`SELECT pg_terminate_backend(pid);` **纯文本参考**；cancel 只尝试取消当前查询，idle in transaction 可能没有当前查询。Toolkit 不执行这些函数、不自动处理事务，也不运行 EXPLAIN ANALYZE。PostgreSQL 14+ 是当前产品目标；PG12/13 不在当前目标范围，现有 PG13 兼容代码暂时保留且不代表正式支持或实机验证。PostgreSQL 16 当前 HEAD 的核心 Slow/Blocking 与 Disk-Growth 代表性回归已验证；其他版本、SSL 与监控权限仍需按 Profile 和目标环境验收，详见 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。隔离 Docker 集成命令：`pwsh -File tests/integration/run_postgresql_verification.ps1`。
+Root Blocker 存在且会话与阻塞采样完整时，报告可生成 `SELECT pg_cancel_backend(pid);`、`SELECT pg_terminate_backend(pid);` **纯文本参考**；cancel 只尝试取消当前查询，idle in transaction 可能没有当前查询。Toolkit 不执行这些函数、不自动处理事务，也不运行 EXPLAIN ANALYZE。PostgreSQL 14+ 是当前产品目标；PG12/13 不在当前目标范围，现有 PG13 兼容代码暂时保留且不代表正式支持或实机验证。PostgreSQL 16 当前 HEAD 的核心 Slow/Blocking 与 Disk-Growth 代表性回归已验证；其他版本、SSL 与监控权限仍需按 Profile 和目标环境验收。隔离 Docker 集成命令：`pwsh -File tests/integration/run_postgresql_verification.ps1`。
 
 ## MySQL Slow Diagnose
 
@@ -163,7 +159,7 @@ MySQL 5.7、8.0+ 是产品目标；当前代码通过版本 Profile 区分 5.7�
 
 MySQL 连接安全预检拒绝已知危险或可写直接授权，并在无法确认活动角色安全性时 fail closed；它不为每个诊断计算所需权限。Performance Schema consumer 状态用于采集路径选择，具体视图访问由实际只读查询决定。权限不足时保留数据库错误；生产仍需 DBA 按 [Database Permissions](docs/DATABASE_PERMISSIONS.md) 配置最小权限账号。某些视图只显示监控账号有权看到的对象，报告不会补造缺失值。
 
-活动语句优先读取 `events_statements_current` 与当前等待；等待 consumer 关闭时使用受审查的无等待查询，语句 consumer 关闭时使用线程查询降级，并把缺失字段与不完整结论明确列出。长 SQL 时长在服务器端获取，Sleep + 未结束 InnoDB 事务必须有 `innodb_trx` 证据；阻塞图来自 `data_lock_waits`/`data_locks`。Root Blocker 的 `KILL QUERY <id>;` 与 `KILL <id>;` 仅为人工审核文本；Sleep 会话通常没有当前查询可供 KILL QUERY 取消。Toolkit 不执行 KILL，也不把当前进程信息当作可靠的“上一条 SQL”。MySQL 8.0.46 的隔离 Docker 验证是历史结果。2026-10-20 MySQL 8.4 当前 HEAD 代表性回归为 `PARTIAL`；导入模块版本与 PyMySQL 分发元数据不一致，已登记 `MYSQL-DRIVER-PROVENANCE-001`。最近语句能力有源码与自动化测试覆盖，但本轮没有完成其独立 live acceptance；它不等同于 Phase 2 Digest Top SQL。其他目标版本、TLS 与监控权限须按目标环境验收。历史记录见 [docs/VERIFICATION_V0_6.md](docs/VERIFICATION_V0_6.md)，当前验收见 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。
+活动语句优先读取 `events_statements_current` 与当前等待；等待 consumer 关闭时使用受审查的无等待查询，语句 consumer 关闭时使用线程查询降级，并把缺失字段与不完整结论明确列出。长 SQL 时长在服务器端获取，Sleep + 未结束 InnoDB 事务必须有 `innodb_trx` 证据；阻塞图来自 `data_lock_waits`/`data_locks`。Root Blocker 的 `KILL QUERY <id>;` 与 `KILL <id>;` 仅为人工审核文本；Sleep 会话通常没有当前查询可供 KILL QUERY 取消。Toolkit 不执行 KILL，也不把当前进程信息当作可靠的“上一条 SQL”。MySQL 8.0.46 的隔离 Docker 验证是历史结果。2026-10-20 MySQL 8.4 当前 HEAD 代表性回归为 `PARTIAL`；导入模块版本与 PyMySQL 分发元数据不一致，已登记 `MYSQL-DRIVER-PROVENANCE-001`。最近语句能力有源码与自动化测试覆盖，但本轮没有完成其独立 live acceptance；它不等同于 Phase 2 Digest Top SQL。其他目标版本、TLS 与监控权限须按目标环境验收。历史记录见 [docs/VERIFICATION_V0_6.md](docs/VERIFICATION_V0_6.md)。
 
 ## SQL Server Execution Plan
 
@@ -176,7 +172,7 @@ MySQL 连接安全预检拒绝已知危险或可写直接授权，并在无法�
 
 Plan 诊断输出自包含离线 HTML；实际原始 Showplan 不嵌入 HTML，可用时另行输出配对 `.sqlplan` 文件。执行计划仍可能包含业务 SQL、对象名及未标记的敏感字面量，须按内部敏感数据管理。SQL Registry 限制只读脚本；Toolkit 不执行任何索引、统计信息、计划或数据变更。Missing Index 仅作证据，不生成 DDL。
 
-配置允许 `plan_cardinality_ratio_warning`、`plan_cardinality_ratio_critical`、`plan_top_operators`、`plan_max_xml_size` 和 `plan_large_scan_rows`。默认 XML 上限 1 MiB，超过上限显式标记不可用。Slow 报告仅给长请求显示下一步 plan 命令提示，不自动抓取所有计划。历史 V0.4 Docker 验证见 [docs/VERIFICATION_V0_4.md](docs/VERIFICATION_V0_4.md)。2026-10-20 当前 HEAD 在 SQL Server 2022 Docker 实验室通过 Version-Aware Plan 指定场景，包括 active/cached 计划、身份关联、解析、CLI/JSON/离线 HTML 和 `.sqlplan` 检查；详见 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。此结果仅适用于记录的版本、环境和路径。
+配置允许 `plan_cardinality_ratio_warning`、`plan_cardinality_ratio_critical`、`plan_top_operators`、`plan_max_xml_size` 和 `plan_large_scan_rows`。默认 XML 上限 1 MiB，超过上限显式标记不可用。Slow 报告仅给长请求显示下一步 plan 命令提示，不自动抓取所有计划。历史 V0.4 Docker 验证见 [docs/VERIFICATION_V0_4.md](docs/VERIFICATION_V0_4.md)。2026-10-20 当前 HEAD 在 SQL Server 2022 Docker 实验室通过 Version-Aware Plan 指定场景，包括 active/cached 计划、身份关联、解析、CLI/JSON/离线 HTML 和 `.sqlplan` 检查。此结果仅适用于记录的版本、环境和路径。
 
 SQL Server 2008 R2+ 是产品目标。当前 SQL Server 2022 实测不证明 SQL Server 2008 R2 或其他旧版本兼容；旧版本 DMV、Showplan XML 和 ODBC/TLS 互通仍需按版本 Profile 实机验收。
 
@@ -255,5 +251,5 @@ Oracle 监控授权按数据库版本和使用功能见 [Database Permissions](d
 
 当前执行时长依据 SQL_EXEC_START；V$SQL elapsed/cpu/read 字段明确标为跨执行累计值。Idle Transaction 要求 INACTIVE 会话与 V$TRANSACTION 真实关联。报告列出当前/上次 SQL、来源字段、锁链、多层根阻塞者、异常和采样质量；无法可靠取得客户端 IP 时明确显示 unavailable。ReferenceCommand 仅为纯文本，Toolkit **不会执行 KILL SESSION**。
 
-V0.7 与 2026-10-15 Oracle Free 23.0.0.0.0 记录保留其历史代码和环境范围，不覆盖当前 HEAD 结果。2026-10-20 当前 HEAD 在 Oracle Free 26ai 完成 P0.2 指定阻塞链、事务身份/XID、SQL 上下文及安全 ReferenceCommand 的真实验收；四库代表性回归为 `PARTIAL`，因为 Slow/Disk 可选视图权限不足。Oracle 11gR2+ 仍是产品目标，11gR2 实机兼容性未验证。历史记录见 [V0.7 验证](docs/VERIFICATION_V0_7.md) 和 [V0.7.1 验证](docs/VERIFICATION_V0_7_1.md)；当前证据见 [Acceptance ledger](docs/roadmap/DBA_TOOLKIT_V0.9.1_ACCEPTANCE.md)。
+V0.7 与 2026-10-15 Oracle Free 23.0.0.0.0 记录保留其历史代码和环境范围，不覆盖当前 HEAD 结果。2026-10-20 当前 HEAD 在 Oracle Free 26ai 完成 P0.2 指定阻塞链、事务身份/XID、SQL 上下文及安全 ReferenceCommand 的真实验收；四库代表性回归为 `PARTIAL`，因为 Slow/Disk 可选视图权限不足。Oracle 11gR2+ 仍是产品目标，11gR2 实机兼容性未验证。历史记录见 [V0.7 验证](docs/VERIFICATION_V0_7.md) 和 [V0.7.1 验证](docs/VERIFICATION_V0_7_1.md)。
 
