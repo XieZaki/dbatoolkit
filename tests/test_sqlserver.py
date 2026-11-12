@@ -1,7 +1,10 @@
 import io
 import json
 import logging
+import re
 import shutil
+import sqlite3
+from contextlib import closing
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -583,10 +586,9 @@ def test_active_requests_registry_and_collector_preserve_native_identity(
     assert "r.request_id" in normalized_sql
     assert "r.statement_start_offset" in normalized_sql
     assert "r.statement_end_offset" in normalized_sql
-    assert "SUBSTRING( t.text" in normalized_sql
-    assert "(r.statement_start_offset / 2) + 1" in normalized_sql
-    assert "(r.statement_end_offset - r.statement_start_offset) / 2" in normalized_sql
-    assert "r.statement_end_offset = -1" in normalized_sql
+    assert "CONVERT(varbinary(max), t.text) AS batch_bytes" in normalized_sql
+    assert "source.end_offset + 2 - source.start_offset" in normalized_sql
+    assert "source.end_offset IN (-1, source.batch_length)" in normalized_sql
     assert "AS statement_sql_text_truncated" in normalized_sql
     assert "CONVERT(varchar(130), r.plan_handle, 1) AS plan_handle" in normalized_sql
     assert "CONVERT(varchar(130), r.query_plan_hash, 1) AS query_plan_hash" in normalized_sql
@@ -1057,3 +1059,77 @@ def test_interrupted_preflight_closes(adapter: SQLServerAdapter, driver: FakeDri
     with pytest.raises(KeyboardInterrupt):
         adapter.connect()
     assert driver.connection.closed and adapter._connection is None
+
+
+def evaluate_active_request_text(batch: str | None, start: int | None,
+                                 end: int | None) -> tuple[Any, ...]:
+    """Exercise the Registry's byte expressions on SQLite blobs without a live DMV."""
+    sql = (ROOT / "sql/sqlserver/active_requests.sql").read_text(encoding="utf-8")
+    projection = sql[sql.index("CONVERT(nvarchar(max), SUBSTRING"):sql.index("FROM sys.dm_exec_requests")]
+    stages = re.findall(r"CROSS APPLY \(\s*SELECT (.*?)\n\) AS (\w+)", sql, re.DOTALL)
+    assert [alias for _, alias in stages] == ["source", "span", "limits"]
+
+    def sqlite_syntax(expression: str) -> str:
+        for original, replacement in (
+                ("CONVERT(varbinary(max), ", "utf16("), ("CONVERT(nvarchar(max), ", "decode_utf16("),
+                ("CONVERT(bigint, ", "as_bigint(")):
+            expression = expression.replace(original, replacement)
+        return re.sub(r"0x([0-9a-fA-F]+)", r"X'\1'", expression)
+
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.create_function("utf16", 1, lambda value: value.encode("utf-16-le") if value is not None else None)
+        connection.create_function("decode_utf16", 1, lambda value: value.decode("utf-16-le") if value is not None else None)
+        connection.create_function("DATALENGTH", 1, lambda value: len(value.encode("utf-16-le")) if value is not None else None)
+        connection.create_function("as_bigint", 1, lambda value: value)
+        ctes = ["t(text) AS (VALUES (?))", "r(statement_start_offset, statement_end_offset) AS (VALUES (?, ?))"]
+        sources = ["t", "r"]
+        for expression, alias in stages:
+            ctes.append(f"{alias} AS (SELECT {sqlite_syntax(expression)} FROM {', '.join(sources)})")
+            sources.append(alias)
+        row = connection.execute(
+            f"WITH {', '.join(ctes)} SELECT {sqlite_syntax(projection)} FROM {', '.join(sources)}",
+            (batch, start, end),
+        ).fetchone()
+    assert isinstance(row, tuple)
+    return row
+
+
+@pytest.mark.parametrize("statement", [
+    "SELECT 1 OPTION (HASH JOIN, MAXDOP 1)",
+    "SELECT 1 AS x",
+    "SELECT 17",
+    "SELECT N'中文🚀'",
+    "WAITFOR DELAY '00:00:01'",
+])
+def test_active_request_inclusive_end_offset_preserves_final_character(statement: str) -> None:
+    prefix = "SELECT N'前😀';\n"
+    batch = prefix + statement + ";\nSELECT 3;"
+    start = len(prefix.encode("utf-16-le"))
+    end = start + len(statement.encode("utf-16-le")) - 2
+    assert evaluate_active_request_text(batch, start, end) == (batch, 0, statement, None, 0)
+
+
+def test_active_request_utf16_pair_end_and_batch_end_sentinel() -> None:
+    assert evaluate_active_request_text("a🚀b", 2, 2)[2:] == ("🚀", None, 0)
+    assert evaluate_active_request_text("a🚀b", 2, 4)[2:] == ("🚀", None, 0)
+    assert evaluate_active_request_text("SELECT 1;SELECT N'😀'  ", 18, -1)[2:] == ("SELECT N'😀'  ", None, 0)
+    assert evaluate_active_request_text("SELECT 1", 0, 16)[2:] == ("SELECT 1", None, 0)
+
+
+@pytest.mark.parametrize(("start", "end"), [(None, -1), (1, -1), (4, 2), (4, 100), (4, -2), (4, 5)])
+def test_active_request_rejects_invalid_or_split_start_offsets(start: int | None, end: int) -> None:
+    row = evaluate_active_request_text("a🚀b", start, end)
+    assert row[2:] == (None, "Current statement offsets are unavailable or invalid", 0)
+
+
+def test_active_request_caps_batch_and_statement_without_splitting_surrogate() -> None:
+    prefix = "x" * 16383
+    batch = prefix + "😀tail"
+    for end in (-1, len(batch.encode("utf-16-le")) - 2):
+        assert evaluate_active_request_text(batch, 0, end) == (prefix, 1, prefix, None, 1)
+    start = len((prefix + "😀").encode("utf-16-le"))
+    assert evaluate_active_request_text(batch, start, -1) == (prefix, 1, "tail", None, 0)
+    assert evaluate_active_request_text("x", 2, -1)[2:] == (
+        None, "Current statement contains no text at the sampled offsets", 0)
+    assert evaluate_active_request_text(None, 0, 40000) == (
+        None, 0, None, "SQL text unavailable from sys.dm_exec_sql_text", 0)

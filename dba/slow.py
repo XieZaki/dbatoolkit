@@ -204,6 +204,25 @@ def build_slow_report(
     requests, sessions = rows("active_requests"), rows("active_sessions")
     _attach_session_identity_to_normalized_requests(requests, sessions)
     transactions, connections = rows("transactions"), rows("connections")
+    transactions_incomplete, _ = collection_completeness(results, ("transactions",))
+    unfinished_transactions = [r for r in transactions if r.get("transaction_state") in (2, 4, 5)
+                               and r.get("transaction_type") in (1, 2, 4)]
+    # The DMV joins transaction-to-session mappings. Count each transaction once.
+    transaction_ids = {max(0, number(r.get("transaction_id"))) for r in unfinished_transactions}
+    unclassified_sessions = {
+        row.get("session_id") for row in transactions
+        if number(row.get("transaction_type")) not in (1, 2, 3, 4)
+        or (row.get("transaction_type") != 3 and
+            (type(row.get("transaction_state")) is not int or row["transaction_state"] not in range(9)))
+    }
+    count_limitation = None
+    if transactions_incomplete:
+        count_limitation = "事务样本缺失、采集失败或已截断，无法确认未结束事务数量。"
+    elif 0 in transaction_ids or unclassified_sessions:
+        count_limitation = "事务样本中的事务 ID、状态或类型不可用，无法确认未结束事务数量。"
+    if count_limitation:
+        quality.append(count_limitation)
+    transaction_identity_incomplete, _ = collection_completeness(results, ("active_sessions", "transactions"))
     session_map, ambiguous_session_ids = _unique_session_rows(sessions)
     connection_map: dict[int, list[dict[str, Any]]] = {}
     for connection in connections:
@@ -231,6 +250,15 @@ def build_slow_report(
     waiting = [r for r in requests if r.get("wait_type") or r.get("status") == "suspended"]
     blocked = [r for r in requests if number(r.get("blocking_session_id")) > 0]
     graph = blocking_graph(requests)
+    lock_wait_by_blocker: dict[int, int] = {}
+    for request in blocked:
+        request_sid = number(request.get("session_id"))
+        blocker_sid = number(request.get("blocking_session_id"))
+        wait = request.get("wait_time_ms")
+        if (request_sid in graph["children"].get(blocker_sid, ())
+                and str(request.get("wait_type") or "").upper().startswith("LCK_M_")
+                and type(wait) is int and wait >= 0):
+            lock_wait_by_blocker[blocker_sid] = max(lock_wait_by_blocker.get(blocker_sid, 0), wait)
     blocking_sessions = set(graph["children"]) | {
         r.get("session_id") for r in requests if number(r.get("blocking_session_id")) != 0
     }
@@ -295,22 +323,29 @@ def build_slow_report(
         session = session_map.get(sid, {})
         active = [r for r in requests if r.get("session_id") == sid]
         associated = [r for r in transactions if r.get("session_id") == sid]
-        unfinished = [
-            r
-            for r in associated
-            if r.get("transaction_state") in (2, 4, 5) and r.get("transaction_type") in (1, 2, 4)
-        ]
+        unfinished = [r for r in unfinished_transactions if r.get("session_id") == sid]
         identity_quality = "CONFIRMED"
         session_login_time = session.get("login_time")
         transaction_login_times = {str(row.get("login_time")) for row in unfinished
                                    if row.get("login_time") is not None}
         if len(unfinished) > 1:
             identity_quality = "AMBIGUOUS"
-        elif unfinished and (session_login_time is None or len(transaction_login_times) != 1
-                             or str(session_login_time) not in transaction_login_times):
+        elif unfinished and (transaction_identity_incomplete or sid in unclassified_sessions
+                             or session_login_time in (None, "")
+                             or str(session_login_time) not in transaction_login_times
+                             or number(unfinished[0].get("transaction_id")) <= 0):
             identity_quality = "RECHECK_REQUIRED"
-        transaction_identity = (unfinished[0].get("transaction_id")
-                                if len(unfinished) == 1 and identity_quality == "CONFIRMED" else None)
+        elif not unfinished and (sid in unclassified_sessions or number(session.get("open_transaction_count")) > 0 or any(
+            number(row.get("open_transaction_count")) > 0 for row in active
+        )):
+            identity_quality = "RECHECK_REQUIRED"
+        transaction_observed = (True if unfinished else
+                                None if transactions_incomplete or sid in unclassified_sessions else False)
+        transaction_verified = identity_quality == "CONFIRMED" if unfinished else None
+        unfinished_confirmed = (True if transaction_verified else
+                                False if transaction_observed is False and identity_quality == "CONFIRMED"
+                                and session.get("open_transaction_count") == 0
+                                else None)
         sources = connection_map.get(sid, [])
         last = [r.get("last_sql") for r in sources if r.get("last_sql")]
         affected = descendants(sid, graph["children"])
@@ -335,8 +370,11 @@ def build_slow_report(
             "last_sql": last,
             "connections": sources,
             "transactions": associated,
-            "transaction_id": transaction_identity,
-            "transaction_identity_quality": identity_quality if unfinished else "NOT_CONFIRMED",
+            "transaction_id": unfinished[0]["transaction_id"] if transaction_verified else None,
+            "transaction_observed": transaction_observed,
+            "transaction_identity_verified": transaction_verified,
+            "transaction_identity_quality": ("NOT_CONFIRMED" if not unfinished and identity_quality == "CONFIRMED"
+                                             else identity_quality),
             "transaction_begin_time": min(
                 (
                     str(r["transaction_begin_time"])
@@ -355,8 +393,11 @@ def build_slow_report(
             ),
             "blocked_session_count": len(affected),
             "blocked_sessions": sorted(affected),
+            "longest_blocked_lock_wait_ms": max(
+                (lock_wait_by_blocker[blocker] for blocker in affected | {sid} if blocker in lock_wait_by_blocker),
+                default=None),
             "session_available": bool(session),
-            "unfinished_transaction_confirmed": bool(unfinished) and identity_quality == "CONFIRMED",
+            "unfinished_transaction_confirmed": unfinished_confirmed,
             "sql_note": "Current/last batch is contextual evidence, not proof of the statement that acquired a lock.",
         }
         if not root["client_net_address"]:
@@ -378,7 +419,7 @@ def build_slow_report(
         references = (
             (
                 ReferenceCommand(
-                    f"KILL {sid};", "仅供 DBA 人工审核；重新确认 session 身份及回滚影响。"
+                    f"KILL {sid};", "仅供 DBA 人工审核；重新核对 session_id、login_time、transaction_id 及回滚影响。"
                 ),
             )
             if session and sid > 0 and affected and reference_evidence_complete and identity_complete
@@ -501,6 +542,8 @@ def build_slow_report(
                 "blocking_graph": graph,
                 "roots": roots,
                 "transactions": transactions,
+                "open_transaction_count": None if count_limitation else len(transaction_ids),
+                "longest_blocked_lock_wait_ms": max(lock_wait_by_blocker.values(), default=None),
                 "sources": connections,
                 "quality": quality,
                 "incomplete": incomplete,

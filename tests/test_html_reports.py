@@ -19,6 +19,55 @@ from dba.slow import SlowReport
 from dba.top_sql_report import TopSQLDiagnosticReport
 
 
+@pytest.mark.parametrize(("engine", "row", "expected", "runtime", "event", "timing_label"), [
+    (DatabaseType.MYSQL, {"processlist_id": 42, "duration_ms": 1250, "rows_examined": 40, "rows_affected": 0,
+                         "rows_sent": 99, "cpu_ms": 123, "current_wait": "wait/io/file/innodb/innodb_data_file",
+                         "sql_text": "SELECT '采集状态=COMPLETE' AS synthetic_mysql"},
+     {"检查行数": "40 行", "影响行数": "0 行"}, "00:00:01（1250 毫秒）",
+     "wait/io/file/innodb/innodb_data_file", "当前等待事件"),
+    (DatabaseType.POSTGRESQL, {"pid": 42, "duration_ms": 420, "datname": "fixture_pg", "cpu_ms": 123,
+                              "reads": 8, "wait_event": "DataFileRead", "wait_event_type": "IO",
+                              "query": "SELECT synthetic_pg"},
+     {}, "00:00:00（420 毫秒）", "DataFileRead", "当前等待事件"),
+    (DatabaseType.ORACLE, {"sid": 42, "inst_id": 2, "sql_id": "synthetic", "duration_seconds": 3,
+                           "duration_source": "LAST_CALL_ET_ACTIVE", "sql_cumulative_cpu_us": 9000,
+                           "sql_cumulative_buffer_gets": 12, "sql_cumulative_disk_reads": 0,
+                           "state": "WAITED KNOWN TIME", "event": "db file sequential read",
+                           "sql_text": "SELECT synthetic_oracle"},
+     {"子游标累计 CPU": "9,000 µs",
+      "子游标累计缓冲区获取": "12 次", "子游标累计磁盘读取": "0 次"},
+     "00:00:03（活动调用时长，3 秒）", "db file sequential read", "采样事件（当前等待未确认）"),
+])
+def test_slow_resource_cards_preserve_native_units_and_scopes(
+    engine: DatabaseType, row: dict, expected: dict, runtime: str, event: str, timing_label: str,
+) -> None:
+    instance = DatabaseInstance("fixture", "Fixture", engine, "192.0.2.1", 1, "monitor")
+    report = SlowReport(instance, datetime(2026, 11, 10, tzinfo=timezone.utc), "slow", (),
+                        {"active_requests": [row], "blocking_graph": {"roots": [], "children": {}}})
+    original = asdict(report)
+    model = build_report_model(report, build_incident_summary(report))
+    request = next(section for section in model.sections if section.section_id == "current-request-001")
+    assert runtime in dict(request.fields).values()
+    assert set(expected).isdisjoint(dict(request.fields))
+    card = next(section for section in model.sections if section.section_id == "sql-resource-001")
+    metrics = dict(card.fields)
+    assert {key: metrics[key] for key in expected} == expected
+    assert metrics[timing_label] == event
+    assert "返回行数" not in metrics and all(not key.startswith("当前请求累计") for key in metrics)
+    assert runtime not in metrics.values()
+    if engine is DatabaseType.ORACLE:
+        assert "当前等待事件" not in metrics and "当前等待时长" not in metrics
+        assert "无法归到这一次执行" in metrics["性能分析"]
+    else:
+        assert metrics["当前等待时长"] == "未采集" and "I/O 相关等待" in metrics["性能分析"]
+    page = HtmlReportRenderer().render(model)
+    assert 'id="sql-resource-001"' in page and 'href="#current-request-001"' in page
+    assert "资源计数从当前请求开始累计至采集时刻" not in page
+    if engine is DatabaseType.MYSQL:
+        assert "采集状态=COMPLETE" in page.split('id="sql-resource-001"', 1)[1].split("</section>", 1)[0]
+    assert asdict(report) == original
+
+
 def _report() -> SlowReport:
     instance = DatabaseInstance("sqlserver2022", "SQL <Server>", DatabaseType.SQLSERVER,
                                 "localhost", 1433, "monitor", environment="test")
@@ -141,12 +190,19 @@ def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() 
     assert "锁与阻塞链" in page and "会话身份与来源" in page
     assert "长期未提交事务" in page and "请求运行信息" in page
     assert "59" in page and "67" in page
-    assert "长运行请求 2 条" in page and "阻塞相关 2 条" in page and "非阻塞 0 条" in page
+    workload = next(section for section in build_report_model(report, summary).sections
+                    if section.section_id == "workload-summary")
+    assert workload.summary == "长运行请求 2 条 · 阻塞相关 2 条 · 非阻塞 0 条。"
+    assert workload.summary not in page
     assert 'class="report-section manual-action"' in page
     assert "Toolkit 不执行 KILL" in page
     assert "KILL 57;" in page and "Toolkit 是否执行" in page and "回滚风险" in page
     assert "WAITFOR 主动等待" in page and "LCK_M_X" in page
-    assert "直接阻塞会话" in page and "间接受影响会话" in page
+    blocking = next(section for section in build_report_model(report, summary).sections
+                    if section.section_id == "blocking")
+    assert [row[0].strip().removeprefix("└─ ") for row in blocking.tables[0].rows] == ["57", "59", "67"]
+    assert [row[2] for row in blocking.tables[0].rows] == ["—", "57", "59"]
+    assert [row[3] for row in blocking.tables[0].rows] == ["0", "1", "2"]
     assert "共" in page and "省略" in page
     command_index = page.index("KILL 57;")
     assert "<details" in page[:command_index] and "执行前必须重新核对会话身份" in page
@@ -154,7 +210,8 @@ def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() 
     assert "<img src=x" not in page
     assert "<script>alert(1)</script>" not in page
     assert 'data-copy="UPDATE t SET value = &#x27;&lt;script&gt;alert(1)' in page
-    assert '<details' in page and "会话 59 SQL" in page
+    assert '<details' in page and "会话 59 / 请求 未知 · 当前执行语句" in page
+    assert "UPDATE t SET value = 1" in page[page.index('id="session-appendix"'):]
     assert '{"session_id"' not in page and "{'session_id'" not in page
     assert "https://" not in page and "http://" not in page
     assert '<script src=' not in page and "<script>alert(1)</script>" not in page
@@ -351,10 +408,30 @@ def test_sqlserver_current_request_cards_keep_statement_and_exact_session_source
                       page, re.DOTALL)
     assert first and second and third
     assert "login-a" in first.group() and "SELECT first_stmt" in first.group()
-    assert "login-a" in second.group() and "LCK_M_X" in second.group()
+    assert "login-a" in second.group() and "SELECT second_stmt" in second.group()
     assert "login-b" in third.group() and "192.0.2.71" in third.group()
-    assert "125</dd>" in first.group() and "逻辑读取（8 KiB 页）" in first.group()
-    assert "阻塞者" in second.group() and "72" in second.group()
+    assert "CPU 时间" not in first.group() and "逻辑读取" not in first.group()
+    assert "阻塞者" not in second.group() and "LCK_M_X" not in second.group()
+    resources = {section.section_id: dict(section.fields) for section in model.sections
+                 if section.section_id.startswith("sql-resource-")}
+    assert resources["sql-resource-001"]["当前请求累计 CPU 时间"] == "125 ms"
+    assert resources["sql-resource-001"]["当前请求累计逻辑读取"] == "8 页（按 8 KiB/页折合 64 KiB）"
+    assert resources["sql-resource-001"]["当前请求累计写入计数"] == "1 次"
+    assert resources["sql-resource-002"]["当前等待事件"].startswith("LCK_M_X")
+    assert "等待会话 72" in resources["sql-resource-002"]["性能分析"]
+
+
+def test_slow_sql_cards_retain_non_info_severity_badges() -> None:
+    report = _report()
+    model = build_report_model(report, build_incident_summary(report))
+    severities = {"current-request-001": "WARNING", "sql-resource-001": "CRITICAL"}
+    model = replace(model, sections=tuple(
+        replace(section, severity=severities[section.section_id]) if section.section_id in severities else section
+        for section in model.sections))
+    page = HtmlReportRenderer().render(model)
+    for section_id, severity in severities.items():
+        card = page.split(f'id="{section_id}"', 1)[1].split("</section>", 1)[0]
+        assert f'class="badge {severity}"' in card
 
 
 def test_sqlserver_current_request_without_exact_session_does_not_borrow_another_identity() -> None:
@@ -405,7 +482,7 @@ def test_sqlserver_current_request_never_labels_batch_text_as_statement_when_off
 
     assert card is not None
     assert "BATCH_ONLY_MUST_NOT_BE_PRESENT" not in page
-    assert "Collector 未返回按当前语句偏移提取的 SQL 文本" in card.group()
+    assert "采集器未返回按当前语句偏移提取的 SQL 文本" in card.group()
 
 
 @pytest.mark.parametrize(
@@ -514,11 +591,13 @@ def test_report_policy_bounds_high_concurrency_and_discloses_omissions() -> None
                                soft_report_bytes=2 * 1024 * 1024,
                                hard_report_bytes=8 * 1024 * 1024)
     summary = build_incident_summary(report, "reports/report.html")
-    page = render_bounded(build_report_model(report, summary, policy=policy),
-                          HtmlReportRenderer().render, policy)
+    model = build_report_model(report, summary, policy=policy)
+    page = render_bounded(model, HtmlReportRenderer().render, policy)
     assert "省略" in page
     assert "人工处置参考" in page and "根因候选" in page
-    assert "长运行请求 303 条 · 阻塞相关 302 条 · 非阻塞 1 条" in page
+    workload = next(section for section in model.sections if section.section_id == "workload-summary")
+    assert workload.summary == "长运行请求 303 条 · 阻塞相关 302 条 · 非阻塞 1 条。"
+    assert workload.summary not in page
     assert len(page.encode("utf-8")) < policy.hard_report_bytes
     assert page.count("<tr>") < 100
 
@@ -551,6 +630,10 @@ def test_hard_report_size_fallback_keeps_incident_and_recovery() -> None:
     assert "证据完整性" in page
     assert "报告达到大小上限，已收敛部分证据内容" in page
     assert len(page.encode("utf-8")) <= policy.hard_report_bytes
+    parser = _HTMLReferences()
+    parser.feed(page)
+    assert not any(target.startswith("current-request-") for target in parser.fragments)
+    assert set(parser.fragments).issubset(set(parser.ids))
 
 
 def test_transaction_enums_are_database_specific_and_unknown_values_remain_visible() -> None:
@@ -562,8 +645,8 @@ def test_transaction_enums_are_database_specific_and_unknown_values_remain_visib
         "transaction_age_seconds": 4, "transaction_type": 99, "transaction_state": 99})
     summary = build_incident_summary(report, "reports/report.html")
     page = HtmlReportRenderer().render(build_report_model(report, summary))
-    assert "Read/Write" in page and "Active" in page
-    assert "Unknown (99)" in page
+    assert "读写事务" in page and "活动中" in page
+    assert "未知（原始值 99）" in page
 
 
 def test_displayed_sql_obeys_report_character_policy() -> None:
@@ -746,7 +829,7 @@ def test_postgresql_slow_version_is_readable_and_retains_raw_server_version_num(
     assert "版本" in page and "16.15" in page and "160015" in page
 
 
-@pytest.mark.parametrize("database_type", [DatabaseType.MYSQL, DatabaseType.POSTGRESQL])
+@pytest.mark.parametrize("database_type", list(DatabaseType))
 def test_slow_html_ids_are_unique_and_navigation_fragments_resolve(database_type: DatabaseType) -> None:
     report = replace(_report(), instance=DatabaseInstance(
         "synthetic", "Synthetic", database_type, "localhost", 1,
@@ -761,6 +844,14 @@ def test_slow_html_ids_are_unique_and_navigation_fragments_resolve(database_type
     assert "collection-quality-panel" in parser.ids
     assert set(parser.fragments).issubset(set(parser.ids))
     assert 'href="#collection-quality"' in page
+    anchors = ("summary", "root-assessment", "current-requests", "blocking-chain",
+               "transactions", "evidence", "session-appendix")
+    assert [parser.ids.index(anchor) for anchor in anchors] == sorted(parser.ids.index(anchor) for anchor in anchors)
+    assert '<details class="panel-group" id="session-appendix" data-expandable>' in page
+    blocking = page.split('id="blocking-chain"', 1)[1].split('id="manual-action"', 1)[0]
+    assert 'href="#current-request-001"' in blocking and "直接阻塞者" in blocking
+    assert "等待" not in blocking and "LCK_M_X" not in blocking
+    assert 'id="blocking-evidence"' in page.split('id="session-appendix"', 1)[1]
 
 
 def test_independent_top_sql_report_uses_statistics_summary_without_native_identity() -> None:
@@ -794,9 +885,9 @@ def test_mysql_wait_detail_unavailable_does_not_mark_active_requests_failed() ->
     model = build_report_model(report, build_incident_summary(report))
     quality = next(section for section in model.sections if section.section_id == "collection-quality")
     rows = {row[0]: row for row in quality.tables[0].rows}
-    assert rows["active_requests"][1] == "完整"
-    assert rows["current_wait_detail"][1] == "UNAVAILABLE"
-    assert "intentionally projects NULL" in rows["current_wait_detail"][2]
+    assert rows["活动请求（active_requests）"][1] == "完整"
+    assert rows["当前等待详情（current_wait_detail）"][1] == "UNAVAILABLE"
+    assert "intentionally projects NULL" in rows["当前等待详情（current_wait_detail）"][2]
 
 
 def test_postgresql_healthy_slow_html_describes_only_this_snapshot() -> None:

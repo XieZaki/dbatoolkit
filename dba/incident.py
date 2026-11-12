@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from dba.core import DatabaseType, DiagnosticReport
+from dba.settings import SQLSERVER_LONG_TRANSACTION_SECONDS
 
 _TRIAGE_RULE_IDS = {
     "ROOT_BLOCKER": "TRIAGE-ROOT-01",
@@ -318,6 +319,8 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
             impact[label] = metric_count
     if report.scenario == "plan" and details.get("metrics_scope") == "current_request":
         impact["active_requests"] = 1
+    if sqlserver_slow and type(details.get("open_transaction_count")) is int:
+        impact["open_transactions"] = details["open_transaction_count"]
     long_rows = details.get("long_running", [])
     if "long_running" in details and isinstance(long_rows, list):
         long_finding = next((f for f in findings if f.title == "LONG_RUNNING_SQL"), None)
@@ -379,15 +382,19 @@ def build_incident_summary(report: DiagnosticReport, report_path: str | None = N
             timing["oldest_transaction"] = oldest_tx_duration[1]
     if duration_values:
         timing["longest_request"] = max(duration_values, key=lambda item: item[0])[1]
-    blocked_durations = []
-    for row in requests:
-        blocker = _first(row, "blocking_session_id", "blocking_pid", "blocking_pids")
-        blocked = _int(blocker) not in (None, 0) or isinstance(blocker, list) and bool(blocker)
-        value = _duration(_first(row, "wait_time_ms", "wait_ms", "wait_time")) if blocked else None
-        if value:
-            blocked_durations.append(value)
-    if blocked_durations:
-        timing["longest_block"] = max(blocked_durations, key=lambda item: item[0])[1]
+    if sqlserver_slow:
+        longest_block = _duration(details.get("longest_blocked_lock_wait_ms"))
+    else:
+        blocked_durations = []
+        for row in requests:
+            blocker = _first(row, "blocking_session_id", "blocking_pid", "blocking_pids")
+            blocked = _int(blocker) not in (None, 0) or isinstance(blocker, list) and bool(blocker)
+            value = _duration(_first(row, "wait_time_ms", "wait_ms", "wait_time")) if blocked else None
+            if value:
+                blocked_durations.append(value)
+        longest_block = max(blocked_durations, default=None)
+    if longest_block:
+        timing["longest_block"] = longest_block[1]
     wait_evidence = wait_finding.evidence.get("requests") if wait_finding else None
     wait_rows = wait_evidence if isinstance(wait_evidence, list) and wait_evidence else requests
     if sqlserver_slow:
@@ -583,14 +590,14 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
 
     def record_classification(target: dict[str, Any], kind: str, label: str | None,
                               references: tuple[dict[str, Any], ...],
-                              uncertainty: tuple[str, ...]) -> None:
-        rule_label = label or (_TRIAGE_KIND_RULES.get(kind) if uncertainty else None)
+                              uncertainty: tuple[str, ...], *, not_triggered: bool = False) -> None:
+        rule_label = label or (_TRIAGE_KIND_RULES.get(kind) if uncertainty or not_triggered else None)
         if not rule_label or rule_label not in _TRIAGE_RULE_IDS:
             return
         evidence = target.setdefault("classification_evidence", {})
         entry = evidence.setdefault(rule_label, {
             "rule_id": _TRIAGE_RULE_IDS[rule_label],
-            "status": "UNKNOWN" if label is None else "CONFIRMED",
+            "status": "NOT_TRIGGERED" if not_triggered else "UNKNOWN" if label is None else "CONFIRMED",
             "evidence_references": [],
             "uncertainty_reasons": [],
         })
@@ -606,7 +613,8 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
 
     def add(row: dict[str, Any], kind: str, reason: str, *, label: str | None = None,
             evidence_references: tuple[dict[str, Any], ...] = (),
-            uncertainty_reasons: tuple[str, ...] = (), add_signal: bool = True) -> None:
+            uncertainty_reasons: tuple[str, ...] = (), add_signal: bool = True,
+            not_triggered: bool = False) -> None:
         sid = _first(row, "session_id", "pid", "processlist_id", "sid")
         if sid is None:
             return
@@ -635,7 +643,8 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
             previous["uncertainty_reasons"] = uncertainties
             previous["classification_status"] = (
                 "UNKNOWN" if not labels else "PARTIAL" if uncertainties else "CONFIRMED")
-            record_classification(previous, kind, label, evidence_references, uncertainty_reasons)
+            record_classification(previous, kind, label, evidence_references, uncertainty_reasons,
+                                  not_triggered=not_triggered)
             return
         session_key = f"{inst_id}:{sid}" if inst_id is not None else str(sid)
         session = session_map.get(session_key, {})
@@ -743,7 +752,7 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
             "identity_reuse_note": "会话 ID 可能已复用；必须在人工操作前重新核对当前会话身份。",
         }
         record_classification(selected[identity_key], kind, label,
-                              evidence_references, uncertainty_reasons)
+                              evidence_references, uncertainty_reasons, not_triggered=not_triggered)
 
     roots = [row for row in details.get("roots", []) if isinstance(row, dict)]
     sessions_list = details.get("all_sessions", details.get("sessions", []))
@@ -789,6 +798,9 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
     tx_titles = {"IDLE_TRANSACTION", "IDLE_IN_TRANSACTION", "IDLE_TRANSACTION_BLOCKER",
                  "LONG_TRANSACTION", "LONG_RUNNING_TRANSACTION"}
     tx_findings = [item for item in report.findings if item.title in tx_titles]
+    tx_samples_complete = all(samples.get(name, {}).get("success") is True and
+                              not samples.get(name, {}).get("truncated")
+                              for name in ("active_sessions", "transactions"))
 
     def has_transaction_finding(row: dict[str, Any]) -> bool:
         key = native_key(row)
@@ -826,7 +838,7 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
                              ("Root attribution is incomplete, anomalous, or not backed by a complete blocking sample.",)))
         root_refs = [root_ref]
         age = row.get("transaction_age_seconds")
-        tx_label = (root_complete and not identity_conflict and has_transaction_finding(row)
+        tx_label = (db_type != "sqlserver" and root_complete and not identity_conflict and has_transaction_finding(row)
                     and type(age) is int and age > 0
                     and row.get("unfinished_transaction_confirmed") is not False)
         if tx_label:
@@ -838,6 +850,32 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
         add(row, "ROOT_BLOCKER", "已采样阻塞关系表明该会话为根阻塞候选。",
             label="ROOT_BLOCKER" if root_confirmed else None,
             evidence_references=tuple(root_refs), uncertainty_reasons=root_uncertainty)
+        if db_type == "sqlserver":
+            if tx_samples_complete and row.get("unfinished_transaction_confirmed") is False:
+                continue
+            verified = (row.get("transaction_observed") is True and row.get("transaction_identity_verified") is True
+                        and row.get("unfinished_transaction_confirmed") is True)
+            age_seconds = _int(age)
+            transaction_threshold = SQLSERVER_LONG_TRANSACTION_SECONDS
+            tx_ref = _slow_sample_reference(details, "transactions", "details.roots[session].transaction_age_seconds", {
+                "transaction_id": row.get("transaction_id"), "transaction_age_seconds": age_seconds,
+                "transaction_identity_verified": row.get("transaction_identity_verified"),
+                "threshold_seconds": transaction_threshold,
+            })
+            tx_uncertainty: tuple[str, ...]
+            if not tx_samples_complete:
+                tx_uncertainty = ("会话或事务采样不完整，无法核验长事务规则。",)
+            elif not verified:
+                tx_uncertainty = ("会话与未结束事务的关联未核验，无法判断是否为长事务。",)
+            elif age_seconds is None:
+                tx_uncertainty = ("事务身份已核验，但缺少有效的事务持续时间。",)
+            else:
+                tx_uncertainty = ()
+            triggered = not tx_uncertainty and age_seconds is not None and age_seconds >= transaction_threshold
+            add(row, "LONG_RUNNING_TRANSACTION", "按已核验事务的持续时间评估长事务规则。",
+                label="LONG_RUNNING_TRANSACTION" if triggered else None, evidence_references=(tx_ref,),
+                uncertainty_reasons=tx_uncertainty, add_signal=False, not_triggered=not tx_uncertainty and not triggered)
+            continue
         if tx_label:
             add(row, "LONG_RUNNING_TRANSACTION", "现有事务分析已按事务持续时间/阻塞语义标记，且有事务时长证据。",
                 label="LONG_RUNNING_TRANSACTION",

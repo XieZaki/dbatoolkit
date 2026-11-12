@@ -814,7 +814,7 @@ def test_oracle_transaction_start_time_is_not_inferred_when_missing() -> None:
     model = build_report_model(report, summary)
     transaction_section = next(section for section in model.sections
                                 if section.section_id == "transaction-analysis")
-    assert transaction_section.tables[0].rows[0][2] == "—"
+    assert transaction_section.tables[0].rows[0][2] == "未采集（事务记录缺少开始时间）"
     assert transaction_section.tables[0].rows[0][3] == "V$TRANSACTION.START_DATE"
     cli = render_emergency_triage(report, build_priority_candidates(report), capture_started_at="sample")
     assert "事务开始时间：未知（V$TRANSACTION.START_DATE 未提供有效值）" in cli
@@ -962,9 +962,10 @@ def test_cli_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     report_path = tmp_path / "oracle.html"
     assert main([*prefix, "diagnose", instance.id, "slow", "--report", str(report_path), "--json"],
                 provider=provider, driver=driver) == 0
-    capsys.readouterr()
-    assert "长运行请求 1 条" in report_path.read_text(encoding="utf-8")
-    assert "TOPSECRET" not in report_path.read_text(encoding="utf-8")
+    assert json.loads(capsys.readouterr().out)["incident_summary"]["impact"]["long_running"] == 1
+    page = report_path.read_text(encoding="utf-8")
+    assert "06 SQL 资源消耗与等待分析" in page and "运行时长估计" in page
+    assert "TOPSECRET" not in page
     _, _, _, driver = fixture()
     assert main([*prefix, "diagnose", instance.id, "top-sql", "--json"],
                 provider=provider, driver=driver) == 0

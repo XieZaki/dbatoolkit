@@ -10,6 +10,7 @@ from dba.core import DatabaseInstance, DatabaseType, DiagnosticReport, Finding, 
 from dba.incident import build_incident_summary, build_performance_triage, build_priority_candidates
 from dba.presentation import render_emergency_triage, render_json
 from dba.reporting import HtmlReportRenderer, build_report_model
+from dba.settings import SQLSERVER_LONG_TRANSACTION_SECONDS
 from dba.slow import SlowReport
 
 NOW = datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc)
@@ -29,15 +30,15 @@ def _samples(db_type: DatabaseType, *, truncated: bool = False) -> list[dict]:
 
 
 def _chain_report(*, truncated: bool = False) -> DiagnosticReport:
-    findings = (Finding("LONG_TRANSACTION", Severity.WARNING,
-                        {"session_id": 10, "transaction_id": "tx-a", "transaction_age_seconds": 300},
-                        "Review transaction age."),)
+    age = SQLSERVER_LONG_TRANSACTION_SECONDS
     details = {
         "version": "16.0",
-        "samples": _samples(DatabaseType.SQLSERVER, truncated=truncated),
+        "samples": [*_samples(DatabaseType.SQLSERVER, truncated=truncated),
+                    {"collector": "active_sessions", "success": True, "truncated": False}],
         "blocking_graph": {"roots": [10], "children": {10: [20], 20: [30]}, "anomalies": []},
-        "roots": [{"session_id": 10, "blocked_count": 2, "transaction_age_seconds": 300,
-                   "transaction_id": "tx-a", "elapsed_ms": 17000}],
+        "roots": [{"session_id": 10, "blocked_count": 2, "transaction_age_seconds": age,
+                   "transaction_id": 101, "elapsed_ms": 17000, "transaction_observed": True,
+                   "transaction_identity_verified": True, "unfinished_transaction_confirmed": True}],
         "all_sessions": [{"session_id": sid} for sid in (10, 20, 30, 40)],
         "all_requests": [
             {"session_id": 20, "request_id": 1, "blocking_session_id": 10, "elapsed_ms": 90000},
@@ -50,7 +51,7 @@ def _chain_report(*, truncated: bool = False) -> DiagnosticReport:
             {"session_id": 40, "elapsed_ms": 14000},
         ],
     }
-    return _report(DatabaseType.SQLSERVER, details, findings)
+    return _report(DatabaseType.SQLSERVER, details)
 
 
 def test_three_level_chain_preserves_victim_intermediate_root_and_independent_labels() -> None:
@@ -59,7 +60,7 @@ def test_three_level_chain_preserves_victim_intermediate_root_and_independent_la
     by_sid = {item["native_identity"]["session_id"]: item for item in triage["assessments"]}
 
     assert by_sid[10]["classifications"] == ["ROOT_BLOCKER", "LONG_RUNNING_TRANSACTION"]
-    assert by_sid[10]["priority_basis"]["transaction_age_seconds"] == 300
+    assert by_sid[10]["priority_basis"]["transaction_age_seconds"] == SQLSERVER_LONG_TRANSACTION_SECONDS
     assert by_sid[10]["priority_basis"]["runtime_seconds"] == 17.0
     assert "INDEPENDENT_SLOW_SQL" not in by_sid[10]["classifications"]
     assert by_sid[10]["classification_evidence"]["ROOT_BLOCKER"]["rule_id"] == "TRIAGE-ROOT-01"
@@ -220,12 +221,12 @@ def test_cli_and_html_share_labels_sources_and_uncertainty_without_sql_text() ->
         report, build_incident_summary(report, "reports/lab_slow.html")))
     assert serialized_triage["assessments"] == triage["assessments"]
     assert "依据 ROOT_BLOCKER" in console
-    assert "ROOT_BLOCKER (TRIAGE-ROOT-01" in html
-    for output in (console, html):
-        assert "INTERMEDIATE_BLOCKER" in output
+    assert "根阻塞会话 (TRIAGE-ROOT-01" in html
+    for output, classification in ((console, "INTERMEDIATE_BLOCKER"), (html, "中间阻塞会话")):
+        assert classification in output
         assert "TRIAGE-INTERMEDIATE-01" in output or "TRIAGE-ROOT-01" in output
         assert "active_requests" in output or "blocking" in output
-    assert "NOT_ESTABLISHED" in html
+    assert "根因状态：尚未确定" in html
     assert "blocking" in html or "active_requests" in html
     assert triage["database_id"] == "lab"
     assert triage["server_version"] == "16.0"
@@ -264,8 +265,9 @@ def test_empty_or_partial_cli_triage_exposes_status_and_evidence_limits(
     assert any(expected_reason in reason for reason in triage["unknown_reasons"])
     assert expected_reason in console
     assert json_result["details"]["performance_triage"] == triage
-    assert expected_status in html
-    assert expected_reason in html
+    expected_html = ("总体状态：未知", "本次未观测到分诊候选") if expected_status == "UNKNOWN" else (
+        "总体状态：部分可用", "阻塞证据来源 active_requests 已截断")
+    assert all(fragment in html for fragment in expected_html)
 
 
 def test_evidence_references_never_copy_captured_sql_or_credentials() -> None:

@@ -28,6 +28,7 @@ def report(*, block: bool = False, incomplete: bool = False,
                         "blocked_requests": 1 if block else 0},
         "blocking_graph": {"anomalies": [], "roots": [11] if block else [],
                             "children": {"11": [12]} if block else {}, "unresolved": []},
+        "longest_blocked_lock_wait_ms": 45000 if block else None,
         "top_requests": ([{"session_id": 12, "elapsed_ms": 120000,
                            "blocking_session_id": 11, "wait_time_ms": 45000,
                            "wait_type": "LCK_M_X"}] if block else

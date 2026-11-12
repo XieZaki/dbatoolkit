@@ -68,6 +68,8 @@ class ReportSection:
     tables: tuple[ReportTable, ...] = ()
     code_blocks: tuple[ReportCodeBlock, ...] = ()
     collapsed: bool = False
+    detail_fields: tuple[tuple[str, str], ...] = ()
+    summary_link: str | None = None
 
 
 @dataclass(frozen=True)

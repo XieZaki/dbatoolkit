@@ -17,6 +17,8 @@ from dba.reporting.normalizers import (
     display_report_summary,
     display_report_value,
     display_scenario,
+    display_slow_label,
+    display_slow_value,
 )
 
 
@@ -24,13 +26,18 @@ def _escape(value: object) -> str:
     return escape(str(redact(value)), quote=True)
 
 
-def _report_value(label: str, value: str) -> str:
+def _severity_badge(severity: str) -> str:
+    severity_class = _escape(severity.upper())
+    return f' <span class="badge {severity_class}">{_escape(_label(severity))}</span>'
+
+
+def _report_value(label: str, value: str, *, slow: bool = False) -> str:
     normalized = " ".join(label.replace("_", " ").split()).casefold()
-    if normalized in {"database type", "database engine", "type", "数据库类型"}:
+    if normalized in {"database type", "database engine", "数据库类型"} or normalized == "type" and not slow:
         return display_database_type(value)
     if normalized in {"scenario", "diagnostic scenario", "诊断场景"}:
-        return display_scenario(value)
-    return display_report_value(label, value)
+        return display_scenario(value.casefold() if slow else value)
+    return display_slow_value(label, value) if slow else display_report_value(label, value)
 
 
 class HtmlReportRenderer:
@@ -50,14 +57,16 @@ class HtmlReportRenderer:
 
     def _table(self, table: ReportTable, *, table_id: str | None = None,
                session_search: bool = False, tree: bool = False,
-               section_id: str | None = None) -> str:
-        headers = "".join(f"<th scope=\"col\">{_escape(_label(header))}</th>" for header in table.headers)
+               section_id: str | None = None, slow: bool = False) -> str:
+        label = display_slow_label if slow else _label
+        headers = "".join(f"<th scope=\"col\">{_escape(label(header))}</th>" for header in table.headers)
         links = {(row_index, column_index): target
                  for row_index, column_index, target in getattr(table, "cell_links", ())
                  if type(row_index) is int and type(column_index) is int and isinstance(target, str)
                  and re.fullmatch(r"#[a-z][a-z0-9_-]{0,100}", target)}
         state_labels = {
             "blocked": ("danger", "已确认参与阻塞"),
+            "observed-blocking": ("caution", "已观测阻塞，阻塞图不完整"),
             "clear": ("clear", "完整采样确认未参与阻塞"),
             "partial": ("caution", "阻塞状态未能确认"),
         }
@@ -81,7 +90,7 @@ class HtmlReportRenderer:
                 header = table.headers[column_index] if is_status else ""
                 display_cell = (display_quality_impact(str(value))
                                 if section_id == "collection-quality" and header == "Impact" else
-                                display_report_value(header, str(value)) if is_status else str(value))
+                                _report_value(header, str(value), slow=slow) if is_status else str(value))
                 escaped = (f'<span class="state-badge {badge_class}">{_escape(_label(display_cell))}</span>'
                            if badge_class else _escape(display_cell))
                 state = table.row_states[row_index] if row_index < len(table.row_states) else ""
@@ -91,10 +100,10 @@ class HtmlReportRenderer:
                 target = links.get((row_index, column_index))
                 if target is not None:
                     escaped = f'<a href="{_escape(target)}">{escaped}</a>'
-                cell_class = ' class="tree-session"' if tree and column_index == 1 else ""
+                cell_class = ' class="tree-session"' if tree and header == "Session" else ""
                 cells.append(f"<td{cell_class}>{escaped}</td>")
             state = table.row_states[row_index] if row_index < len(table.row_states) else ""
-            if state not in {"blocked", "clear", "partial"}:
+            if state not in {"blocked", "clear", "partial", "observed-blocking"}:
                 state = ""
             row_class = f' class="row-{state}" data-diagnostic-state="{state}"' if state else ""
             rendered_rows.append(f"<tr{row_class}>" + "".join(cells) + "</tr>")
@@ -106,9 +115,15 @@ class HtmlReportRenderer:
         return f'<div class="table-wrap">{table_markup}</div>'
 
     def _section(self, section: ReportSection, *, slow: bool = False) -> str:
-        fields = "".join(self._fragment("field.html", LABEL=_escape(_label(label)),
-                                        VALUE=_escape(_report_value(label, value)))
-                         for label, value in section.fields)
+        label = display_slow_label if slow else _label
+
+        def fields_markup(fields: tuple[tuple[str, str], ...]) -> str:
+            if not fields:
+                return ""
+            items = "".join(self._fragment("field.html", LABEL=_escape(label(field)),
+                                           VALUE=_escape(_report_value(field, value, slow=slow)))
+                            for field, value in fields)
+            return f'<dl class="fields">{items}</dl>'
         searchable = section.section_id in {"appendix", "session-sources"}
         tables = "".join(self._table(
             table,
@@ -116,12 +131,13 @@ class HtmlReportRenderer:
                       "sessionIdentityTable" if section.section_id == "session-sources" and index == 0 else
                       f"{section.section_id}-table-{index + 1}" if slow else None),
             session_search=searchable,
-            tree=section.section_id == "blocking", section_id=section.section_id)
+            tree=section.section_id == "blocking", section_id=section.section_id, slow=slow)
             for index, table in enumerate(section.tables))
         blocks: list[str] = []
         for block in section.code_blocks:
             code = self._fragment("code_block.html", TITLE=_escape(_label(block.title)),
-                                  LANGUAGE=_escape(block.language), CONTENT=_escape(block.content))
+                                  LANGUAGE=_escape("SQL" if slow and block.language == "sql" else block.language),
+                                  CONTENT=_escape(block.content))
             if slow:
                 copy_button = (f'<button class="button button-copy" type="button" data-copy="{_escape(block.content)}">'
                                '复制文本</button>')
@@ -137,13 +153,19 @@ class HtmlReportRenderer:
                 blocks.append(detail)
             else:
                 blocks.append(code)
-        summary = f"<p>{_escape(display_report_summary(section.summary))}</p>" if section.summary else ""
-        field_markup = f'<dl class="fields">{fields}</dl>' if fields else ""
-        body = summary + field_markup + tables + "".join(blocks)
-        severity = _escape(section.severity.upper())
+        summary_text = _escape(section.summary if section.summary_link else display_report_summary(section.summary))
+        if section.summary_link and re.fullmatch(r"#[a-z][a-z0-9_-]{0,100}", section.summary_link):
+            summary_text = f'<a href="{_escape(section.summary_link)}">{summary_text}</a>'
+        summary = f"<p>{summary_text}</p>" if section.summary else ""
+        detail = (self._fragment("details.html", TITLE="连接与请求详情", BODY=fields_markup(section.detail_fields))
+                  .replace("<details>", '<details data-expandable>', 1) if section.detail_fields else "")
+        body = summary + fields_markup(section.fields) + tables + "".join(blocks) + detail
+        ordinary_sql_card = (section.severity.upper() == "INFO" and
+                             section.section_id.startswith(("current-request-", "sql-resource-")))
         section_html = self._fragment("section.html", ID=_escape(section.section_id),
-                                      TITLE=_escape(_label(section.title)), SEVERITY_CLASS=severity,
-                                      SEVERITY=_escape(_label(severity)), BODY=body)
+                                      TITLE=_escape(_label(section.title)),
+                                      BADGE="" if ordinary_sql_card else _severity_badge(section.severity),
+                                      BODY=body)
         if slow:
             section_html = section_html.replace("<section id=", '<section class="report-section" id=', 1)
             if section.section_id == "immediate-recovery":
@@ -194,8 +216,7 @@ class HtmlReportRenderer:
                                for label, value in summary_fields)
         summary_section = self._fragment(
             "section.html", ID="incident-summary", TITLE="故障概况",
-            SEVERITY_CLASS=_escape(incident.severity.upper()),
-            SEVERITY=_escape(_label(incident.severity)),
+            BADGE=_severity_badge(incident.severity),
             BODY=f"<div class=\"summary-metrics\">{summary_metrics}</div>"
                  f"<dl class=\"fields\">{summary_body}</dl>")
 
@@ -279,7 +300,13 @@ class HtmlReportRenderer:
         if any(section.section_id == "report-budget" for section in model.sections):
             # Evidence was already reduced by the shared policy. Keep the final shell
             # compact enough to honor a caller's hard byte ceiling.
-            return self.render(replace(model, scenario="bounded-slow"))
+            targets = {f"#{section.section_id}" for section in model.sections}
+            bounded_sections = tuple(replace(
+                section,
+                tables=tuple(replace(table, cell_links=tuple(
+                    link for link in table.cell_links if link[2] in targets)) for table in section.tables),
+            ) for section in model.sections)
+            return self.render(replace(model, scenario="bounded-slow", sections=bounded_sections))
         incident = model.incident_summary
         sections = {section.section_id: section for section in model.sections}
         metadata = dict(model.metadata)
@@ -295,7 +322,7 @@ class HtmlReportRenderer:
                         incident.data_completeness != "COMPLETE" else "unknown")
         metadata_html = "".join(
             f'<div class="hero-meta-item"><span>{_escape(_label(key))}</span>'
-            f'<strong>{_escape(_report_value(key, value))}</strong></div>'
+            f'<strong>{_escape(_report_value(key, value, slow=True))}</strong></div>'
             for key, value in model.metadata)
 
         def meta_value(*keys: str, default: str = "UNKNOWN") -> str:
@@ -313,27 +340,44 @@ class HtmlReportRenderer:
 
         impact = incident.impact
         timing = incident.timing
+        open_transactions = pick(impact, "open_transactions", "idle_transactions", "long_transactions")
+        sqlserver_slow = database_type == "sqlserver" and model.scenario == "slow"
+        if open_transactions is None and sqlserver_slow:
+            open_transactions = _label("UNKNOWN")
+
+        def sampled_count(value: object | None) -> object | None:
+            return None if value == 0 and incident.data_completeness != "COMPLETE" else value
+
         metrics = (
-            ("阻塞请求", pick(impact, "blocked_requests", "blocked_sessions", "blocked_statements")),
-            ("活动请求", pick(impact, "active_requests", "active_sessions")),
-            ("未结束事务", pick(impact, "open_transactions", "idle_transactions", "long_transactions")),
-            ("最长阻塞", pick(timing, "longest_block", "longest_blocking", "blocking_duration")),
+            ("活动 SQL 会话" if "active_sql_sessions" in impact else
+             "活动语句" if "active_statements" in impact else
+             "活动会话" if "active_sessions" in impact and "active_requests" not in impact else "活动请求",
+             sampled_count(pick(impact, "active_requests", "active_sql_sessions", "active_statements", "active_sessions"))),
+            ("阻塞请求" if "blocked_requests" in impact else
+             "阻塞会话" if "blocked_sessions" in impact else
+             "受阻语句" if "blocked_statements" in impact else "阻塞请求",
+             sampled_count(pick(impact, "blocked_requests", "blocked_sessions", "blocked_statements"))),
+            ("根阻塞会话", sampled_count(pick(impact, "root_blockers"))),
+            ("未结束事务", open_transactions),
+            ("最长受阻锁等待" if sqlserver_slow else "最长阻塞",
+             pick(timing, "longest_block", "longest_blocking", "blocking_duration")),
         )
         metric_html = "".join(
-            f'<article class="metric {"danger" if label == "阻塞请求" and value not in (None, 0, "0") else ""}">'
-            f'<span class="metric-label">{_escape(label)}</span><strong>{_escape("—" if value is None else value)}</strong></article>'
+            f'<article class="metric {"danger" if label in {"阻塞请求", "阻塞会话", "受阻语句"} and value not in (None, 0, "0") else ""}">'
+            f'<span class="metric-label">{_escape(label)}</span><strong>{_escape("未知" if value is None else value)}</strong></article>'
             for label, value in metrics)
         summary_lines = [
             f"诊断：{model.title}",
             f"实例：{meta_value('Instance', '实例')}",
             f"数据库：{display_database_type(meta_value('Database Type', '数据库类型'))} / "
-            f"{meta_value('Version', '版本')}",
-            f"采集：{meta_value('Capture Started', '采集开始', default='N/A')} — "
-            f"{meta_value('Capture Finished', '采集结束', default='N/A')}",
-            f"一致性：{_label(meta_value('Snapshot Consistency', '快照一致性', default='UNKNOWN'))}",
+            f"{display_slow_label(meta_value('Version', '版本'))}",
+            f"采集：{display_slow_label(meta_value('Capture Started', '采集开始', default='N/A'))} — "
+            f"{display_slow_label(meta_value('Capture Finished', '采集结束', default='N/A'))}",
+            f"一致性：{display_slow_label(meta_value('Snapshot Consistency', '快照一致性', default='UNKNOWN'))}",
+            f"采集完整性：{display_slow_value('采集完整性', incident.data_completeness)}",
             f"状态：{status_display} / {_label(severity)}；问题：{primary_problem_display}；观测：{observed_now_display}",
-            *[f"影响 {_label(key)}：{value}" for key, value in incident.impact.items()],
-            *[f"时间 {_label(key)}：{value}" for key, value in incident.timing.items()],
+            *[f"{label if label.startswith('最长') else label + '数'}：{'未知' if value is None else value}"
+              for label, value in metrics],
         ]
         summary_copy = "\n".join(summary_lines)
 
@@ -345,31 +389,37 @@ class HtmlReportRenderer:
                 section = replace(section, collapsed=True)
             return self._section(section, slow=True)
 
-        root_blockers = render_section("root-blockers")
-        root_cause = render_section("root-cause")
         chain = render_section("blocking")
+        problems = "".join(self._section(section, slow=True) for section in model.sections
+                           if section.section_id.startswith("diagnosis-"))
         recovery = render_section("immediate-recovery")
         quality = render_section("collection-quality")
+        transactions = render_section("transaction-analysis")
         current_requests_html = "".join(
             self._section(section, slow=True)
             for section in model.sections
             if section.section_id == "request-runtime"
             or section.section_id.startswith("current-request-")
         )
-        appendix_sections = "".join(render_section(item, collapsed=True)
-                                    for item in ("session-sources", "appendix") if item in sections)
-        reserved = {"root-blockers", "root-cause", "blocking", "immediate-recovery",
-                    "collection-quality", "session-sources", "appendix", "request-runtime"}
+        performance_ids = ("observed-wait", "workload-summary", "nonblocked-long-running", "active-waits")
+        resource_ids = tuple(section.section_id for section in model.sections if section.section_id.startswith("sql-resource-"))
+        performance = "".join(render_section(item) for item in resource_ids)
+        resource_scope = "没有可展示的资源卡，活动请求采集状态见第 03 节。"
+        if resource_ids:
+            resource_scope = ("资源计数从当前请求开始累计至采集时刻，展示范围见第 03 节。"
+                              if sqlserver_slow else "按活动请求展示已采集的资源与等待，展示范围见第 03 节。")
+        reserved = {"blocking", "immediate-recovery", "transaction-analysis",
+                    "collection-quality", "request-runtime", *resource_ids, *performance_ids,
+                    "findings", "priority-candidates", "root-related-requests", "blocked-long-running", "blocked-victims"}
         reserved.update(section.section_id for section in model.sections
-                        if section.section_id.startswith("current-request-"))
+                        if section.section_id.startswith(("current-request-", "diagnosis-")))
         evidence_sections = "".join(
             render_section(section.section_id, collapsed=True)
             for section in model.sections if section.section_id not in reserved)
-        toc_items = [("summary", "故障概况"), ("current-requests", "当前活动 SQL"),
-                     ("root-assessment", "根阻塞判断"),
-                     ("blocking-chain", "阻塞传播链"), ("manual-action", "人工处置参考"),
-                     ("evidence", "诊断证据"), ("collection-quality", "采集完整性"),
-                     ("session-appendix", "会话附录")]
+        toc_items = [("summary", "诊断概况"), ("root-assessment", "性能问题诊断"),
+                     ("current-requests", "当前活动 SQL"), ("blocking-chain", "阻塞关系"),
+                     ("transactions", "事务分析"), ("evidence", "SQL 资源消耗与等待分析"),
+                     ("session-appendix", "高级诊断附录")]
         toc = "".join(f'<a href="#{anchor}">{_escape(label)}</a>' for anchor, label in toc_items)
         page = self._template("slow_report.html")
         values = {
@@ -378,15 +428,16 @@ class HtmlReportRenderer:
             "STATUS_CLASS": status_class,
             "PRIMARY_PROBLEM": _escape(primary_problem_display),
             "OBSERVED_NOW": _escape(observed_now_display),
-            "COMPLETENESS": _escape(_label(incident.data_completeness)),
-            "SNAPSHOT_CONSISTENCY": _escape(_label(meta_value(
+            "COMPLETENESS": _escape(display_slow_value("采集完整性", incident.data_completeness)),
+            "SNAPSHOT_CONSISTENCY": _escape(display_slow_label(meta_value(
                 "Snapshot Consistency", "快照一致性", default="UNKNOWN"))),
             "METADATA": metadata_html, "METRICS": metric_html,
-            "TOC": toc, "ROOT_ASSESSMENT": root_blockers + root_cause,
+            "TOC": toc, "ROOT_ASSESSMENT": problems,
             "CURRENT_REQUESTS": current_requests_html,
             "BLOCKING_CHAIN": chain, "RECOVERY": recovery,
-            "EVIDENCE": evidence_sections, "QUALITY": quality,
-            "APPENDIX": appendix_sections, "SUMMARY_COPY": _escape(summary_copy),
+            "TRANSACTIONS": transactions, "RESOURCE_SCOPE": _escape(resource_scope),
+            "EVIDENCE": performance, "QUALITY": quality,
+            "APPENDIX": evidence_sections, "SUMMARY_COPY": _escape(summary_copy),
         }
         for key, value in values.items():
             page = page.replace("{{" + key + "}}", value)

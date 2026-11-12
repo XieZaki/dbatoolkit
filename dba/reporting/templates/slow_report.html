@@ -64,8 +64,8 @@
     .hero-description { max-width:880px; margin:0; color:var(--hero-description); font-size:11px; line-height:1.85; overflow-wrap:anywhere; }
     .hero-meta { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-top:21px; padding-top:15px; border-top:1px solid var(--hero-meta-stroke); }
     .hero-meta-item { min-width:0; }
-    .hero-meta-item span { display:block; color:var(--hero-muted); font-size:9px; }
-    .hero-meta-item strong { display:block; margin-top:3px; color:var(--surface); font-size:10px; font-weight:650; overflow-wrap:anywhere; }
+    .hero-meta-item span { display:block; color:var(--hero-muted); font-size:12px; }
+    .hero-meta-item strong { display:block; margin-top:3px; color:var(--surface); font-size:12px; font-weight:650; overflow-wrap:anywhere; }
     .overview { margin:21px 0 26px; }
     .section-heading { display:flex; align-items:end; justify-content:space-between; gap:14px; margin:0 0 11px; }
     .section-heading h2 { margin:0; color:var(--navy); font-size:16px; font-weight:780; line-height:1.35; }
@@ -79,12 +79,12 @@
     .report-section .section-heading { align-items:center; padding-bottom:11px; border-bottom:1px solid var(--stroke); }
     .report-section .section-heading h2 { font-size:14px; }
     .report-section .section-heading .badge { margin-left:7px; }
-    .report-section p { color:var(--muted); font-size:10px; line-height:1.75; overflow-wrap:anywhere; }
+    .report-section p { color:var(--muted); font-size:12px; line-height:1.75; overflow-wrap:anywhere; }
     .panel-group { min-width:0; margin-top:22px; scroll-margin-top:14px; }
     .panel-group > .section-heading { padding-bottom:9px; border-bottom:1px solid var(--stroke-strong); }
     .fields { display:grid; grid-template-columns:minmax(150px,230px) minmax(0,1fr); gap:7px 14px; margin:12px 0; }
-    .fields dt { color:var(--muted); font-size:10px; font-weight:680; }
-    .fields dd { margin:0; color:var(--ink); font-size:10px; overflow-wrap:anywhere; }
+    .fields dt { color:var(--muted); font-size:12px; font-weight:680; overflow-wrap:anywhere; }
+    .fields dd { margin:0; color:var(--ink); font-size:12px; overflow-wrap:anywhere; }
     .badge { display:inline-block; border-radius:5px; padding:3px 7px; background:var(--blue-bg); color:var(--blue); font-size:9px; font-weight:780; overflow-wrap:anywhere; }
     .badge.CRITICAL,.badge.HIGH { background:var(--red-bg); color:var(--red); }
     .badge.WARNING { background:var(--amber-bg); color:var(--amber); }
@@ -92,9 +92,9 @@
     .state-badge { display:inline-block; max-width:100%; border-radius:5px; padding:3px 7px; font-size:9px; font-weight:760; overflow-wrap:anywhere; }
     .state-badge.danger { background:var(--red-bg);color:var(--red); }.state-badge.clear { background:var(--green-bg);color:var(--green); }.state-badge.caution { background:var(--amber-bg);color:var(--amber); }
     .table-wrap { width:100%; min-width:0; max-width:100%; overflow-x:auto; overscroll-behavior-x:contain; }
-    table { width:100%; min-width:650px; margin:11px 0; border-collapse:collapse; font-size:10px; font-variant-numeric:tabular-nums; }
+    table { width:100%; min-width:650px; margin:11px 0; border-collapse:collapse; font-size:11px; font-variant-numeric:tabular-nums; }
     th,td { padding:8px 9px; border:1px solid var(--stroke); text-align:left; vertical-align:top; overflow-wrap:anywhere; }
-    th { position:sticky; top:0; background:var(--surface-soft); color:var(--muted); font-size:9px; font-weight:760; }
+    th { position:sticky; top:0; background:var(--surface-soft); color:var(--muted); font-size:11px; font-weight:760; }
     td { color:var(--ink); }
     .tree-session { white-space:pre; font-family:var(--font-code); font-weight:720; }
     tbody tr.row-blocked td { background:var(--red-bg); }
@@ -108,6 +108,8 @@
     .code-block { position:relative; min-width:0; margin:10px 0; padding:13px; border:1px solid var(--stroke); border-radius:var(--radius-panel); background:var(--surface-soft); }
     .code-block h3 { margin:0 0 8px; color:var(--navy); font-size:10px; font-weight:760; overflow-wrap:anywhere; }
     .code-block pre { max-width:100%; margin:0; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--ink); font:10px/1.65 var(--font-code); }
+    [id^="current-request-"] .code-block pre { max-height:25rem; overflow:auto; }
+    @media print { [id^="current-request-"] .code-block pre { max-height:none; overflow:visible; } }
     .code-copyable { padding-top:38px; }
     .code-copyable .button-copy { position:absolute; top:8px; right:8px; }
     details { min-width:0; margin:9px 0; border:1px solid var(--stroke); border-radius:var(--radius-panel); background:var(--surface); }
@@ -137,7 +139,23 @@
     @media (max-width:850px) { .shell { display:block; }.sidebar { position:static;width:auto;height:auto;padding:12px 16px;display:block;border-right:0;border-bottom:1px solid var(--stroke); }.brand { padding:0;border:0; }.nav-heading,.nav-foot { display:none; }.nav-links { display:flex;overflow-x:auto;padding-top:10px; }.nav-links a { flex:0 0 auto; }.main { padding:20px 16px 40px; }.toolbar { align-items:flex-start;flex-wrap:wrap; }.toolbar-actions { width:100%; }.report-section { padding:15px; } }
     @media (max-width:560px) { .main { padding:15px 10px 32px; }.toolbar-actions .button { flex:1 1 auto; }.hero { padding:20px 18px; }.hero-top { align-items:flex-start;flex-direction:column; }.hero h1 { font-size:24px; }.hero-meta { gap:10px; }.kpi-grid { gap:7px; }.metric { padding:11px; }.metric strong { font-size:18px; }.section-heading { align-items:flex-start;flex-direction:column;gap:4px; }.report-section { padding:13px 11px; }.fields { grid-template-columns:minmax(0,1fr);gap:2px; }.fields dd { margin-bottom:7px; }.appendix-tools { align-items:stretch;flex-direction:column; }.appendix-tools label { width:100%; }.foot { flex-direction:column;gap:3px; } }
     @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } *,*::before,*::after { transition:none!important; }.button:active:not(:disabled),.toast.show { transform:none; } }
-    @media print { :root { --canvas:var(--print-canvas);--shadow:none; }.shell { display:block; }.sidebar,.toolbar { display:none!important; }.main { max-width:none;margin:0;padding:0; }.hero { padding:18px 20px;box-shadow:none;break-inside:avoid; }.panel-group { margin-top:13px; }.report-section,details { box-shadow:none;break-inside:avoid; }.report-section { padding:12px;border-radius:0; }.table-wrap { overflow:visible; }.table-wrap table { min-width:0;font-size:8pt; }.table-wrap th,.table-wrap td { padding:4px; }.code-block pre { font-size:8pt; }.button-copy { display:none!important; } details[data-expandable] > *:not(summary) { display:block!important; }.foot { margin-top:12px; } }
+    @media print {
+      :root { --canvas:var(--print-canvas);--shadow:none; }
+      .shell { display:block; }
+      .sidebar,.toolbar,.button-copy,.appendix-tools,.empty-filter { display:none!important; }
+      .main { max-width:none;margin:0;padding:0; }
+      .hero { padding:18px 20px;box-shadow:none;break-inside:avoid; }
+      .panel-group { margin-top:13px; }
+      .panel-group > .section-heading { break-after:avoid; }
+      .report-section,details { box-shadow:none;break-inside:avoid; }
+      .report-section { padding:12px;border-radius:0; }
+      .table-wrap { overflow:visible; }
+      .table-wrap table { min-width:0; }
+      .table-wrap th,.table-wrap td { padding:4px; }
+      .code-block pre { font-size:8pt; }
+      details[data-expandable] > *:not(summary,.appendix-tools,.empty-filter) { display:block!important; }
+      .foot { margin-top:12px; }
+    }
   </style>
 </head>
 <body>
@@ -160,20 +178,20 @@
       <header class="hero" id="summary">
         <div class="hero-top"><span class="eyebrow">慢 SQL 诊断 · 只读现场快照</span><span class="status-pill {{STATUS_CLASS}}"><i class="status-dot" aria-hidden="true"></i>{{STATUS}} · {{SEVERITY}}</span></div>
         <h1>{{TITLE}}</h1>
-        <p class="hero-description">主要问题：{{PRIMARY_PROBLEM}} · 当前观测：{{OBSERVED_NOW}} · 证据完整性：{{COMPLETENESS}} · 快照一致性：{{SNAPSHOT_CONSISTENCY}}</p>
+        <p class="hero-description">主要问题：{{PRIMARY_PROBLEM}} · 当前观测：{{OBSERVED_NOW}} · 采集完整性：{{COMPLETENESS}} · 快照一致性：{{SNAPSHOT_CONSISTENCY}}</p>
         <div class="hero-meta">{{METADATA}}</div>
       </header>
       <section class="overview" aria-labelledby="overview-heading">
-        <div class="section-heading"><h2 id="overview-heading">故障概况</h2><p>摘要仅呈现本次采集已有证据</p></div>
+        <div class="section-heading"><h2 id="overview-heading">01 诊断概况</h2><p>各项指标取自各自采集时刻。采集成功说明数据已取得，诊断可信程度见问题诊断。</p></div>
         <div class="kpi-grid">{{METRICS}}</div>
       </section>
-      <section class="panel-group" id="current-requests"><div class="section-heading"><h2>当前活动 SQL</h2><p>按请求逐条展示 SQL、执行来源、运行指标和等待信息</p></div>{{CURRENT_REQUESTS}}</section>
-      <section class="panel-group" id="root-assessment"><div class="section-heading"><h2>根阻塞判断</h2><p>根候选来自已采样阻塞关系</p></div>{{ROOT_ASSESSMENT}}</section>
-      <section class="panel-group" id="blocking-chain"><div class="section-heading"><h2>阻塞传播链</h2><p>方向为阻塞者 → 直接受阻者；按实际父子关系保留任意深度和多个根</p></div>{{BLOCKING_CHAIN}}</section>
-      <section class="panel-group" id="manual-action"><div class="section-heading"><h2>人工处置参考</h2><p>只展示文本 · Toolkit 不执行 KILL、TERMINATE 或 CANCEL</p></div>{{RECOVERY}}</section>
-      <section class="panel-group" id="evidence"><div class="section-heading"><h2>诊断证据</h2><div class="legend" aria-label="状态图例"><span><i class="red" aria-hidden="true"></i>已确认参与阻塞</span><span><i class="green" aria-hidden="true"></i>完整采样确认未参与</span><span><i class="amber" aria-hidden="true"></i>部分或身份未知</span></div></div>{{EVIDENCE}}</section>
-      <section class="panel-group" id="collection-quality-panel"><div class="section-heading"><h2>采集完整性</h2><p>完整采样不代表所有风险都已排除</p></div>{{QUALITY}}</section>
-      <section class="panel-group" id="session-appendix"><div class="section-heading"><h2>会话附录</h2><p>搜索仅过滤报告已展示行</p></div><div class="appendix-tools"><span id="filteredCount" class="toolbar-label"></span><label><span aria-hidden="true">⌕</span><input id="sessionSearch" type="search" aria-label="搜索已展示的会话" placeholder="筛选会话 ID、用户或来源信息"></label></div>{{APPENDIX}}<div id="noResults" class="empty-filter">已展示的会话行中没有匹配项；未采集或被省略的会话不在本地筛选范围内。</div></section>
+      <section class="panel-group" id="root-assessment"><div class="section-heading"><h2>02 性能问题诊断</h2><p>结论与可信程度来自本次现场采样</p></div>{{ROOT_ASSESSMENT}}</section>
+      <section class="panel-group" id="current-requests"><div class="section-heading"><h2>03 当前活动 SQL</h2><p>查看当前语句、请求运行时间及执行来源</p></div>{{CURRENT_REQUESTS}}</section>
+      <section class="panel-group" id="blocking-chain"><div class="section-heading"><h2>04 阻塞关系</h2><p>按会话查看直接阻塞者与阻塞层级</p></div>{{BLOCKING_CHAIN}}</section>
+      <div class="panel-group" id="manual-action"><p>人工处置参考 · Toolkit 不执行 KILL、TERMINATE 或 CANCEL</p>{{RECOVERY}}</div>
+      <section class="panel-group" id="transactions"><div class="section-heading"><h2>05 事务分析</h2></div>{{TRANSACTIONS}}</section>
+      <section class="panel-group" id="evidence"><div class="section-heading"><h2>06 SQL 资源消耗与等待分析</h2><p>{{RESOURCE_SCOPE}}</p></div>{{EVIDENCE}}</section>
+      <details class="panel-group" id="session-appendix" data-expandable><summary>07 高级诊断附录</summary><div class="appendix-tools"><span id="filteredCount" class="toolbar-label"></span><label><span aria-hidden="true">⌕</span><input id="sessionSearch" type="search" aria-label="搜索已展示的会话" placeholder="筛选会话 ID、用户或来源信息"></label></div><div id="collection-quality-panel"><a href="#collection-quality">查看采集完整性</a>{{QUALITY}}</div>{{APPENDIX}}<div id="noResults" class="empty-filter">已展示的会话行中没有匹配项；未采集或被省略的会话不在本地筛选范围内。</div></details>
       <footer class="foot"><span>DBA Toolkit / 慢 SQL 诊断</span><span>自包含 · 离线可用 · 只读证据 · 人工复核</span></footer>
     </main>
   </div>

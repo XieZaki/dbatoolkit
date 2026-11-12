@@ -1,13 +1,15 @@
 import argparse
 import re
 import sys
-import time
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast
+from uuid import uuid4
 
 from dba import __version__
 from dba.active_sql_collectors import SQLServerActiveSQLCollector
@@ -282,6 +284,55 @@ def _diagnostic_report_path(database_id: str, scenario: str, requested: Path | N
         candidate = directory / f"{base}_{suffix:02d}.html"
         suffix += 1
     return candidate
+
+
+def _elapsed_ms(started: float, finished: float) -> int:
+    elapsed = finished - started
+    return max(1, round(elapsed * 1000)) if elapsed > 0 else 0
+
+
+def _diagnostic_collection_timings(started: float, stage_started: float, stage_finished: float,
+                                   first_summary: float | None) -> dict[str, int | None]:
+    # `started` precedes Inventory loading. The stage window includes analysis
+    # interleaved with capture, while the full window also includes setup and
+    # final diagnostic assembly, before any HTML report work.
+    return {
+        "time_to_first_summary_ms": _elapsed_ms(started, first_summary) if first_summary is not None else None,
+        "collection_ms": _elapsed_ms(stage_started, stage_finished),
+        "full_collection_ms": _elapsed_ms(started, perf_counter()),
+        "report_write_ms": None,
+        "report_write_duration_ms": None,
+        "total_report_ms": None,
+    }
+
+
+def _write_timed_diagnostic_html(path: Path, html: str, started: float,
+                                 placeholders: dict[str, str]) -> dict[str, int]:
+    data = html.encode("utf-8")
+    slots = {key: (data.index(token.encode("ascii")), len(token)) for key, token in placeholders.items()}
+    write_started = perf_counter()
+    created = False
+    try:
+        with path.open("xb") as report_file:
+            created = True
+            report_file.write(data)
+            report_file.flush()
+            # A report cannot include the time taken to write its own final
+            # timing values. Use the same content-flush endpoint for both
+            # formats, then fill only the two reserved values in place.
+            content_written = perf_counter()
+            write_duration = _elapsed_ms(write_started, content_written)
+            timings = {"report_write_ms": write_duration, "report_write_duration_ms": write_duration,
+                       "total_report_ms": _elapsed_ms(started, content_written)}
+            for key, (offset, width) in slots.items():
+                report_file.seek(offset)
+                report_file.write(f"{timings[key]} ms".ljust(width).encode("ascii"))
+    except BaseException:
+        if created:
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
+        raise
+    return timings
 
 
 def _configure_windows_pipe_encoding() -> None:
@@ -780,13 +831,14 @@ def main(
                    "backend": getattr(store, "backend_name", None)})
             return 1
     logger = configure_logging()
-    started = time.monotonic()
+    # Use the high-resolution monotonic clock for short HTML writes on Windows.
+    started = perf_counter()
     replication_log_fields: dict[str, Any] = {}
     account_security_credential: Credential | None = None
     instance_for_hint = None
     adapter_instance: Any | None = None
     version_profile_for_hint: ResolvedDiagnosticProfile | None = None
-    diagnostic_timing: dict[str, Any] | None = None
+    diagnostic_timing: dict[str, int | None] | None = None
     triage_completed_at: str | None = None
     capture_started_at: str | None = None
     capture_finished_at: str | None = None
@@ -1081,7 +1133,7 @@ def main(
                                 "No verified disk-growth diagnostic profile is available for this database version.",
                             )
                         cast(Any, adapter).disk_growth_profile = profile
-                        stage_started = time.monotonic()
+                        stage_started = perf_counter()
                         capture_started_at = datetime.now(timezone.utc).isoformat()
                         report = collect_disk_growth_phase(adapter, emergency=True)
                         report.details.update({"capture_started_at": capture_started_at,
@@ -1092,7 +1144,7 @@ def main(
                         first_summary_monotonic: float | None = None
                         if args.format == "console" and not args.json and not args.quiet:
                             print(render_emergency_triage(report, capture_started_at=capture_started_at), flush=True)
-                            first_summary_monotonic = time.monotonic()
+                            first_summary_monotonic = perf_counter()
                         disk_results = cast(tuple[CollectorResult, ...],
                                             getattr(report, "_collector_results", ()))
                         if report.details.get("emergency_evidence_complete"):
@@ -1101,6 +1153,7 @@ def main(
                         else:
                             report.details["full_profile_evidence_complete"] = False
                             report.details["full_profile_evidence_status"] = "INCOMPLETE"
+                        stage_finished = perf_counter()
                         report.details.update({"capture_started_at": capture_started_at,
                                                "triage_completed_at": triage_completed_at,
                                                "capture_finished_at": datetime.now(timezone.utc).isoformat(),
@@ -1113,13 +1166,8 @@ def main(
                                 else "无额外补充查询；HTML 报告已生成"
                             print(completion, flush=True)
                         capture_finished_at = report.details["capture_finished_at"]
-                        diagnostic_timing = {
-                            "time_to_first_summary_ms": round((first_summary_monotonic - started) * 1000)
-                            if first_summary_monotonic is not None else None,
-                            "collection_ms": round((time.monotonic() - stage_started) * 1000),
-                            "full_collection_ms": round((time.monotonic() - started) * 1000),
-                            "report_write_ms": None,
-                        }
+                        diagnostic_timing = _diagnostic_collection_timings(
+                            started, stage_started, stage_finished, first_summary_monotonic)
                         output = {"success": not report.details["incomplete"], "report": asdict(report)}
                         output["version_profile"] = asdict(profile)
                     elif args.scenario == "slow":
@@ -1136,7 +1184,7 @@ def main(
                                 "No verified slow diagnostic profile is available for this database version.",
                             )
                         cast(Any, adapter).slow_profile = profile
-                        stage_started = time.monotonic()
+                        stage_started = perf_counter()
                         capture_started_at = datetime.now(timezone.utc).isoformat()
                         emergency_names = emergency_collectors_for_adapter(adapter)
                         phase_collect: Any
@@ -1190,7 +1238,7 @@ def main(
                             print(render_emergency_triage(
                                 report, emergency_candidates, capture_started_at=capture_started_at,
                                 slow_threshold=threshold), flush=True)
-                            first_summary_monotonic = time.monotonic()
+                            first_summary_monotonic = perf_counter()
                         core_complete = cast(Any, report).details.get("emergency_evidence_complete") is True
                         if core_complete:
                             full_names = tuple(dict.fromkeys(
@@ -1218,6 +1266,8 @@ def main(
                                     "reason": "Required emergency evidence was incomplete; recent SQL was not queried.",
                                     "statements": [],
                                 }]
+                        stage_finished = perf_counter()
+                        capture_finished_at = datetime.now(timezone.utc).isoformat()
                         final_candidates = build_priority_candidates(report, include_blocking_victims=True)
                         cast(Any, report).details.update({"priority_candidates": final_candidates,
                                                "diagnostic_profile": {
@@ -1228,7 +1278,7 @@ def main(
                                                "manual_action_decisions": manual_action_decisions(report),
                                                "capture_started_at": capture_started_at,
                                                "triage_completed_at": triage_completed_at,
-                                               "capture_finished_at": datetime.now(timezone.utc).isoformat(),
+                                               "capture_finished_at": capture_finished_at,
                                                "snapshot_consistency": "BEST_EFFORT",
                                                "supplemental_pending": False})
                         final_triage = build_performance_triage(report)
@@ -1247,14 +1297,8 @@ def main(
                                 "补充证据采集结束，仍有缺失或不完整项；详见报告") if supplemental_expected \
                                 else "无额外补充查询；HTML 报告已生成"
                             print(completion, flush=True)
-                        capture_finished_at = cast(Any, report).details["capture_finished_at"]
-                        diagnostic_timing = {
-                            "time_to_first_summary_ms": round((first_summary_monotonic - started) * 1000)
-                            if first_summary_monotonic is not None else None,
-                            "collection_ms": round((time.monotonic() - stage_started) * 1000),
-                            "full_collection_ms": round((time.monotonic() - started) * 1000),
-                            "report_write_ms": None,
-                        }
+                        diagnostic_timing = _diagnostic_collection_timings(
+                            started, stage_started, stage_finished, first_summary_monotonic)
                         output = {"success": not cast(Any, report).details["incomplete"], "report": asdict(report)}
                         failed_sample = next((sample for sample in slow_samples if not sample.success), None)
                         if failed_sample is not None:
@@ -1457,20 +1501,23 @@ def main(
                 plan_artifact_path: Path | None = None
                 if args.scenario == "plan" and plan_xml:
                     plan_artifact_path = report_path.with_suffix(".sqlplan")
+                timing_placeholders = {}
+                if diagnostic_timing is not None:
+                    cast(Any, report).details["diagnostic_timings_ms"] = diagnostic_timing
+                    timing_placeholders = {key: uuid4().hex for key in ("report_write_duration_ms", "total_report_ms")}
                 model = build_report_model(report, incident_summary,
                                            plan_artifact=(plan_artifact_path.name
-                                                          if plan_artifact_path else None))
+                                                          if plan_artifact_path else None),
+                                           timing_placeholders=timing_placeholders)
                 html_content = render_bounded(model, HtmlReportRenderer().render)
-                report_write_started = time.monotonic()
-                with report_path.open("x", encoding="utf-8") as report_file:
-                    report_file.write(html_content)
-                report_write_duration_ms = round((time.monotonic() - report_write_started) * 1000)
-                report_written_at = datetime.now(timezone.utc).isoformat()
-                if diagnostic_timing is not None:
-                    diagnostic_timing["report_write_duration_ms"] = report_write_duration_ms
-                    diagnostic_timing["total_report_ms"] = round((time.monotonic() - started) * 1000)
+                if diagnostic_timing is None:
+                    with report_path.open("x", encoding="utf-8") as report_file:
+                        report_file.write(html_content)
+                else:
+                    diagnostic_timing.update(_write_timed_diagnostic_html(
+                        report_path, html_content, started, timing_placeholders))
+                    report_written_at = datetime.now(timezone.utc).isoformat()
                     cast(Any, report).details["report_written_at"] = report_written_at
-                    cast(Any, report).details["diagnostic_timings_ms"] = diagnostic_timing
                     output["report"] = asdict(report)
                     output["capture_started_at"] = capture_started_at
                     output["triage_completed_at"] = triage_completed_at
@@ -1525,7 +1572,7 @@ def main(
                 "event": {
                     "module": "cli",
                     "result": "ok",
-                    "elapsed_time": time.monotonic() - started,
+                    "elapsed_time": perf_counter() - started,
                     "database_id": getattr(args, "database_id", None),
                     **replication_log_fields,
                 }
@@ -1627,7 +1674,7 @@ def main(
                 "event": {
                     "module": "cli",
                     "result": "failed",
-                    "elapsed_time": time.monotonic() - started,
+                    "elapsed_time": perf_counter() - started,
                     "error_type": failure["error_type"],
                     "database_id": instance_for_hint.id if instance_for_hint else None,
                     "target": (f"{instance_for_hint.host}:{instance_for_hint.port}"

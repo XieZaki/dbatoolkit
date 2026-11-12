@@ -4,6 +4,9 @@ from typing import Any, cast
 
 from dba.inventory import ValidationError, load_yaml
 
+# Shared by SQL Server disk growth and Slow triage for observed active transactions.
+SQLSERVER_LONG_TRANSACTION_SECONDS = 3600
+
 
 def _diagnostic_threshold(data: object) -> int | None:
     if not isinstance(data, dict) or "diagnostics" not in data:
