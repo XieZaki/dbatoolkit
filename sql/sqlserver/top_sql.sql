@@ -7,6 +7,8 @@ SELECT TOP (?)
     qs.statement_start_offset,
     qs.statement_end_offset,
     COALESCE(st.dbid, plan_text.dbid) AS database_id,
+    CASE WHEN COALESCE(st.dbid, plan_text.dbid) IS NULL THEN NULL
+         ELSE DB_NAME(COALESCE(st.dbid, plan_text.dbid)) END AS database_name,
     CASE WHEN st.text IS NULL THEN 0 ELSE 1 END AS sql_text_available,
     qs.total_worker_time AS total_cpu_time,
     qs.total_logical_reads AS total_logical_reads,

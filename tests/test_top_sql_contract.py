@@ -25,6 +25,7 @@ from dba.top_sql import (
     TopSQLItem,
     TopSQLResult,
 )
+from dba.top_sql_report import TopSQLDiagnosticReport
 from tests.test_html_reports import _report
 
 STAMP = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
@@ -186,12 +187,14 @@ def test_cli_json_and_html_show_contract_status_without_sql_text() -> None:
     assert "采集范围" in cli and "实例级" in cli
     assert "累计统计" in cli and "pg_stat_statements" in cli and "0" in cli
 
-    report = _report()
-    report_with_top = replace(report, details={**report.details, "top_sql": result.to_dict()})
-    summary = build_incident_summary(report_with_top, "reports/slow.html")
-    page = HtmlReportRenderer().render(build_report_model(report_with_top, summary))
-    assert "Top SQL 资源排序" in page and "pg_stat_statements" in page
-    assert "queryid=123" in page
+    instance = replace(_report().instance, db_type=DatabaseType.POSTGRESQL)
+    report = TopSQLDiagnosticReport(instance, STAMP, "top-sql", (), {"top_sql": result.to_dict()})
+    summary = build_incident_summary(report, "reports/top-sql.html")
+    page = HtmlReportRenderer().render(build_report_model(report, summary))
+    assert "Top SQL 统计摘要" in page and "pg_stat_statements" in page
+    assert "queryid=123" not in page
+    assert payload["items"][0]["sql_identity"]["fields"]["queryid"] == 123
+    assert "名称未采集" in page
     assert "elapsed_time" in page
     assert "采集范围" in page and "实例级" in page
 
@@ -199,12 +202,12 @@ def test_cli_json_and_html_show_contract_status_without_sql_text() -> None:
 def test_legacy_top_sql_report_without_collection_scope_remains_renderable() -> None:
     legacy_payload = _result().to_dict()
     legacy_payload.pop("collection_scope")
-    report = _report()
-    report_with_top = replace(report, details={**report.details, "top_sql": legacy_payload})
+    instance = replace(_report().instance, db_type=DatabaseType.POSTGRESQL)
+    report = TopSQLDiagnosticReport(instance, STAMP, "top-sql", (), {"top_sql": legacy_payload})
     page = HtmlReportRenderer().render(build_report_model(
-        report_with_top, build_incident_summary(report_with_top, "reports/slow.html")))
+        report, build_incident_summary(report, "reports/top-sql.html")))
     cli = render_human("top-sql", legacy_payload)
-    assert "Top SQL 资源排序" in page
+    assert "Top SQL 统计摘要" in page
     assert "Top SQL" in cli and "采集范围" in cli and "未知" in cli
 
 
@@ -212,7 +215,7 @@ def test_html_omits_top_sql_section_when_contract_absent_and_never_renders_sql_t
     report = _report()
     summary = build_incident_summary(report, "reports/slow.html")
     page = HtmlReportRenderer().render(build_report_model(report, summary))
-    assert "Top SQL 资源排序" not in page
+    assert 'id="top-sql"' not in page
 
     poisoned = _result(items=(TopSQLItem(_identity(DatabaseType.POSTGRESQL), 3, rank=1),))
     details = poisoned.to_dict()
@@ -220,6 +223,7 @@ def test_html_omits_top_sql_section_when_contract_absent_and_never_renders_sql_t
     report_with_top = replace(report, details={**report.details, "top_sql": details})
     page = HtmlReportRenderer().render(build_report_model(
         report_with_top, build_incident_summary(report_with_top, "reports/slow.html")))
+    assert 'id="top-sql"' not in page
     assert "SECRET SQL MUST NOT APPEAR" not in page
 
 

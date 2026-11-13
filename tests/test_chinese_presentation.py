@@ -73,12 +73,12 @@ def test_slow_html_visible_ui_has_no_known_english_labels_or_status_tokens() -> 
         assert phrase not in text
 
 
-def test_four_database_slow_html_has_no_english_ui_labels_or_internal_statuses() -> None:
+def test_four_database_slow_and_top_sql_html_use_localized_ui() -> None:
     from test_slow_report_json_html_parity import (
         _ENGINES,
-        _attach_top_sql,
         _slow_snapshot,
         _top_sql_result,
+        _top_sql_snapshot,
     )
 
     forbidden = (
@@ -91,19 +91,24 @@ def test_four_database_slow_html_has_no_english_ui_labels_or_internal_statuses()
     )
     for engine in _ENGINES:
         for state in ("complete_matched", "partial_unmatched", "complete_empty", "failed"):
-            report = _slow_snapshot(engine)
-            result, source = _top_sql_result(engine, state)
-            _attach_top_sql(report, result, source)
-            model = build_report_model(report, build_incident_summary(report))
-            visible = _VisibleText()
-            visible.feed(HtmlReportRenderer().render(model))
-            text = " ".join(visible.parts)
-            for phrase in forbidden:
-                if phrase.isupper() and " " not in phrase:
-                    found = re.search(rf"(?<![A-Z_]){re.escape(phrase)}(?![A-Z_])", text)
-                    assert found is None, f"{engine.value}/{state} left UI status {phrase!r} untranslated"
-                else:
-                    assert phrase not in text, f"{engine.value}/{state} left UI text {phrase!r} untranslated"
+            slow = _slow_snapshot(engine)
+            result, _ = _top_sql_result(engine, state)
+            payload = result.to_dict()
+            slow.details["top_sql"] = payload
+            for report in (slow, _top_sql_snapshot(engine, payload)):
+                model = build_report_model(report, build_incident_summary(report))
+                html = HtmlReportRenderer().render(model)
+                assert ('id="top-sql"' in html) is (report.scenario == "top-sql")
+                visible = _VisibleText()
+                visible.feed(html)
+                text = " ".join(visible.parts)
+                context = f"{engine.value}/{state}/{report.scenario}"
+                for phrase in forbidden:
+                    if phrase.isupper() and " " not in phrase:
+                        found = re.search(rf"(?<![A-Z_]){re.escape(phrase)}(?![A-Z_])", text)
+                        assert found is None, f"{context} left UI status {phrase!r} untranslated"
+                    else:
+                        assert phrase not in text, f"{context} left UI text {phrase!r} untranslated"
 
 
 def test_cli_help_and_human_errors_use_chinese_while_json_keeps_domain_enums(

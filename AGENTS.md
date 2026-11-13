@@ -1,22 +1,210 @@
-Before changing this project:
+- # AGENTS.md — DBA Toolkit 项目开发规则
 
-1. Read `docs/PROJECT_RULES.md`.
-2. Read the Roadmap, Backlog, Progress, and Acceptance files under `docs/roadmap/`.
-3. Check Git status and confirm the current Task ID in Progress and Backlog.
-4. Stay within the requested version scope and execute only the user-authorized task.
-5. For the user-confirmed local Docker lab, follow the lab-only authorization, credential-separation, script-review, and TLS-exception rules in `docs/PROJECT_RULES.md`; never extend them to production or other assets.
+  本文件定义 AI 编程工具在 DBA Toolkit 项目中的开发行为、上下文管理、安全约束和任务交接要求。所有开发任务均必须遵守。
 
-## Real database E2E execution (mandatory)
+  ## 一、开发前必须执行的检查
 
-- Run real SQL Server, PostgreSQL, MySQL, and Oracle E2E only from the authorized Windows host context, using Windows PowerShell and this project's `.venv`; a PowerShell-shaped shell or matching path alone does not prove host access.
-- Before a real connection, verify the actual OS/process context, working directory and Python/CLI executable, the single selected Inventory asset's host/port and `environment=test`, and credential-session availability. Never scan Inventory or guess another target.
-- Never run real database E2E in a Codex isolated environment or treat its `127.0.0.1` as the Windows host. Do not diagnose database, named-pipe, Docker, or credential failures from an isolated-context access denial.
-- If the authorized Windows host context is unavailable, stop before database access and give the user complete PowerShell commands to run locally. Do not retry the same blocked connection, read or bypass credential files, substitute another database, or present Mock/Fake results as E2E.
-- Label evidence as `WINDOWS_LOCAL_REAL_E2E`, `ISOLATED_OFFLINE_TEST`, or `NOT_EXECUTED`; these are report labels, not product enums.
-- Redact `report.instance.credential_alias` in exported diagnosis JSON while retaining the alias internally. Never expose credential values.
+  在修改项目任何文件之前，必须完成以下工作：
 
-After completing a task:
+  1. 阅读 `docs/PROJECT_RULES.md`，了解项目已有的技术规范、安全约束和开发要求。
+  2. 阅读 `docs/roadmap/` 下的 Roadmap、Backlog、Progress 和 Acceptance 文件，了解项目规划、任务状态、当前进度和验收情况。
+  3. 检查 Git 状态，确认当前是否存在未提交修改，避免覆盖或影响已有工作。
+  4. 核对 Progress 和 Backlog 中当前任务的 Task ID，确保两者一致。
+  5. 如果 Task ID 不一致、必要文档缺失，或者发现可能受到影响的未提交修改，必须先停止并向用户说明，不得自行猜测或继续修改。
+  6. 严格遵守用户指定的版本范围，只执行用户明确授权的任务。
+  7. 对于用户已明确授权的本地 Docker 测试环境，必须遵守 `docs/PROJECT_RULES.md` 中关于测试环境授权、凭据隔离、脚本审查和 TLS 例外的具体规定。这些授权和例外绝不能扩展到生产环境或其他资产。
 
-1. Update task status only in Backlog.
-2. Update Progress and add Acceptance evidence only when actual evidence exists.
-3. Report the next task, then stop for user approval.
+  ## 二、AI 协作与上下文管理
+
+  ### 2.1 项目上下文与事实来源
+
+  - 项目文档和当前源代码是项目的长期事实依据，不得依赖历史聊天记录恢复项目状态。
+  - `docs/PROJECT_RULES.md` 是项目整体开发规范、安全约束和技术要求的权威依据。
+  - Roadmap 是项目整体开发规划的依据。
+  - Backlog 是任务状态的唯一事实来源。
+  - Progress 用于记录实际开发进度、当前状态和交接信息。
+  - Acceptance 用于记录实际执行的测试、验证结果和验收证据。
+  - 当前源代码和实际测试结果是判断功能实现情况的依据。
+  - 如果项目文档与实际代码存在不一致，必须明确指出差异，不得擅自假定其中一方正确。
+
+  ### 2.2 已确认的需求与技术决策
+
+  - 必须遵守已经确认的业务需求、架构决策、安全约束、兼容性要求和技术边界。
+  - 不得擅自推翻、修改或重新解释已经确认的决策。
+  - 如果新需求与现有约定发生冲突，必须先说明冲突原因、影响范围和可选方案，等待用户确认后再执行。
+  - 不得擅自扩大任务范围，不得进行与当前任务无关的重构。
+  - 不得重复创建已有的规划、进度和项目记忆文档。
+  - 除非有明确的维护价值，否则不得随意增加新的项目管理文档。
+
+  ### 2.3 开发实施原则
+
+  - 只实施当前获得授权的任务。
+  - 优先采用小范围、可独立验证的修改，避免一次性进行大量不相关的改动。
+  - 在合理的情况下复用现有架构、模块和组件，不得为了实现新功能而随意重复造轮子。
+  - 不得在没有说明原因、影响和迁移风险的情况下，重新设计已经确定的模块。
+  - 不得仅因为代码已经编写完成，就认定功能已经完成。
+  - 必须明确区分代码实现、测试执行、结果验证和最终验收。
+
+  ## 三、真实数据库 E2E 测试（强制要求）
+
+  - SQL Server、PostgreSQL、MySQL 和 Oracle 的真实数据库 E2E 测试，只能在获得授权的 Windows 主机环境中执行，并且必须使用 Windows PowerShell 和本项目的 `.venv`。仅仅使用类似 PowerShell 的 Shell，或者看到相同的文件路径，都不能证明当前环境具有 Windows 主机访问能力。
+
+  - 在建立真实数据库连接之前，必须验证：
+
+    1. 当前实际操作系统和进程运行环境。
+    2. 当前工作目录。
+    3. Python 或 CLI 可执行文件的实际路径。
+    4. 本次唯一选定的 Inventory 资产的主机地址、端口及 `environment=test` 属性。
+    5. 凭据会话是否可用。
+
+    不得扫描 Inventory，不得自行猜测或替换其他测试目标。
+
+  - 严禁在 Codex 隔离环境中执行真实数据库 E2E 测试，也不得将隔离环境中的 `127.0.0.1` 当作 Windows 主机。对于隔离环境导致的访问拒绝，不得据此判断数据库、命名管道、Docker 或凭据本身存在故障。
+
+  - 如果当前无法访问获得授权的 Windows 主机环境，必须在连接数据库之前停止，并向用户提供可以在本机 Windows PowerShell 中完整执行的命令。
+
+    不得：
+
+    - 重复尝试已经被隔离环境阻止的相同连接。
+    - 直接读取或绕过凭据文件。
+    - 擅自替换为其他数据库或测试资产。
+    - 将 Mock/Fake 测试结果冒充为真实数据库 E2E 测试结果。
+
+  - 所有测试证据必须明确标注以下类型：
+
+    - `WINDOWS_LOCAL_REAL_E2E`：Windows 本机真实数据库 E2E 测试。
+    - `ISOLATED_OFFLINE_TEST`：隔离环境中的离线测试。
+    - `NOT_EXECUTED`：未执行。
+
+    上述标签仅用于报告和证据标识，不得将其作为产品内部枚举值。
+
+  - 导出的诊断 JSON 中，必须对 `report.instance.credential_alias` 进行脱敏；内部仍然保留该别名。任何情况下都不得暴露实际凭据值。
+
+  ## 四、任务完成后的文档更新
+
+  1. 任务状态只能在 Backlog 中修改，Backlog 是唯一的任务状态来源。
+  2. Progress 只记录实际开发进展、当前情况和交接信息，不得另行维护一套任务状态。
+  3. 只有存在实际测试或验证证据时，才允许向 Acceptance 添加对应证据。
+  4. 只有用户授权的项目规划或开发范围确实发生变化时，才更新 Roadmap。
+  5. 只有经过确认的项目级长期规则或约束发生变化时，才更新 `docs/PROJECT_RULES.md`。
+  6. 不得在多个文档中重复维护同一任务的状态。
+  7. 不得将未执行的测试标记为通过，也不得将 Mock/Fake 测试描述为真实数据库 E2E 测试。
+  8. 文档更新必须以实际完成的工作为依据，不得为了让项目看起来进度正常而虚构完成状态。
+
+  ## 五、开发交接与停止要求
+
+  每轮授权任务完成后，必须提供简明的开发交接报告，至少包含以下内容：
+
+  ### 1. 完成情况
+
+  实际完成了哪些功能，哪些内容尚未完成。
+
+  ### 2. 文件修改
+
+  列出新增、修改和删除的文件，并简要说明修改目的。
+
+  ### 3. 测试与验证
+
+  列出实际执行的测试、执行结果及对应的证据标签。
+
+  ### 4. 遗留问题
+
+  说明尚未解决的问题、已知缺陷、功能限制和潜在风险。
+
+  ### 5. 下一步任务
+
+  根据 Backlog 中的实际任务状态，指出下一项计划任务，不得自行创建或扩大开发范围。
+
+  必须明确区分已经完成的工作、尚未完成的工作和仅供参考的建议。
+
+  **完成当前授权任务并提交交接报告后，必须停止，等待用户人工验收和批准。不得擅自开始下一阶段或下一个任务。**
+
+
+
+### 数据库只读权限管理原则
+
+1. DBA Toolkit 允许根据功能需要增加必要的数据库只读权限，不得为了避免增加权限而主动放弃合理的诊断能力。
+2. 当现有权限不足以实现已批准的功能时，应主动分析最小权限需求，并及时推进授权，不得长期停留在功能降级状态。
+3. 新增权限必须遵循最小权限原则，明确权限范围、用途、适用版本和影响。
+4. 所有新增权限必须同步记录到 `docs/DATABASE_PERMISSIONS.md`，包括授权 SQL、验证 SQL 和撤销 SQL。
+5. 只读权限与写入、修改、删除、管理权限严格区分。不得因为批准只读权限而扩大其他权限。
+6. 生产环境授权遵循正式变更审批流程；已授权的本地测试环境可以按照批准范围进行权限验证。
+7. 权限不足时可以暂时降级，但必须记录缺失权限和恢复功能所需条件，不得将临时降级当作最终产品设计。
+8. 权限申请、授权和实际验证状态必须分别记录，不得将建议授权描述为已经授权。
+
+
+
+### 诊断模块独立执行与故障隔离原则
+
+1. DBA Toolkit 的各个诊断功能模块必须具备独立的执行、异常捕获、状态记录和降级能力。
+2. 单个诊断模块执行失败，不得直接导致整个 Slow、Blocking、Incident 或其他诊断报告无法生成。
+3. 当某个模块发生权限不足、SQL 执行失败、超时、版本不兼容、数据不可见或其他异常时：
+   - 捕获该模块的异常。
+   - 记录模块名称、执行对象、数据库原始错误代码、错误状态及原始错误信息。
+   - 将该模块标记为相应的受限、失败或不可用状态。
+   - 继续执行其他不依赖该模块的诊断功能。
+   - 正常生成 HTML、JSON 和 CLI 诊断结果。
+4. 对于权限不足的情况，必须明确展示「功能受限」，并尽可能展示数据库返回的原始错误，例如权限拒绝、对象访问失败及对应错误代码。
+5. 不得把不同类型的失败统一显示成「不支持」或「未采集」。必须区分：
+   - 权限不足：功能受限。
+   - 数据库执行错误：采集失败。
+   - 执行超时：执行超时。
+   - 数据库版本不支持：版本不支持。
+   - 元数据不可见：对象信息无法解析。
+   - 尚未实现：待开发。
+   - 未执行：未采集或未执行。
+6. 数据库原始错误信息应尽可能完整保留，包括原生错误代码、SQLSTATE、错误消息和可用的状态信息。展示前必须脱敏密码、凭据、连接字符串、令牌、敏感参数和其他机密信息。不得将脱敏后的信息描述为未经处理的原始错误。
+7. 不允许通过空值、0、正常状态或默认成功结果掩盖模块执行失败。
+8. 某个模块失败时，只影响该模块的数据完整性和诊断结论。其他模块的有效证据必须继续保留。
+9. 如果模块之间存在依赖关系，下游模块应标记为依赖失败或未执行，并说明原因；不应因此中止其他独立模块。
+10. 如果数据库整体连接失败，只要本地报告生成链路仍可运行，也应尽可能生成连接失败诊断报告，说明连接错误，并将无法执行的模块标记为未执行，而不是直接退出且不产生任何报告。
+11. 模块级错误必须在 HTML、JSON 和 CLI 中保持一致。整体报告可以标记为 PARTIAL，但不能因为单个可选模块失败而丢失其他有效诊断结果。
+12. 不得为了恢复功能而自动扩大数据库权限、切换高权限账号或绕过安全限制。需要新增只读权限时，按数据库权限管理规则申请，并同步更新 `docs/DATABASE_PERMISSIONS.md`。
+13. 新增诊断模块时，必须同时增加成功、权限不足、SQL 执行失败、超时和部分数据不可用等异常场景测试。
+14. 不允许使用宽泛的异常捕获后静默忽略错误。所有异常必须有明确的状态、原因和可追踪记录。
+
+### 全局诊断 SQL 执行超时与故障隔离原则
+
+1. 所有数据库诊断 SQL 必须遵守统一的全局执行超时配置。
+2. 默认配置：
+   - 参数：`diagnostic_sql_timeout_seconds`
+   - 默认值：30 秒。
+   - 适用范围：SQL Server、Oracle、MySQL、PostgreSQL 的所有诊断 SQL。
+   - 必须通过项目现有的统一配置机制管理，不得在各 Collector 中重复定义超时值。
+3. 超时范围包括 SQL 执行及结果获取阶段。连接超时与 SQL 执行超时分别管理。
+4. 单条诊断 SQL 达到超时限制时：
+   - 必须调用对应数据库驱动或数据库原生的查询取消机制。
+   - 停止当前诊断模块的剩余依赖步骤。
+   - 将当前模块标记为 TIMEOUT。
+   - 记录 SQL 脚本名称、模块名称、实际耗时、超时阈值、执行阶段和原始错误。
+   - 在确认取消完成及连接状态正常之前，不得复用该连接。
+   - 取消成功且连接状态安全后，继续执行下一个独立诊断模块。
+5. 不允许仅通过 Python Future、线程等待超时或异步任务超时来代替数据库端查询取消。必须验证数据库端实际停止执行诊断 SQL。
+6. 如果查询取消无法确认：
+   - 丢弃或关闭当前连接。
+   - 不得将其重新放入可复用连接池。
+   - 只能通过经过验证的独立连接路径继续其他模块；否则停止后续数据库采集，但仍应尽可能生成已有数据的报告。
+7. 查询超时仅允许取消 Toolkit 自己发起的诊断 SQL，不得 KILL、CANCEL、TERMINATE 或影响任何业务会话。
+8. 不同数据库驱动必须分别实现并验证超时和取消机制。不能将 Socket Read Timeout 等同于数据库端查询取消。
+9. 超时信息必须在 HTML、JSON、CLI 中一致展示，包括：
+   - 数据库类型及版本；
+   - 诊断模块；
+   - SQL 脚本相对路径；
+   - 实际执行耗时；
+   - 配置超时值；
+   - Execute / Fetch 等执行阶段；
+   - 数据库原生错误代码和 SQLSTATE（如果有）；
+   - 原始错误信息（敏感信息脱敏）；
+   - 查询取消是否成功。
+10. 必须区分 TIMEOUT、权限不足、SQL 执行失败、版本不支持和未采集，不得混淆。
+11. 一个诊断 SQL 超时不得导致整个诊断报告无法生成，也不得丢弃其他模块已经取得的有效数据。
+12. 新增或修改 Collector 时，必须覆盖正常执行、超过超时限制、查询取消成功、查询取消失败、后续模块继续执行和报告正常生成等测试场景。
+13. 如果某项功能确实需要超过全局默认超时，必须先进行性能评估，说明原因并经用户批准，不允许模块自行延长超时。
+14. 每次新增或调整全局超时机制，必须同步更新项目配置说明、使用文档和测试。
+15. 全局参数调整不代表允许无限制延长诊断 SQL 执行时间。
+16. 严禁复用状态未知的连接。凡是超时后数据库端取消没有被数据库返回的取消错误确认的情况，例如 Socket 读超时、连接丢失、取消调用失败、连接关闭失败，连接状态一律视为未知：必须关闭并丢弃该连接，不得在同一连接上继续 Fetch、重试或执行下一个模块，也不得自动重新执行已超时的同一条 SQL。后续模块只能通过完整的连接与 Preflight 路径新建连接。
+17. 报告、测试证据和交接中，不得把「客户端停止等待」描述为「数据库端已取消」。数据库端停止执行只能由数据库返回的取消错误，或测试中独立只读观测证明；无法证明时标记为未确认。
+18. 模块级故障隔离：超时只终止发生超时的模块及其依赖步骤，其他独立模块必须继续执行或明确标记未执行原因。实现隔离时复用现有分阶段采集结构，不得为了统一而重构稳定架构。
+19. 查询取消只能通过驱动或数据库协议作用于 Toolkit 自己的连接（或数据库自身的语句级超时）。任何按会话 ID 执行的取消或终止语句，即使目标是 Toolkit 自身会话，也必须先经用户批准。
+20. 用户已于 2026-11-13 批准 `C-11`～`C-13`，具体规则以 `docs/PROJECT_RULES.md` 为准：有效超时 = min(脚本超时, 全局 30 秒)，Execute 与 Fetch 共用一个绝对 Deadline；PostgreSQL 首版只用服务端 `statement_timeout` 加客户端网络保护；MySQL 只读 SELECT 优先用 `max_execution_time` SESSION 设置。某引擎的取消机制尚未实现或验证前，不得声称已实现数据库端取消。
+21. MySQL `KILL QUERY` 是用户明确批准的唯一 KILL 例外：只能经独立控制连接、使用受控监控账号，对本次运行执行诊断 SQL 前实际记录的 `CONNECTION_ID()` 发送 `KILL QUERY`。严禁 `KILL CONNECTION`、扫描或猜测会话 ID、取消业务或其他会话；目标身份无法确认时不得发送。不得为此申请 `CONNECTION_ADMIN` 等管理权限。其他数据库和其他场景的 KILL 禁令不变。

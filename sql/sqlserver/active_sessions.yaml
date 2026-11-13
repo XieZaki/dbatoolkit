@@ -4,8 +4,8 @@ risk: READ_ONLY
 timeout_seconds: 10
 max_rows: 5000
 reviewed: true
-description: Reviewed user session and connection DMV read, including sleeping sessions;
-  excludes toolkit session.
+description: Reviewed user session DMV read, including sleeping sessions and client
+  interface name. The connection DMV supplies the client address. Excludes toolkit session.
 feature: slow
 version_families:
 - '2012'

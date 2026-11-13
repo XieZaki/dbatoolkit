@@ -403,16 +403,13 @@ def test_oracle_single_result_uses_shared_json_cli_and_html_contract() -> None:
     assert json_payload["items"] == payload["items"]
     assert [item["metric_value"] for item in json_payload["items"]] == [55, 42]
     assert "sql_id=sql_a" in cli and "child_number=0" in cli and "55" in cli
-    assert "sql_a" in html and "CHILD_CURSOR" in html and "55" in html
+    assert json_payload["items"][0]["sql_identity"]["fields"]["sql_id"] == "sql_a"
+    assert "sql_a" not in html and "子游标" in html and "<td>55</td>" in html
 
 
-@pytest.mark.parametrize(("plan_hash", "expected_plan_hash"), [
-    (44, "plan_hash_value=44"),
-    (None, "plan_hash_value=—"),
-    (0, "plan_hash_value=—"),
-])
-def test_oracle_top_sql_html_renders_container_and_only_valid_plan_identity(
-        plan_hash: int | None, expected_plan_hash: str) -> None:
+@pytest.mark.parametrize("plan_hash", [44, None, 0])
+def test_oracle_top_sql_html_shows_container_and_json_keeps_valid_plan_identity(
+        plan_hash: int | None) -> None:
     adapter = FakeOracleAdapter([_row("sql_a", 2, 55, plan_hash=plan_hash, con_id=3)])
     result = _collect(adapter)
     payload = result.to_dict()
@@ -423,11 +420,15 @@ def test_oracle_top_sql_html_renders_container_and_only_valid_plan_identity(
     html = HtmlReportRenderer().render(
         build_report_model(report, build_incident_summary(report)))
 
-    assert "sql_id=sql_a" in html
-    assert "child_number=2" in html
-    assert "inst_id=7" in html
-    assert "con_id=3" in html
-    assert expected_plan_hash in html
+    item = payload["items"][0]
+    identity = {"sql_id": "sql_a", "child_number": 2, "inst_id": 7, "con_id": 3}
+    assert item["sql_identity"]["fields"] == identity
+    assert item["plan_identity"] == (
+        None if not plan_hash else {"database_engine": "oracle", "kind": "PLAN",
+                                   "fields": {**identity, "plan_hash_value": plan_hash}})
+    assert "FREEPDB1" in html
+    assert all(marker not in html for marker in ("sql_a", "child_number=", "inst_id=", "con_id=",
+                                                 "plan_hash_value="))
     assert adapter.calls == [("top_sql_modern", 10, "cpu_time", 3)]
 
 
@@ -441,8 +442,9 @@ def test_oracle_11g_top_sql_html_does_not_invent_container_identity() -> None:
     html = HtmlReportRenderer().render(
         build_report_model(report, build_incident_summary(report)))
 
-    assert "sql_id=sql_a" in html
-    assert "child_number=2" in html
-    assert "inst_id=7" in html
-    assert "con_id=" not in html
-    assert "plan_hash_value=44" in html
+    item = result.to_dict()["items"][0]
+    identity = {"sql_id": "sql_a", "child_number": 2, "inst_id": 7}
+    assert item["sql_identity"]["fields"] == identity
+    assert item["plan_identity"]["fields"] == {**identity, "plan_hash_value": 44}
+    assert "container_name" not in result.source_metadata
+    assert all(marker not in html for marker in ("sql_a", "con_id=", "容器名称", "plan_hash_value="))

@@ -20,6 +20,7 @@ from dba.reporting.normalizers import (
     display_message,
     display_value,
 )
+from dba.sqlserver_locks import root_lock_fields
 
 
 class OutputMode(StrEnum):
@@ -613,6 +614,7 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
     candidate_labels = {
         "ROOT_BLOCKER": "根阻塞", "IDLE_OPEN_TRANSACTION": "未结束事务",
         "BLOCKED_VICTIM": "被阻塞会话", "LONG_RUNNING_SQL": "长运行 SQL",
+        "WAITING_SQL": "需关注的请求等待",
         "ACTIVE_WAIT": "主动等待语句", "INTERMEDIATE_BLOCKER": "中间阻塞者",
     }
     finding_labels = {
@@ -738,6 +740,14 @@ def render_emergency_triage(report: DiagnosticReport, candidates: tuple[dict[str
                 sql_label = "SQL 标识" + (f"（{item.get('sql_id_type')}）" if item.get("sql_id_type") else "")
                 lines.append(f"   {sql_label}：{item.get('sql_id') or 'N/A'}；事务标识：{item.get('transaction_id') or 'N/A'}；运行秒数：{item.get('running_seconds') if item.get('running_seconds') is not None else 'N/A'}")
             lines.append(f"   登录时间：{item.get('login_time') or 'N/A'}；事务时长：{item.get('transaction_age_seconds') if item.get('transaction_age_seconds') is not None else 'N/A'} 秒；影响会话：{item.get('blocked_session_count', 0)}")
+            sqlserver_root = next((root for root in details.get("roots", [])
+                                   if isinstance(root, dict) and str(root.get("session_id"))
+                                   == str(item.get("session_id"))), None) \
+                if report.instance.db_type.value == "sqlserver" else None
+            if sqlserver_root is not None:
+                for label, value in root_lock_fields(details.get("lock_resources"), sqlserver_root,
+                                                     item.get("session_id")):
+                    lines.append(f"   {label}：{value}")
             if item.get("mysql_connection_id") is not None:
                 root_evidence = next((root for root in details.get("roots", [])
                                       if isinstance(root, dict) and str(root.get("processlist_id"))
@@ -1025,16 +1035,19 @@ def _render_error(data: dict[str, Any]) -> str:
     kind = str(data.get("error_type", "Operation Failed"))
     title = display_error_title(kind)
     lines = [title, "-" * 42]
-    for key, label in (("database_id", "Database"), ("account", "Account"),
+    for key, label in (("database_id", "Database"), ("collector_name", "Collector"),
+                       ("account", "Account"),
                        ("target", "Target"),
                        ("driver", "Driver"), ("backend", "Backend"),
                        ("tls", "TLS"), ("alias", "Alias"), ("feature", "Feature"),
-                       ("error_message", "Reason")):
+                       ("error_message", "Reason"), ("guidance", "Toolkit Guidance")):
         if data.get(key) is not None:
             detail = (display_error_message(kind, str(data[key])) if key == "error_message"
                       else data[key])
             lines.extend(["", label, f"  {detail}"])
-    vendor = data.get("error")
+    if data.get("error_category"):
+        lines.extend(["", "Error Category", f"  {data['error_category']}"])
+    vendor = data.get("error", data.get("database_error"))
     if isinstance(vendor, dict):
         lines.extend(["", "Vendor Error"])
         if vendor.get("vendor_code") is not None:
@@ -1043,12 +1056,25 @@ def _render_error(data: dict[str, Any]) -> str:
             lines.append(f"  SQLSTATE  {vendor['sqlstate']}")
         if vendor.get("message"):
             lines.append(f"  Message   {vendor['message']}")
+        if vendor.get("error_category"):
+            lines.extend(["", "Error Category", f"  {vendor['error_category']}"])
         lines.extend(["", "Toolkit Classification", f"  {vendor.get('classification', 'UNKNOWN')}"])
         for label, key in (("Detail", "detail"), ("Hint", "hint"), ("Context", "context")):
             if vendor.get(key):
                 lines.extend(["", label, f"  {vendor[key]}"])
         if vendor.get("guidance"):
             lines.extend(["", "Toolkit Guidance", f"  {vendor['guidance']}"])
+        timeout = vendor.get("timeout")
+        if isinstance(timeout, dict):
+            lines.extend(["", "Execution and Cancellation"])
+            lines.extend(_line(label, timeout.get(key)) for key, label in (
+                ("execution_phase", "Phase"), ("script_path", "SQL Script"),
+                ("elapsed_ms", "Elapsed ms"), ("timeout_seconds", "Applied Timeout s"),
+                ("effective_timeout_seconds", "Effective Timeout s"),
+                ("cancellation_status", "Cancellation Status"),
+                ("connection_status", "Connection Status"),
+                ("mechanism", "Mechanism"), ("cancellation_reason", "Cancellation Reason"),
+            ))
     effective = data.get("effective_connection")
     if isinstance(effective, dict):
         lines.extend(["", "Effective Connection"])

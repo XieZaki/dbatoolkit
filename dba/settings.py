@@ -3,42 +3,86 @@ from pathlib import Path
 from typing import Any, cast
 
 from dba.inventory import ValidationError, load_yaml
+from dba.sql_timeout import (
+    DEFAULT_DIAGNOSTIC_SQL_TIMEOUT_SECONDS,
+    effective_sql_timeout,
+    validate_diagnostic_sql_timeout,
+)
+
+# Shared by SQL Server disk growth and Slow triage for observed active transactions.
+SQLSERVER_LONG_TRANSACTION_SECONDS = 3600
 
 
-def _diagnostic_threshold(data: object) -> int | None:
+_DIAGNOSTIC_SQL_TIMEOUT = "diagnostic_sql_timeout_seconds"
+
+
+def _diagnostic_overrides(data: object) -> dict[str, int]:
+    """Validate the shared diagnostics section and map it onto engine settings fields."""
     if not isinstance(data, dict) or "diagnostics" not in data:
-        return None
+        return {}
     diagnostics = data["diagnostics"]
-    if not isinstance(diagnostics, dict) or set(diagnostics) != {"slow"}:
-        raise ValidationError("diagnostics must contain only slow.threshold_seconds")
-    slow = diagnostics["slow"]
-    if not isinstance(slow, dict) or set(slow) != {"threshold_seconds"}:
-        raise ValidationError("diagnostics.slow must contain threshold_seconds")
-    value = slow["threshold_seconds"]
-    if type(value) is not int or not 1 <= value <= 86400:
-        raise ValidationError("diagnostics.slow.threshold_seconds must be an integer in 1..86400")
-    return value
+    if (not isinstance(diagnostics, dict) or not diagnostics
+            or not set(diagnostics) <= {"slow", _DIAGNOSTIC_SQL_TIMEOUT}):
+        raise ValidationError(
+            "diagnostics may contain only slow.threshold_seconds and diagnostic_sql_timeout_seconds")
+    overrides: dict[str, int] = {}
+    if "slow" in diagnostics:
+        slow = diagnostics["slow"]
+        if not isinstance(slow, dict) or set(slow) != {"threshold_seconds"}:
+            raise ValidationError("diagnostics.slow must contain threshold_seconds")
+        value = slow["threshold_seconds"]
+        if type(value) is not int or not 1 <= value <= 86400:
+            raise ValidationError("diagnostics.slow.threshold_seconds must be an integer in 1..86400")
+        overrides["long_running_seconds"] = value
+    if _DIAGNOSTIC_SQL_TIMEOUT in diagnostics:
+        overrides[_DIAGNOSTIC_SQL_TIMEOUT] = validate_diagnostic_sql_timeout(
+            diagnostics[_DIAGNOSTIC_SQL_TIMEOUT])
+    return overrides
 
 
-def apply_diagnostic_threshold(settings: object, path: Path | None) -> object:
-    """Apply the shared slow threshold without changing per-engine settings contracts."""
+def apply_diagnostic_settings(settings: object, path: Path | None) -> object:
+    """Apply the shared diagnostics section without changing per-engine settings contracts."""
     if path is None:
         return settings
-    data = load_yaml(path)
-    threshold = _diagnostic_threshold(data)
-    return cast(Any, replace(cast(Any, settings), long_running_seconds=threshold)) \
-        if threshold is not None else settings
+    overrides = _diagnostic_overrides(load_yaml(path))
+    return cast(Any, replace(cast(Any, settings), **overrides)) if overrides else settings
+
+
+apply_diagnostic_threshold = apply_diagnostic_settings
 
 
 def validate_diagnostic_settings(path: Path | None) -> None:
     if path is not None:
-        _diagnostic_threshold(load_yaml(path))
+        _diagnostic_overrides(load_yaml(path))
+
+
+def _engine_values(data: object, section: str, cls: type, missing: str, unknown: str) -> dict[str, Any]:
+    if not isinstance(data, dict) or section not in data or not set(data) <= {
+        "sqlserver", "postgresql", "mysql", "oracle", "diagnostics"
+    }:
+        raise ValidationError(missing)
+    values = data[section]
+    if not isinstance(values, dict) or not set(values) <= {f.name for f in fields(cls)}:
+        raise ValidationError(unknown)
+    if _DIAGNOSTIC_SQL_TIMEOUT in values:
+        raise ValidationError(
+            "diagnostic_sql_timeout_seconds is global; set it only under diagnostics")
+    return values
+
+
+def _validate_sql_timeouts(settings: Any, cap_field: str, label: str) -> None:
+    validate_diagnostic_sql_timeout(settings.diagnostic_sql_timeout_seconds)
+    cap = getattr(settings, cap_field)
+    if cap is not None and (type(cap) is not int or not 1 <= cap <= 86400):
+        raise ValidationError(f"{label} {cap_field} must be null or an integer in 1..86400")
 
 
 @dataclass(frozen=True)
 class SQLServerSettings:
     connect_timeout: int = 5
-    query_timeout: int = 10
+    # Optional stricter legacy cap; the global diagnostic SQL timeout is the default ceiling.
+    query_timeout: int | None = None
+    diagnostic_sql_timeout_seconds: int = DEFAULT_DIAGNOSTIC_SQL_TIMEOUT_SECONDS
     encrypt: bool = True
     trust_server_certificate: bool = False
     long_running_seconds: int = 10
@@ -51,9 +95,9 @@ class SQLServerSettings:
     plan_large_scan_rows: int = 100000
 
     def __post_init__(self) -> None:
+        _validate_sql_timeouts(self, "query_timeout", "SQL Server")
         for key in (
             "connect_timeout",
-            "query_timeout",
             "long_running_seconds",
             "slow_top_n",
             "high_concurrency_threshold",
@@ -74,23 +118,21 @@ class SQLServerSettings:
             if type(getattr(self, key)) is not bool:
                 raise ValidationError("TLS options must be booleans")
 
+    def effective_sql_timeout(self, script_timeout: int) -> int:
+        return effective_sql_timeout(script_timeout, self.diagnostic_sql_timeout_seconds, self.query_timeout)
+
     @classmethod
     def load(cls, path: Path) -> "SQLServerSettings":
-        data = load_yaml(path)
-        if not isinstance(data, dict) or "sqlserver" not in data or not set(data) <= {
-            "sqlserver", "postgresql", "mysql", "oracle", "diagnostics"
-        }:
-            raise ValidationError("Settings must contain sqlserver and optional postgresql")
-        values = data["sqlserver"]
-        if not isinstance(values, dict) or not set(values) <= {f.name for f in fields(cls)}:
-            raise ValidationError("Unknown or forbidden SQL Server setting")
-        return cls(**values)
+        return cls(**_engine_values(load_yaml(path), "sqlserver", cls,
+                                    "Settings must contain sqlserver and optional postgresql",
+                                    "Unknown or forbidden SQL Server setting"))
 
 
 @dataclass(frozen=True)
 class PostgreSQLSettings:
     connect_timeout: int = 5
-    query_timeout: int = 10
+    query_timeout: int | None = None
+    diagnostic_sql_timeout_seconds: int = DEFAULT_DIAGNOSTIC_SQL_TIMEOUT_SECONDS
     sslmode: str = "verify-full"
     long_running_seconds: int = 10
     slow_top_n: int = 10
@@ -98,7 +140,8 @@ class PostgreSQLSettings:
     idle_transaction_seconds: int = 60
 
     def __post_init__(self) -> None:
-        for key in ("connect_timeout", "query_timeout", "long_running_seconds", "slow_top_n",
+        _validate_sql_timeouts(self, "query_timeout", "PostgreSQL")
+        for key in ("connect_timeout", "long_running_seconds", "slow_top_n",
                     "high_concurrency_threshold", "idle_transaction_seconds"):
             value = getattr(self, key)
             if type(value) is not int or not 1 <= value <= 86400:
@@ -108,23 +151,21 @@ class PostgreSQLSettings:
         }:
             raise ValidationError("Invalid PostgreSQL sslmode")
 
+    def effective_sql_timeout(self, script_timeout: int) -> int:
+        return effective_sql_timeout(script_timeout, self.diagnostic_sql_timeout_seconds, self.query_timeout)
+
     @classmethod
     def load(cls, path: Path) -> "PostgreSQLSettings":
-        data = load_yaml(path)
-        if not isinstance(data, dict) or "postgresql" not in data or not set(data) <= {
-            "sqlserver", "postgresql", "mysql", "oracle", "diagnostics"
-        }:
-            raise ValidationError("Settings must contain postgresql and optional sqlserver")
-        values = data["postgresql"]
-        if not isinstance(values, dict) or not set(values) <= {f.name for f in fields(cls)}:
-            raise ValidationError("Unknown or forbidden PostgreSQL setting")
-        return cls(**values)
+        return cls(**_engine_values(load_yaml(path), "postgresql", cls,
+                                    "Settings must contain postgresql and optional sqlserver",
+                                    "Unknown or forbidden PostgreSQL setting"))
 
 
 @dataclass(frozen=True)
 class MySQLSettings:
     connect_timeout: int = 5
-    query_timeout: int = 10
+    query_timeout: int | None = None
+    diagnostic_sql_timeout_seconds: int = DEFAULT_DIAGNOSTIC_SQL_TIMEOUT_SECONDS
     charset: str = "utf8mb4"
     ssl_enabled: bool = True
     ssl_ca: str | None = None
@@ -136,7 +177,8 @@ class MySQLSettings:
     idle_transaction_seconds: int = 60
 
     def __post_init__(self) -> None:
-        for key in ("connect_timeout", "query_timeout", "long_running_seconds",
+        _validate_sql_timeouts(self, "query_timeout", "MySQL")
+        for key in ("connect_timeout", "long_running_seconds",
                     "slow_top_n", "high_concurrency_threshold", "idle_transaction_seconds"):
             value = getattr(self, key)
             if type(value) is not int or not 1 <= value <= 86400:
@@ -150,42 +192,40 @@ class MySQLSettings:
         if self.ssl_ca is not None and (type(self.ssl_ca) is not str or not self.ssl_ca.strip()):
             raise ValidationError("MySQL ssl_ca must be a nonempty path")
 
+    def effective_sql_timeout(self, script_timeout: int) -> int:
+        return effective_sql_timeout(script_timeout, self.diagnostic_sql_timeout_seconds, self.query_timeout)
+
     @classmethod
     def load(cls, path: Path) -> "MySQLSettings":
-        data = load_yaml(path)
-        if not isinstance(data, dict) or "mysql" not in data or not set(data) <= {
-            "sqlserver", "postgresql", "mysql", "oracle", "diagnostics"
-        }:
-            raise ValidationError("Settings must contain mysql and optional other database sections")
-        values = data["mysql"]
-        if not isinstance(values, dict) or not set(values) <= {f.name for f in fields(cls)}:
-            raise ValidationError("Unknown or forbidden MySQL setting")
-        return cls(**values)
+        return cls(**_engine_values(load_yaml(path), "mysql", cls,
+                                    "Settings must contain mysql and optional other database sections",
+                                    "Unknown or forbidden MySQL setting"))
 
 
 @dataclass(frozen=True)
 class OracleSettings:
     connect_timeout: int = 5
-    call_timeout: int = 10
+    call_timeout: int | None = None
+    diagnostic_sql_timeout_seconds: int = DEFAULT_DIAGNOSTIC_SQL_TIMEOUT_SECONDS
     long_running_seconds: int = 10
     slow_top_n: int = 10
     high_concurrency_threshold: int = 50
     idle_transaction_seconds: int = 60
 
     def __post_init__(self) -> None:
+        _validate_sql_timeouts(self, "call_timeout", "Oracle")
         for item in fields(self):
+            if item.name in {"call_timeout", "diagnostic_sql_timeout_seconds"}:
+                continue
             value = getattr(self, item.name)
             if type(value) is not int or not 1 <= value <= 86400:
                 raise ValidationError("Oracle limits must be integers in 1..86400")
 
+    def effective_sql_timeout(self, script_timeout: int) -> int:
+        return effective_sql_timeout(script_timeout, self.diagnostic_sql_timeout_seconds, self.call_timeout)
+
     @classmethod
     def load(cls, path: Path) -> "OracleSettings":
-        data = load_yaml(path)
-        if not isinstance(data, dict) or "oracle" not in data or not set(data) <= {
-            "sqlserver", "postgresql", "mysql", "oracle", "diagnostics"
-        }:
-            raise ValidationError("Settings must contain oracle and optional other database sections")
-        values = data["oracle"]
-        if not isinstance(values, dict) or not set(values) <= {f.name for f in fields(cls)}:
-            raise ValidationError("Unknown or forbidden Oracle setting")
-        return cls(**values)
+        return cls(**_engine_values(load_yaml(path), "oracle", cls,
+                                    "Settings must contain oracle and optional other database sections",
+                                    "Unknown or forbidden Oracle setting"))

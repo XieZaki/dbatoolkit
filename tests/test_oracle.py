@@ -154,6 +154,78 @@ def adapter_for_test(*, settings: OracleSettings | None = None) -> tuple[OracleA
     return OracleAdapter(instance, provider, registry, settings, Mode.DEVELOPMENT, driver=driver), driver
 
 
+@pytest.mark.parametrize("settings,connect_ms,collector_ms", [
+    (OracleSettings(), 30000, 10000),
+    (OracleSettings(diagnostic_sql_timeout_seconds=4), 4000, 4000),
+    (OracleSettings(diagnostic_sql_timeout_seconds=20, call_timeout=6), 6000, 6000),
+])
+def test_oracle_call_timeout_uses_global_effective_timeout(
+    settings: OracleSettings, connect_ms: int, collector_ms: int,
+) -> None:
+    adapter, driver = adapter_for_test(settings=settings)
+    assert settings.effective_sql_timeout(60) * 1000 == connect_ms
+    with adapter:
+        LongRunningCollector(adapter).collect(adapter.instance)
+        assert driver.connection.calls[-1][1] == collector_ms
+
+
+def test_oracle_fetch_call_timeout_uses_remaining_deadline_and_discards_connection(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any,
+) -> None:
+    adapter, driver = adapter_for_test(settings=OracleSettings(diagnostic_sql_timeout_seconds=4))
+    observed_fetch_timeouts: list[int] = []
+    with adapter:
+        execute = FakeCursor.execute
+        fetchmany = FakeCursor.fetchmany
+
+        def timed_execute(cursor: FakeCursor, sql: str, parameters: dict[str, Any] | None = None) -> None:
+            execute(cursor, sql, parameters)
+            if cursor.connection.calls[-1][0] == "active_requests":
+                sql_deadline_clock.advance(1)
+
+        def timed_fetch(cursor: FakeCursor, size: int) -> list[tuple[Any, ...]]:
+            if cursor.connection.calls[-1][0] == "active_requests":
+                observed_fetch_timeouts.append(cursor.connection.call_timeout)
+                sql_deadline_clock.advance(1.6)
+            return fetchmany(cursor, size)
+
+        monkeypatch.setattr(FakeCursor, "execute", timed_execute)
+        monkeypatch.setattr(FakeCursor, "fetchmany", timed_fetch)
+        result = adapter.execute_readonly(adapter.registry.get("active_requests", DatabaseType.ORACLE))
+
+    assert not result.success and result.error_type == "FetchTimeout"
+    assert observed_fetch_timeouts[0] == 3000
+    assert 1399 <= observed_fetch_timeouts[1] <= 1401
+    assert result.database_error is not None
+    timeout = result.database_error["timeout"]
+    assert timeout["execution_phase"] == "Fetch"
+    assert timeout["cancellation_status"] == "CANCEL_STATUS_UNKNOWN"
+    assert timeout["connection_status"] == "DISCARDED"
+    assert driver.connection.closed
+
+
+def test_oracle_one_execute_can_exceed_deadline_across_round_trips(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any,
+) -> None:
+    adapter, driver = adapter_for_test(settings=OracleSettings(diagnostic_sql_timeout_seconds=3))
+    with adapter:
+        execute = FakeCursor.execute
+
+        def multi_trip(cursor: FakeCursor, sql: str, parameters: dict[str, Any] | None = None) -> None:
+            execute(cursor, sql, parameters)
+            assert cursor.connection.call_timeout == 3000
+            for _ in range(2):
+                sql_deadline_clock.advance(2)
+
+        monkeypatch.setattr(FakeCursor, "execute", multi_trip)
+        monkeypatch.setattr(FakeCursor, "fetchmany", lambda *_: pytest.fail("Execute exhausted Deadline"))
+        result = adapter.execute_readonly(adapter.registry.get("active_requests", DatabaseType.ORACLE))
+    assert result.error_type == "ExecuteTimeout"
+    assert result.database_error is not None
+    assert result.database_error["timeout"]["connection_status"] == "DISCARDED"
+    assert driver.connection.closed
+
+
 def test_oracle_connect_collect_and_close() -> None:
     adapter, driver = adapter_for_test(settings=OracleSettings(call_timeout=3))
     with adapter:
@@ -814,7 +886,7 @@ def test_oracle_transaction_start_time_is_not_inferred_when_missing() -> None:
     model = build_report_model(report, summary)
     transaction_section = next(section for section in model.sections
                                 if section.section_id == "transaction-analysis")
-    assert transaction_section.tables[0].rows[0][2] == "—"
+    assert transaction_section.tables[0].rows[0][2] == "未采集（事务记录缺少开始时间）"
     assert transaction_section.tables[0].rows[0][3] == "V$TRANSACTION.START_DATE"
     cli = render_emergency_triage(report, build_priority_candidates(report), capture_started_at="sample")
     assert "事务开始时间：未知（V$TRANSACTION.START_DATE 未提供有效值）" in cli
@@ -962,9 +1034,10 @@ def test_cli_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     report_path = tmp_path / "oracle.html"
     assert main([*prefix, "diagnose", instance.id, "slow", "--report", str(report_path), "--json"],
                 provider=provider, driver=driver) == 0
-    capsys.readouterr()
-    assert "长运行请求 1 条" in report_path.read_text(encoding="utf-8")
-    assert "TOPSECRET" not in report_path.read_text(encoding="utf-8")
+    assert json.loads(capsys.readouterr().out)["incident_summary"]["impact"]["long_running"] == 1
+    page = report_path.read_text(encoding="utf-8")
+    assert 'id="sql-resource-001"' in page and 'id="page-sql"' in page and "运行时长估计" in page
+    assert "TOPSECRET" not in page
     _, _, _, driver = fixture()
     assert main([*prefix, "diagnose", instance.id, "top-sql", "--json"],
                 provider=provider, driver=driver) == 0

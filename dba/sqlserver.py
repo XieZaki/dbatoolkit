@@ -13,11 +13,19 @@ from dba.capabilities import ServerCapabilities
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import CredentialProvider, Mode, validate_monitoring_credential
-from dba.errors import ToolkitError, driver_error, sqlserver_connection_error
+from dba.errors import (
+    ToolkitError,
+    client_sql_deadline_error,
+    database_error_log_fields,
+    driver_error,
+    set_database_error_connection_status,
+    sqlserver_connection_error,
+)
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
 from dba.registry import SqlScript, SqlScriptRegistry, fetch_bounded_rows
 from dba.settings import SQLServerSettings
+from dba.sql_timeout import SqlDeadline, SqlDeadlineExpired
 
 
 class Cursor(Protocol):
@@ -57,7 +65,8 @@ def load_driver() -> Driver:
                 "Install the sqlserver extra and approved Microsoft ODBC Driver 18 or compatible Driver 17.",
             ) from None
         raise
-    # Set before the first ODBC connection, so close releases the physical session.
+    # Set before this adapter calls drivers() or connect(): either can create
+    # the process-wide ODBC environment. An existing environment is unchanged.
     setattr(module, "pooling", False)
     return cast(Driver, module)
 
@@ -117,6 +126,7 @@ class SQLServerAdapter(Adapter):
             raise ToolkitError("AlreadyConnected", "Adapter already connected.")
         self.preflight_checks = {}
         started = time.monotonic()
+        connection_started = started
         error: ToolkitError | None = None
         phase = "Registry"
         try:
@@ -168,6 +178,7 @@ class SQLServerAdapter(Adapter):
             connection_string = ";".join(
                 f"{key}={_odbc_value(value)}" for key, value in parts.items()
             )
+            connection_started = time.monotonic()
             self._connection = driver.connect(
                 connection_string,
                 timeout=self.settings.connect_timeout,
@@ -193,6 +204,8 @@ class SQLServerAdapter(Adapter):
                     encrypt=self.settings.encrypt,
                     trust_server_certificate=self.settings.trust_server_certificate,
                     secret=self._password,
+                    connection_timeout_seconds=self.settings.connect_timeout,
+                    elapsed_ms=int((time.monotonic() - connection_started) * 1000),
                 )
             )
         except Exception as exc:
@@ -202,14 +215,21 @@ class SQLServerAdapter(Adapter):
                 encrypt=self.settings.encrypt,
                 trust_server_certificate=self.settings.trust_server_certificate,
                 secret=self._password,
+                connection_timeout_seconds=self.settings.connect_timeout,
+                elapsed_ms=int((time.monotonic() - connection_started) * 1000),
             )
         except BaseException:
             error = ToolkitError("ConnectionInterrupted", "Connection interrupted.")
             raise
         finally:
-            self._audit("connect", started, error)
             if error is not None:
-                self._close()
+                connection_established = self._connection is not None
+                close_ok = self._close()
+                if (error.error_type == "ConnectionTimeout" and error.error_category == "TIMEOUT"):
+                    status = ("UNKNOWN" if not close_ok else
+                              "DISCARDED" if connection_established else "NOT_ESTABLISHED")
+                    set_database_error_connection_status(error, status)
+            self._audit("connect", started, error)
         if error is not None:
             raise error from None
 
@@ -343,32 +363,48 @@ class SQLServerAdapter(Adapter):
         error: ToolkitError | None = None
         script_name = "unregistered"
         authorized = False
+        execution_phase = "Execute"
+        deadline: SqlDeadline | None = None
         try:
             self.registry.authorize(script, DatabaseType.SQLSERVER)
             authorized = True
             script_name = script.metadata.name
             if self._connection is None:
                 raise ToolkitError("NotConnected", "Connection is closed.")
-            # pyodbc applies connection.timeout to newly created cursors.
-            self._connection.timeout = min(
-                script.metadata.timeout_seconds, self.settings.query_timeout
+            deadline = SqlDeadline.start(
+                self.settings.effective_sql_timeout(script.metadata.timeout_seconds)
             )
+            # pyodbc applies connection.timeout to newly created cursors.
+            self._connection.timeout = deadline.timeout_seconds
             cursor = self._connection.cursor()
+            deadline.require_remaining("Execute")
             if parameters is None:
                 cursor.execute(script.text)
             else:
                 cursor.execute(script.text, *parameters)
+            deadline.require_remaining("Execute")
             if cursor.description is None:
                 raise ToolkitError("InvalidResult", "Read-only script returned no rowset.")
             columns = [str(item[0]) for item in cursor.description]
+            execution_phase = "Fetch"
             bounded = fetch_bounded_rows(
-                cursor, script.metadata.max_rows, script.metadata.max_result_bytes
+                cursor, script.metadata.max_rows, script.metadata.max_result_bytes,
+                deadline=deadline,
             )
             truncated = bounded.truncated
             result_bytes = bounded.result_bytes
             rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in bounded.rows)
         except ToolkitError as exc:
             error = exc
+        except SqlDeadlineExpired:
+            assert deadline is not None
+            error = client_sql_deadline_error(
+                "sqlserver", self.odbc_driver or "pyodbc", execution_phase=execution_phase,
+                timeout_seconds=deadline.timeout_seconds,
+                script_timeout_seconds=script.metadata.timeout_seconds,
+                elapsed_ms=int(deadline.elapsed() * 1000),
+                script_path=f"{script.metadata.database_type.value}/{script_name}.sql",
+            )
         except (ValidationError, OSError, UnicodeError) as exc:
             error = (
                 ToolkitError(
@@ -376,10 +412,28 @@ class SQLServerAdapter(Adapter):
                     "SQL is not an unchanged reviewed script from this registry.",
                 )
                 if not authorized
-                else driver_error(exc, "Query", secret=self._password, driver=self.odbc_driver or "pyodbc")
+                else driver_error(
+                    exc, "Query", secret=self._password, driver=self.odbc_driver or "pyodbc",
+                    execution_phase=execution_phase,
+                    timeout_seconds=self.settings.effective_sql_timeout(script.metadata.timeout_seconds),
+                    effective_timeout_seconds=self.settings.effective_sql_timeout(
+                        script.metadata.timeout_seconds),
+                    script_timeout_seconds=script.metadata.timeout_seconds,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    script_path=f"{script.metadata.database_type.value}/{script_name}.sql",
+                )
             )
         except Exception as exc:
-            error = driver_error(exc, "Query", secret=self._password, driver=self.odbc_driver or "pyodbc")
+            error = driver_error(
+                exc, "Query", secret=self._password, driver=self.odbc_driver or "pyodbc",
+                execution_phase=execution_phase,
+                timeout_seconds=self.settings.effective_sql_timeout(script.metadata.timeout_seconds),
+                effective_timeout_seconds=self.settings.effective_sql_timeout(
+                    script.metadata.timeout_seconds),
+                script_timeout_seconds=script.metadata.timeout_seconds,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                script_path=f"{script.metadata.database_type.value}/{script_name}.sql",
+            )
         except BaseException:
             error = ToolkitError("QueryInterrupted", "Query interrupted.")
             raise
@@ -393,31 +447,21 @@ class SQLServerAdapter(Adapter):
                 rows = ()
                 truncated = False
                 result_bytes = 0
-                self._close()
+                close_ok = self._close()
+                set_database_error_connection_status(error, "DISCARDED" if close_ok else "UNKNOWN")
             details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
                                        "result_bytes": result_bytes}
             if authorized:
                 details.update(
                     {
                         "sql_sha256": hashlib.sha256(script.text.encode("utf-8")).hexdigest(),
-                        "timeout_seconds": min(
-                            script.metadata.timeout_seconds, self.settings.query_timeout
-                        ),
+                        "timeout_seconds": self.settings.effective_sql_timeout(
+                            script.metadata.timeout_seconds),
                         "max_rows": script.metadata.max_rows,
                         "max_result_bytes": script.metadata.max_result_bytes,
                     }
                 )
             self._audit(script_name, started, error, details)
-        database_error_payload: dict[str, Any] | None = None
-        if error is not None and error.database_error is not None:
-            detail = error.database_error
-            if isinstance(detail, dict):
-                database_error_payload = detail
-            else:
-                to_dict = getattr(detail, "to_dict", None)
-                payload = to_dict() if callable(to_dict) else None
-                if isinstance(payload, dict):
-                    database_error_payload = payload
         return CollectorResult(
             self.instance.id,
             script_name,
@@ -430,7 +474,7 @@ class SQLServerAdapter(Adapter):
             error is None,
             error.error_type if error else None,
             str(error) if error else None,
-            database_error_payload,
+            error.database_error_payload() if error else None,
         )
 
     def _audit(
@@ -451,6 +495,7 @@ class SQLServerAdapter(Adapter):
                     "result": "failed" if error else "ok",
                     "elapsed_time": time.monotonic() - started,
                     "error_type": error.error_type if error else None,
+                    **database_error_log_fields(error.database_error_payload() if error else None),
                 }
             },
         )

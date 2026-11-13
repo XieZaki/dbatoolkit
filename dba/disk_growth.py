@@ -12,6 +12,7 @@ from dba.logging import redact
 from dba.mysql import MySQLAdapter
 from dba.oracle import OracleAdapter
 from dba.postgresql import PostgreSQLAdapter
+from dba.settings import SQLSERVER_LONG_TRANSACTION_SECONDS
 from dba.sqlserver import SQLServerAdapter
 
 DiskAdapter = SQLServerAdapter | PostgreSQLAdapter | MySQLAdapter | OracleAdapter
@@ -124,7 +125,7 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
             log["last_log_backup_time"] = backups[0].get("last_log_backup_time")
         for row in (_rows(results, "disk_transactions") or _rows(results, "transactions")):
             age = _number(row.get("transaction_age_seconds"))
-            if age is not None and age >= 3600:
+            if age is not None and age >= SQLSERVER_LONG_TRANSACTION_SECONDS:
                 add("SQLSERVER_OLD_ACTIVE_TRANSACTION", Severity.WARNING, "transactions",
                     {"transaction_id": row.get("transaction_id"), "age_seconds": age},
                     "Review the owning transaction and log reuse evidence.")

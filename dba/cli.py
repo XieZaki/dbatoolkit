@@ -1,12 +1,15 @@
 import argparse
 import re
 import sys
-import time
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast
+from uuid import uuid4
 
 from dba import __version__
 from dba.active_sql_collectors import SQLServerActiveSQLCollector
@@ -38,7 +41,7 @@ from dba.encrypted_credentials import (
     prompt_new_master_password,
 )
 from dba.environment import driver_info
-from dba.errors import ToolkitError
+from dba.errors import ToolkitError, database_error_log_fields
 from dba.execution_plan import diagnose_plan
 from dba.execution_plan_profiles import validate_plan_profiles
 from dba.incident import (
@@ -87,7 +90,6 @@ from dba.reporting import (
     HtmlReportRenderer,
     build_report_model,
     render_bounded,
-    render_report_section_text,
 )
 from dba.reporting.normalizers import display_message, display_value
 from dba.runtime import RuntimeStatus, database_runtime_status, doctor, runtime_info
@@ -109,6 +111,7 @@ from dba.slow_profiles import (
 )
 from dba.sqlserver import SQLServerAdapter
 from dba.sqlserver_collectors import COLLECTORS
+from dba.sqlserver_locks import LOCK_COLLECTOR
 from dba.top_sql import TOP_LIMIT
 from dba.top_sql_collectors import METRICS as SQLSERVER_TOP_SQL_METRICS
 from dba.top_sql_collectors import MYSQL_METRICS as MYSQL_TOP_SQL_METRICS
@@ -120,7 +123,6 @@ from dba.top_sql_collectors import (
     PostgreSQLTopSQLCollector,
     SQLServerTopSQLCollector,
 )
-from dba.top_sql_integration import collect_slow_top_sql
 from dba.top_sql_profiles import validate_top_sql_profiles
 from dba.top_sql_report import TopSQLDiagnosticReport
 from dba.versioning import (
@@ -183,14 +185,15 @@ def _account_security(adapter: Any) -> dict[str, Any]:
     return {"classification": "NON_PRIVILEGED", "evidence_source": "monitor_preflight"}
 
 
-def _database_error_payload(error: object) -> dict[str, Any] | None:
-    if isinstance(error, dict):
-        return error
-    to_dict = getattr(error, "to_dict", None)
-    if callable(to_dict):
-        payload = to_dict()
-        return payload if isinstance(payload, dict) else None
-    return None
+def _collector_failure_payload(sample: CollectorResult) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "collector_name": sample.collector_name,
+        "error_type": sample.error_type or "QueryFailed",
+        "error_message": sample.error_message or "Required sample unavailable.",
+    }
+    if sample.database_error is not None:
+        payload["error"] = sample.database_error
+    return payload
 
 
 class _InjectedCredentialProvider(CredentialProvider):
@@ -284,6 +287,55 @@ def _diagnostic_report_path(database_id: str, scenario: str, requested: Path | N
     return candidate
 
 
+def _elapsed_ms(started: float, finished: float) -> int:
+    elapsed = finished - started
+    return max(1, round(elapsed * 1000)) if elapsed > 0 else 0
+
+
+def _diagnostic_collection_timings(started: float, stage_started: float, stage_finished: float,
+                                   first_summary: float | None) -> dict[str, int | None]:
+    # `started` precedes Inventory loading. The stage window includes analysis
+    # interleaved with capture, while the full window also includes setup and
+    # final diagnostic assembly, before any HTML report work.
+    return {
+        "time_to_first_summary_ms": _elapsed_ms(started, first_summary) if first_summary is not None else None,
+        "collection_ms": _elapsed_ms(stage_started, stage_finished),
+        "full_collection_ms": _elapsed_ms(started, perf_counter()),
+        "report_write_ms": None,
+        "report_write_duration_ms": None,
+        "total_report_ms": None,
+    }
+
+
+def _write_timed_diagnostic_html(path: Path, html: str, started: float,
+                                 placeholders: dict[str, str]) -> dict[str, int]:
+    data = html.encode("utf-8")
+    slots = {key: (data.index(token.encode("ascii")), len(token)) for key, token in placeholders.items()}
+    write_started = perf_counter()
+    created = False
+    try:
+        with path.open("xb") as report_file:
+            created = True
+            report_file.write(data)
+            report_file.flush()
+            # A report cannot include the time taken to write its own final
+            # timing values. Use the same content-flush endpoint for both
+            # formats, then fill only the two reserved values in place.
+            content_written = perf_counter()
+            write_duration = _elapsed_ms(write_started, content_written)
+            timings = {"report_write_ms": write_duration, "report_write_duration_ms": write_duration,
+                       "total_report_ms": _elapsed_ms(started, content_written)}
+            for key, (offset, width) in slots.items():
+                report_file.seek(offset)
+                report_file.write(f"{timings[key]} ms".ljust(width).encode("ascii"))
+    except BaseException:
+        if created:
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
+        raise
+    return timings
+
+
 def _configure_windows_pipe_encoding() -> None:
     """Keep human-readable UTF-8 output when Windows redirects CLI streams."""
     if not sys.platform.startswith("win"):
@@ -309,6 +361,7 @@ def main(
                 "  dba check <database_id>\n"
                 "  dba status <database_id>\n"
                 "  dba diagnose <database_id> slow\n"
+                "  dba diagnose <database_id> top-sql\n"
                 "  dba diagnose <database_id> disk-growth\n\n"
                 "高级命令：dba -h"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -429,12 +482,12 @@ def main(
     diagnose.add_argument("--con-id", type=int, help="Oracle 当前容器 ID（12c 及以上）")
     diagnose.add_argument("--plan-hash", type=int, help="期望的 Oracle PLAN_HASH_VALUE")
     diagnose.add_argument("--metric", choices=TOP_SQL_METRIC_CHOICES, default=None,
-                          help="Top SQL 累计指标（默认：SQL Server/Oracle cpu_time；PostgreSQL total_exec_time；MySQL sum_timer_wait）")
-    diagnose.add_argument("--top", type=int, default=10, help="Top SQL 结果行数上限（1–100）")
+                          help="仅用于 top-sql（默认：SQL Server/Oracle cpu_time；PostgreSQL total_exec_time；MySQL sum_timer_wait）")
+    diagnose.add_argument("--top", type=int, default=None,
+                          help="top-sql 或 active-sql 的行数上限（1–100，默认 10）")
     diagnose.add_argument("--sort", choices=("cpu", "logical-reads", "elapsed"), default="cpu",
                           help="活动 SQL 终端主排序方式（HTML 报告始终包含三种排序）")
-    diagnose.add_argument("--include-top-sql", action="store_true",
-                          help="慢 SQL 核心证据完整后，附加一次 Top SQL 累计快照")
+    diagnose.add_argument("--include-top-sql", action="store_true", help=argparse.SUPPRESS)
     diagnose.add_argument("--report", type=Path, help="HTML 报告输出路径")
     diagnose.add_argument("--format", choices=("console", "json"), default="console",
                           help=argparse.SUPPRESS)
@@ -449,6 +502,19 @@ def main(
         credential_parser.add_argument("--store-path", type=Path, default=None,
                                        help="Explicit encrypted Store path; never inferred from another Store")
     args = parser.parse_args(argv)
+    if args.command == "diagnose":
+        argument_error = None
+        if args.include_top_sql:
+            argument_error = "--include-top-sql 已移除。"
+        elif args.scenario == "slow" and (args.metric is not None or args.top is not None):
+            argument_error = "slow 不接受 --metric 或 --top。"
+        if argument_error is not None:
+            _emit(args, "diagnose", {"success": False, "error_type": "InvalidArgument",
+                                     "error_message": argument_error,
+                                     "guidance": "累计统计请使用 dba diagnose <database_id> top-sql。"})
+            return 1
+        if args.top is None:
+            args.top = 10
     if args.command == "driver":
         from dba.driver_manager import DriverManager
 
@@ -766,16 +832,19 @@ def main(
                    "backend": getattr(store, "backend_name", None)})
             return 1
     logger = configure_logging()
-    started = time.monotonic()
+    # Use the high-resolution monotonic clock for short HTML writes on Windows.
+    started = perf_counter()
     replication_log_fields: dict[str, Any] = {}
     account_security_credential: Credential | None = None
     instance_for_hint = None
     adapter_instance: Any | None = None
     version_profile_for_hint: ResolvedDiagnosticProfile | None = None
-    diagnostic_timing: dict[str, Any] | None = None
+    diagnostic_timing: dict[str, int | None] | None = None
     triage_completed_at: str | None = None
     capture_started_at: str | None = None
     capture_finished_at: str | None = None
+    slow_samples: tuple[CollectorResult, ...] = ()
+    slow_report: DiagnosticReport | None = None
     try:
         inventory = Inventory.load(args.inventory)
         if args.command == "list":
@@ -887,10 +956,6 @@ def main(
                     raise ToolkitError("NotImplemented", "Memory Grant diagnosis is not implemented for this database type.")
                 if args.scenario in {"top-sql", "active-sql"} and (
                         type(args.top) is not int or not 1 <= args.top <= TOP_LIMIT):
-                    raise ToolkitError("InvalidTopN", f"Top SQL row limit must be between 1 and {TOP_LIMIT}.")
-                if args.include_top_sql and args.scenario != "slow":
-                    raise ToolkitError("InvalidArgument", "--include-top-sql is available only with diagnose slow.")
-                if args.include_top_sql and (type(args.top) is not int or not 1 <= args.top <= TOP_LIMIT):
                     raise ToolkitError("InvalidTopN", f"Top SQL row limit must be between 1 and {TOP_LIMIT}.")
             if driver is None:
                 runtime = database_runtime_status(instance.db_type)
@@ -1069,7 +1134,7 @@ def main(
                                 "No verified disk-growth diagnostic profile is available for this database version.",
                             )
                         cast(Any, adapter).disk_growth_profile = profile
-                        stage_started = time.monotonic()
+                        stage_started = perf_counter()
                         capture_started_at = datetime.now(timezone.utc).isoformat()
                         report = collect_disk_growth_phase(adapter, emergency=True)
                         report.details.update({"capture_started_at": capture_started_at,
@@ -1080,7 +1145,7 @@ def main(
                         first_summary_monotonic: float | None = None
                         if args.format == "console" and not args.json and not args.quiet:
                             print(render_emergency_triage(report, capture_started_at=capture_started_at), flush=True)
-                            first_summary_monotonic = time.monotonic()
+                            first_summary_monotonic = perf_counter()
                         disk_results = cast(tuple[CollectorResult, ...],
                                             getattr(report, "_collector_results", ()))
                         if report.details.get("emergency_evidence_complete"):
@@ -1089,6 +1154,7 @@ def main(
                         else:
                             report.details["full_profile_evidence_complete"] = False
                             report.details["full_profile_evidence_status"] = "INCOMPLETE"
+                        stage_finished = perf_counter()
                         report.details.update({"capture_started_at": capture_started_at,
                                                "triage_completed_at": triage_completed_at,
                                                "capture_finished_at": datetime.now(timezone.utc).isoformat(),
@@ -1101,13 +1167,8 @@ def main(
                                 else "无额外补充查询；HTML 报告已生成"
                             print(completion, flush=True)
                         capture_finished_at = report.details["capture_finished_at"]
-                        diagnostic_timing = {
-                            "time_to_first_summary_ms": round((first_summary_monotonic - started) * 1000)
-                            if first_summary_monotonic is not None else None,
-                            "collection_ms": round((time.monotonic() - stage_started) * 1000),
-                            "full_collection_ms": round((time.monotonic() - started) * 1000),
-                            "report_write_ms": None,
-                        }
+                        diagnostic_timing = _diagnostic_collection_timings(
+                            started, stage_started, stage_finished, first_summary_monotonic)
                         output = {"success": not report.details["incomplete"], "report": asdict(report)}
                         output["version_profile"] = asdict(profile)
                     elif args.scenario == "slow":
@@ -1116,6 +1177,7 @@ def main(
                             raise ToolkitError(
                                 "VersionVerificationRequired",
                                 "Slow diagnosis requires a declared version_family matching the detected server version.",
+                                database_error=detection.database_error,
                             )
                         if profile.support_state != SupportState.SUPPORTED:
                             raise ToolkitError(
@@ -1123,7 +1185,7 @@ def main(
                                 "No verified slow diagnostic profile is available for this database version.",
                             )
                         cast(Any, adapter).slow_profile = profile
-                        stage_started = time.monotonic()
+                        stage_started = perf_counter()
                         capture_started_at = datetime.now(timezone.utc).isoformat()
                         emergency_names = emergency_collectors_for_adapter(adapter)
                         phase_collect: Any
@@ -1133,23 +1195,23 @@ def main(
                             phase_build = build_oracle_slow_phase_report
                         elif isinstance(adapter, MySQLAdapter):
                             phase_collect = collect_mysql_slow_phase
-                            phase_build = build_mysql_slow_phase_report
+                            phase_build = partial(build_mysql_slow_phase_report, version=adapter.get_server_version())
                         elif isinstance(adapter, PostgreSQLAdapter):
                             phase_collect = collect_pg_slow_phase
-                            phase_build = build_pg_slow_phase_report
+                            phase_build = partial(build_pg_slow_phase_report, version=adapter.get_server_version())
                         else:
                             phase_collect = collect_sqlserver_slow_phase
-                            phase_build = build_sqlserver_slow_phase_report
-                        collected = phase_collect(cast(Any, adapter), emergency_names)
-                        report = phase_build(adapter, collected, emergency=True)
+                            phase_build = partial(build_sqlserver_slow_phase_report, version=adapter.get_server_version())
+                        slow_samples = phase_collect(cast(Any, adapter), emergency_names)
+                        report = slow_report = phase_build(adapter, slow_samples, emergency=True)
                         # Oracle's previous-SQL lookup is optional evidence, but it
                         # is part of the root SQL context shown in the first CLI
                         # summary. Collect it before that summary when core evidence
                         # is complete; it remains optional for the safety gate.
                         if (isinstance(adapter, OracleAdapter)
                                 and cast(Any, report).details.get("emergency_evidence_complete") is True):
-                            collected = phase_collect(cast(Any, adapter), ("previous_sql",), collected)
-                            report = phase_build(adapter, collected, emergency=True)
+                            slow_samples = phase_collect(cast(Any, adapter), ("previous_sql",), slow_samples)
+                            report = slow_report = phase_build(adapter, slow_samples, emergency=True)
                         supplemental_expected = bool(cast(Any, report).details.get(
                             "supplemental_not_collected"))
                         cast(Any, report).details.update({"capture_started_at": capture_started_at,
@@ -1177,20 +1239,20 @@ def main(
                             print(render_emergency_triage(
                                 report, emergency_candidates, capture_started_at=capture_started_at,
                                 slow_threshold=threshold), flush=True)
-                            first_summary_monotonic = time.monotonic()
+                            first_summary_monotonic = perf_counter()
                         core_complete = cast(Any, report).details.get("emergency_evidence_complete") is True
                         if core_complete:
                             full_names = tuple(dict.fromkeys(
                                 required_collectors_for_adapter(adapter, ())
                                 + optional_collectors_for_adapter(adapter)))
-                            collected = phase_collect(cast(Any, adapter), full_names, collected)
-                            report = phase_build(cast(Any, adapter), collected, emergency=False)
+                            slow_samples = phase_collect(cast(Any, adapter), full_names, slow_samples)
+                            report = slow_report = phase_build(cast(Any, adapter), slow_samples, emergency=False)
                             if isinstance(adapter, MySQLAdapter):
                                 if args.format == "console" and not args.json and not args.quiet:
                                     print("正在采集根阻塞最近 SQL...", flush=True)
                                 recent_result = collect_mysql_recent_statements(adapter, report)
-                                collected = (*collected, recent_result)
-                                report = phase_build(cast(Any, adapter), collected, emergency=False)
+                                slow_samples = (*slow_samples, recent_result)
+                                report = slow_report = phase_build(cast(Any, adapter), slow_samples, emergency=False)
                                 cast(Any, report).details["recent_statements"] = list(recent_result.rows)
                                 cast(Any, report).details["recent_statements_elapsed_ms"] = recent_result.elapsed_ms
                                 if args.format == "console" and not args.json and not args.quiet:
@@ -1205,6 +1267,8 @@ def main(
                                     "reason": "Required emergency evidence was incomplete; recent SQL was not queried.",
                                     "statements": [],
                                 }]
+                        stage_finished = perf_counter()
+                        capture_finished_at = datetime.now(timezone.utc).isoformat()
                         final_candidates = build_priority_candidates(report, include_blocking_victims=True)
                         cast(Any, report).details.update({"priority_candidates": final_candidates,
                                                "diagnostic_profile": {
@@ -1215,22 +1279,11 @@ def main(
                                                "manual_action_decisions": manual_action_decisions(report),
                                                "capture_started_at": capture_started_at,
                                                "triage_completed_at": triage_completed_at,
-                                               "capture_finished_at": datetime.now(timezone.utc).isoformat(),
+                                               "capture_finished_at": capture_finished_at,
                                                "snapshot_consistency": "BEST_EFFORT",
                                                "supplemental_pending": False})
                         final_triage = build_performance_triage(report)
                         cast(Any, report).details["performance_triage"] = final_triage
-                        top_sql_integration = collect_slow_top_sql(
-                            adapter, cast(Any, report).details,
-                            enabled=args.include_top_sql,
-                            core_complete=core_complete,
-                            metric=args.metric,
-                            top_n=args.top,
-                        )
-                        if top_sql_integration is not None:
-                            cast(Any, report).details["top_sql_integration"] = top_sql_integration
-                            if isinstance(top_sql_integration.get("top_sql"), dict):
-                                cast(Any, report).details["top_sql"] = top_sql_integration["top_sql"]
                         if (args.format == "console" and not args.json and not args.quiet
                                 and _triage_summary_fingerprint(final_candidates, final_triage)
                                 != emergency_triage_fingerprint):
@@ -1245,15 +1298,16 @@ def main(
                                 "补充证据采集结束，仍有缺失或不完整项；详见报告") if supplemental_expected \
                                 else "无额外补充查询；HTML 报告已生成"
                             print(completion, flush=True)
-                        capture_finished_at = cast(Any, report).details["capture_finished_at"]
-                        diagnostic_timing = {
-                            "time_to_first_summary_ms": round((first_summary_monotonic - started) * 1000)
-                            if first_summary_monotonic is not None else None,
-                            "collection_ms": round((time.monotonic() - stage_started) * 1000),
-                            "full_collection_ms": round((time.monotonic() - started) * 1000),
-                            "report_write_ms": None,
-                        }
+                        diagnostic_timing = _diagnostic_collection_timings(
+                            started, stage_started, stage_finished, first_summary_monotonic)
                         output = {"success": not cast(Any, report).details["incomplete"], "report": asdict(report)}
+                        failed_sample = next((sample for sample in slow_samples if not sample.success), None)
+                        if failed_sample is not None:
+                            collection_failure = _collector_failure_payload(failed_sample)
+                            if not output["success"]:
+                                output.update(collection_failure)
+                            if args.format == "console" and not args.json and not args.quiet:
+                                print(render_human("diagnose", collection_failure), flush=True)
                         output["version_profile"] = asdict(profile)
                     elif args.scenario == "replication":
                         report = diagnose_replication(adapter)
@@ -1448,20 +1502,23 @@ def main(
                 plan_artifact_path: Path | None = None
                 if args.scenario == "plan" and plan_xml:
                     plan_artifact_path = report_path.with_suffix(".sqlplan")
+                timing_placeholders = {}
+                if diagnostic_timing is not None:
+                    cast(Any, report).details["diagnostic_timings_ms"] = diagnostic_timing
+                    timing_placeholders = {key: uuid4().hex for key in ("report_write_duration_ms", "total_report_ms")}
                 model = build_report_model(report, incident_summary,
                                            plan_artifact=(plan_artifact_path.name
-                                                          if plan_artifact_path else None))
+                                                          if plan_artifact_path else None),
+                                           timing_placeholders=timing_placeholders)
                 html_content = render_bounded(model, HtmlReportRenderer().render)
-                report_write_started = time.monotonic()
-                with report_path.open("x", encoding="utf-8") as report_file:
-                    report_file.write(html_content)
-                report_write_duration_ms = round((time.monotonic() - report_write_started) * 1000)
-                report_written_at = datetime.now(timezone.utc).isoformat()
-                if diagnostic_timing is not None:
-                    diagnostic_timing["report_write_duration_ms"] = report_write_duration_ms
-                    diagnostic_timing["total_report_ms"] = round((time.monotonic() - started) * 1000)
+                if diagnostic_timing is None:
+                    with report_path.open("x", encoding="utf-8") as report_file:
+                        report_file.write(html_content)
+                else:
+                    diagnostic_timing.update(_write_timed_diagnostic_html(
+                        report_path, html_content, started, timing_placeholders))
+                    report_written_at = datetime.now(timezone.utc).isoformat()
                     cast(Any, report).details["report_written_at"] = report_written_at
-                    cast(Any, report).details["diagnostic_timings_ms"] = diagnostic_timing
                     output["report"] = asdict(report)
                     output["capture_started_at"] = capture_started_at
                     output["triage_completed_at"] = triage_completed_at
@@ -1497,11 +1554,6 @@ def main(
                     elif args.scenario == "plan" and instance.db_type == DatabaseType.ORACLE:
                         print(render_oracle_plan_human(report, str(report_path)))
                     elif args.scenario in {"slow", "disk-growth"}:
-                        if args.scenario == "slow" and args.include_top_sql and not args.quiet:
-                            section = next((item for item in model.sections
-                                            if item.section_id == "top-sql"), None)
-                            if section is not None:
-                                print(render_report_section_text(section), flush=True)
                         if args.quiet:
                             status = "READY" if output.get("success") else "PARTIAL"
                             print(f"{display_value(status)}  {report_path}", flush=True)
@@ -1521,7 +1573,7 @@ def main(
                 "event": {
                     "module": "cli",
                     "result": "ok",
-                    "elapsed_time": time.monotonic() - started,
+                    "elapsed_time": perf_counter() - started,
                     "database_id": getattr(args, "database_id", None),
                     **replication_log_fields,
                 }
@@ -1550,34 +1602,31 @@ def main(
                     else type(exc).__name__,
                     "error_message": detail,
                 }
+        if isinstance(exc, ToolkitError) and exc.error_category is not None:
+            failure["error_category"] = exc.error_category
         if version_profile_for_hint is not None:
             failure["version_profile"] = asdict(version_profile_for_hint)
         if isinstance(exc, ToolkitError) and exc.trigger_reason is not None:
             failure["trigger_reason"] = exc.trigger_reason
-        database_error = getattr(exc, "database_error", None)
-        if database_error is not None:
-            vendor_payload = _database_error_payload(database_error)
-            if vendor_payload is not None:
-                failure["error"] = vendor_payload
-                failure["database_type"] = vendor_payload.get("database_type")
-                failure["driver"] = vendor_payload.get("driver")
+        vendor_payload = exc.database_error_payload() if isinstance(exc, ToolkitError) else None
+        first_slow_failure = next((sample for sample in slow_samples
+                                   if not sample.success and sample.collector_name != LOCK_COLLECTOR), None)
+        if first_slow_failure is not None:
+            failure["report_error"] = {"error_type": failure["error_type"], "error_message": detail}
+            failure.update(_collector_failure_payload(first_slow_failure))
+            vendor_payload = first_slow_failure.database_error
+            if slow_report is not None:
+                failure["report"] = asdict(slow_report)
+            else:
+                failure["samples"] = [asdict(sample) for sample in slow_samples]
+        if vendor_payload is not None:
+            failure["error"] = vendor_payload
+            failure["database_type"] = vendor_payload.get("database_type")
+            failure["driver"] = vendor_payload.get("driver")
         if instance_for_hint is not None:
             failure["database_id"] = instance_for_hint.id
             failure["target"] = f"{instance_for_hint.host}:{instance_for_hint.port}"
             failure["alias"] = instance_for_hint.credential_alias
-            if database_error is not None:
-                safe_settings = public_connection_settings(
-                    instance_for_hint.db_type,
-                    _effective_settings(instance_for_hint, getattr(args, "settings", None)),
-                )
-                failure["effective_connection"] = {
-                    "host": instance_for_hint.host,
-                    "port": instance_for_hint.port,
-                    "database": instance_for_hint.database or "NOT_SET",
-                    "connect_timeout": safe_settings.get("connect_timeout"),
-                    "ssl": ("DISABLED" if safe_settings.get("ssl_disabled") is True else
-                            "ENABLED" if safe_settings.get("ssl_disabled") is False else "DEFAULT"),
-                }
             try:
                 selected_driver = database_runtime_status(
                     instance_for_hint.db_type
@@ -1589,6 +1638,15 @@ def main(
                     _effective_settings(instance_for_hint, getattr(args, "settings", None)),
                 ) if instance_for_hint.db_type in {DatabaseType.SQLSERVER, DatabaseType.POSTGRESQL,
                                                    DatabaseType.MYSQL, DatabaseType.ORACLE} else {})
+                if vendor_payload is not None and safe_settings:
+                    failure["effective_connection"] = {
+                        "host": instance_for_hint.host,
+                        "port": instance_for_hint.port,
+                        "database": instance_for_hint.database or "NOT_SET",
+                        "connect_timeout": safe_settings.get("connect_timeout"),
+                        "ssl": ("DISABLED" if safe_settings.get("ssl_disabled") is True else
+                                "ENABLED" if safe_settings.get("ssl_disabled") is False else "DEFAULT"),
+                    }
                 if "encrypt" in safe_settings:
                     failure["tls"] = (
                         f"Encrypt={'yes' if safe_settings.get('encrypt') else 'no'}; "
@@ -1613,24 +1671,19 @@ def main(
                     "classification": "NON_PRIVILEGED",
                     "write_capability_detected": exc.trigger_reason,
                 }
-        _emit(args, args.command or "help", failure)
+        _emit(args, args.command or "help", _redact_diagnostic_json(failure))
         logger.error(
             "event",
             extra={
                 "event": {
                     "module": "cli",
                     "result": "failed",
-                    "elapsed_time": time.monotonic() - started,
-                    "error_type": getattr(exc, "error_type", type(exc).__name__),
+                    "elapsed_time": perf_counter() - started,
+                    "error_type": failure["error_type"],
                     "database_id": instance_for_hint.id if instance_for_hint else None,
                     "target": (f"{instance_for_hint.host}:{instance_for_hint.port}"
                                if instance_for_hint else None),
-                    "database_type": getattr(database_error, "database_type", None),
-                    "driver": getattr(database_error, "driver", None),
-                    "vendor_code": getattr(database_error, "vendor_code", None),
-                    "sqlstate": getattr(database_error, "sqlstate", None),
-                    "classification": getattr(database_error, "classification", None),
-                    "sanitized_message": getattr(database_error, "message", None),
+                    **database_error_log_fields(vendor_payload),
                 }
             },
         )

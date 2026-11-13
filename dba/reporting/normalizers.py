@@ -5,10 +5,15 @@ from __future__ import annotations
 import re
 from typing import Any
 
+_REQUEST_STATUS_LABELS = {
+    "RUNNABLE": "可运行", "RUNNING": "运行中", "SUSPENDED": "挂起", "SLEEPING": "空闲",
+}
+
 # Human-facing terms shared by terminal and HTML presenters. Domain enums and
 # machine-readable JSON remain unchanged; only exact labels/status values are
 # translated here. Unknown/native identifiers pass through untouched.
 DISPLAY_LABELS = {
+    **_REQUEST_STATUS_LABELS,
     "UNKNOWN": "未知",
     "HEALTHY": "健康",
     "DEGRADED": "需关注",
@@ -17,8 +22,10 @@ DISPLAY_LABELS = {
     "BLOCKING": "锁与阻塞",
     "IDLE_TRANSACTION": "长期未提交事务",
     "LONG_RUNNING_SQL": "慢 SQL",
+    "WAITING_SQL": "需关注的请求等待",
     "HIGH_CONCURRENCY": "高并发",
     "Database": "数据库",
+    "Database Name": "数据库名称",
     "Instance": "实例",
     "Database Type": "数据库类型",
     "Database Engine": "数据库类型",
@@ -52,6 +59,7 @@ DISPLAY_LABELS = {
     "Capture Window": "采集时间窗口",
     "Priority Review Candidates": "优先核查对象",
     "Database ID": "数据库 ID",
+    "Endpoint": "连接地址",
     "Session": "会话",
     "Role": "角色",
     "Status": "状态",
@@ -121,6 +129,9 @@ DISPLAY_LABELS = {
     "Identity reuse note": "会话 ID 复用提示",
     "Target Session": "目标会话",
     "Open Transaction": "未结束事务",
+    "Open Transactions": "未结束事务数",
+    "Transaction Observed": "已观测到事务",
+    "Transaction Identity Verified": "事务身份已核验",
     "Rollback Risk": "回滚风险",
     "Rollback Duration": "回滚耗时",
     "DBA Approval Required": "需要 DBA 审批",
@@ -155,9 +166,6 @@ DISPLAY_LABELS = {
     "DATABASE": "数据库级",
     "SQL_STATEMENT": "SQL 语句",
     "MATCHED_AT_SAMPLE": "采样时匹配",
-    "sleeping": "休眠",
-    "suspended": "挂起",
-    "running": "运行中",
     "Blocked": "被阻塞会话",
     "Long Running": "长运行请求",
     "Data completeness": "证据完整性",
@@ -169,6 +177,11 @@ DISPLAY_LABELS = {
     "Optional unavailable": "可选证据不可用",
     "Collector row limit reached": "已达到采集行数上限",
     "NOT_APPLICABLE": "不适用",
+    "DRIVER_REPORTED": "驱动报告",
+    "CANCELLED_CONFIRMED": "已确认取消",
+    "CANCEL_STATUS_UNKNOWN": "取消状态未知",
+    "DISCARDED": "已丢弃",
+    "RETAINED": "保留",
     "PARTIAL": "部分可用",
     "INCOMPLETE": "不完整",
     "PENDING": "待采集",
@@ -210,6 +223,15 @@ DISPLAY_LABELS = {
     "CPU Time": "CPU 时间",
     "Elapsed Time": "运行耗时",
     "Wait Time (ms)": "等待时长（毫秒）",
+    "Wait Time": "等待时长",
+    "Not Initialized": "尚未初始化",
+    "Initialized": "已初始化",
+    "Ended": "已结束",
+    "Commit Initiated": "正在提交",
+    "Prepared": "已准备",
+    "Committed": "已提交",
+    "Rolling Back": "正在回滚",
+    "Rolled Back": "已回滚",
     "Blocking Session": "阻塞会话",
     "Root Blocker Status": "根阻塞状态",
     "Database Version": "数据库版本",
@@ -512,9 +534,6 @@ DISPLAY_LABELS = {
     "LIMIT_REACHED": "已达到上限",
     "SUCCESS": "成功",
     "CANCELLED": "已取消",
-    "RUNNING": "运行中",
-    "SUSPENDED": "已挂起",
-    "RUNNABLE": "可运行",
     "WAITING": "等待中",
     "GRANTED": "已授予",
     "NOT_GRANTED": "未授予",
@@ -689,7 +708,7 @@ DISPLAY_LABELS = {
     "Confirmed": "已确认",
     "Further investigation required": "待进一步排查",
     "BEST_EFFORT": "尽力采样",
-    "NOT_ESTABLISHED": "尚未确认",
+    "NOT_ESTABLISHED": "未建立连接",
     "CONFIRMED": "已确认",
     "HIGHLY_SUSPECTED": "高度疑似",
     "NEEDS_INVESTIGATION": "待进一步排查",
@@ -710,6 +729,7 @@ DISPLAY_VALUES = {
     "IDENTITY_INCOMPLETE": "身份信息不完整",
     "ROOT_BLOCKER": "根阻塞", "IDLE_OPEN_TRANSACTION": "未结束事务",
     "BLOCKED_VICTIM": "被阻塞会话", "LONG_RUNNING_SQL": "慢 SQL",
+    "WAITING_SQL": "需关注的请求等待",
     "ACTIVE_WAIT": "主动等待语句", "TERMINATE_SESSION": "终止会话参考",
     "CANCEL_QUERY": "取消查询参考", "TRANSACTION_LOG": "事务日志", "WAL": "WAL",
     "BINLOG": "Binlog", "REDO": "Redo", "ARCHIVE": "归档", "FRA": "FRA",
@@ -722,7 +742,7 @@ _STATUS_DISPLAY_VALUES = {
     if re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
 }
 _STATUS_DISPLAY_VALUES.update(DISPLAY_VALUES)
-_STATUS_DISPLAY_VALUES.update({"sleeping": "休眠", "suspended": "挂起", "running": "运行中"})
+_STATUS_DISPLAY_VALUES.update({key.lower(): value for key, value in _REQUEST_STATUS_LABELS.items()})
 _REPORT_ENUM_VALUES = {
     "SQL_STATEMENT": "SQL 语句", "DIGEST": "摘要统计", "CHILD_CURSOR": "子游标",
     "INSTANCE": "实例级", "DATABASE": "数据库级", "DESCENDING": "降序",
@@ -732,8 +752,8 @@ _REPORT_ENUM_VALUES = {
 _DISPLAY_LABEL_LOOKUP = {
     key.casefold(): value for key, value in DISPLAY_LABELS.items()
     if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
-    and key not in {"sleeping", "suspended", "running"}
 }
+_REQUEST_STATUS_FIELDS = {"request status", "session status", "执行状态", "请求状态", "会话状态"}
 _STATUS_FIELDS = {
     "status", "severity", "completeness", "data completeness", "data visibility",
     "wait category", "主要等待类别",
@@ -766,6 +786,11 @@ _ERROR_TITLES = {
     "PrivilegedAccount": "监控账号不符合安全要求",
     "UnsafeMonitoringAccount": "监控账号安全检查未通过",
     "QueryDenied": "数据库拒绝只读查询",
+    "QueryTimeout": "数据库查询超时",
+    "QueryCancelled": "数据库已确认查询取消",
+    "QueryConnectionLost": "查询期间连接丢失",
+    "QueryCancelStatusUnknown": "查询取消状态未确认",
+    "UnsupportedVersion": "数据库版本不受当前诊断配置支持",
     "ConnectionFailed": "数据库连接失败",
     "ConnectionTimeout": "数据库连接超时",
     "ConnectionTLSFailed": "数据库 TLS 校验失败",
@@ -789,6 +814,11 @@ _ERROR_MESSAGES = {
     "PrivilegedAccount": "监控账号不符合只读安全要求，诊断已停止。请使用专用最小权限账号。",
     "UnsafeMonitoringAccount": "监控账号安全检查未通过，诊断已停止。请核查账号属性和授权配置。",
     "QueryDenied": "数据库拒绝了受审核的只读查询。请保留数据库错误证据并查看数据库部署授权说明。",
+    "QueryTimeout": "诊断查询达到超时限制。本次连接会被丢弃；请依据数据库返回错误判断服务端是否已停止查询。",
+    "QueryCancelled": "数据库返回了查询取消错误。请结合 SQLSTATE、数据库错误码和消息确认取消原因。",
+    "QueryConnectionLost": "查询期间数据库连接丢失，服务端是否停止执行未确认。本次连接会被丢弃。",
+    "QueryCancelStatusUnknown": "客户端无法确认数据库端是否停止查询。本次连接会被丢弃，不会复用。",
+    "UnsupportedVersion": "当前数据库版本没有受支持的诊断配置，采集器未运行。请核对版本支持范围。",
     "ConnectionFailed": "数据库连接未建立，未采集诊断数据。请核对目标地址、驱动和监控凭据。",
     "ConnectionTimeout": "数据库连接超过配置的等待时间，未采集诊断数据。请核对目标可达性和超时设置。",
     "ConnectionTLSFailed": "数据库 TLS 身份校验未通过，连接已停止。请核对证书和主机名配置。",
@@ -809,6 +839,12 @@ DISPLAY_MESSAGES = {
 }
 
 DISPLAY_FINDINGS = {
+    "CPU_PRESSURE": "CPU 压力",
+    "IO_PRESSURE": "I/O 压力",
+    "BLOCKING_GRAPH_ANOMALY": "阻塞关系存在异常",
+    "INCOMPLETE_SNAPSHOT": "现场采样不完整",
+    "IDLE_TRANSACTION_BLOCKER": "空闲会话持有未结束事务并阻塞请求",
+    "IDLE_IN_TRANSACTION": "会话在事务中空闲",
     "SQLSERVER_DATAFILE_NEAR_LIMIT": "SQL Server 数据文件接近容量上限",
     "SQLSERVER_TEMPDB_HIGH_USAGE": "SQL Server TempDB 使用率较高",
     "SQLSERVER_LOG_HIGH_USAGE": "SQL Server 事务日志使用率较高",
@@ -828,6 +864,92 @@ DISPLAY_FINDINGS = {
     "ORACLE_ARCHIVE_DEST_FAILURE": "Oracle 归档目标异常",
     "ORACLE_ARCHIVE_ACCUMULATION": "Oracle 归档量较大",
 }
+
+
+_SLOW_HTML_LABELS = {
+    "n/a": "不适用", "unavailable": "不可用", "unknown": "未知", "—": "未知",
+    "not_established": "尚未确定", "active": "活动中", "read/write": "读写事务",
+    "not_triggered": "未触发",
+    "read-only": "只读事务", "system": "系统事务", "distributed": "分布式事务",
+    "blocked": "被阻塞", "duration": "持续时间", "blocked sessions": "被阻塞会话数",
+    "best_effort": "顺序采样，非原子快照", "incomplete": "不完整", "failed": "采集失败",
+    "not_confirmed": "未确认", "unverified": "尚未核验", "yes": "是", "no": "否",
+    "lock": "锁等待", "io": "I/O 等待", "memory": "内存等待", "cpu_parallelism": "并行执行等待",
+    "slow": "慢 SQL", "no evidence reference": "没有可用的证据引用",
+    "snapshot": "快照", "session id": "会话 ID", "request id": "请求 ID",
+    "independent_slow_sql": "独立慢 SQL", "blocking_victim": "被阻塞会话",
+    "root_blocker": "根阻塞会话", "intermediate_blocker": "中间阻塞会话",
+    "long_running_transaction": "长时间未结束事务",
+    "transaction start time": "事务开始时间", "transaction start time source": "事务开始时间来源",
+    "root cause status": "根因确认状态", "lock acquiring statement": "取得锁的语句",
+    "review the owning transaction.": "请复核事务归属。",
+    "blocking graph contains anomalies.": "阻塞图存在异常。",
+    "root session or downstream impact is not confirmed.": "根会话或下游影响尚未确认。",
+    "required active-request, session, or transaction evidence is incomplete.": "请求、会话或事务的必需证据不完整。",
+    "session identity fields are incomplete.": "会话身份字段不完整。",
+    "session or transaction identity is ambiguous or may have been reused.": "会话或事务身份存在歧义，或会话标识可能已复用。",
+    "transaction age or verified session-to-transaction evidence is unavailable.": "缺少事务持续时间或已核验的会话与事务关联证据。",
+    "root attribution is incomplete, anomalous, or not backed by a complete blocking sample.": "阻塞样本不足，无法核验根阻塞归属。",
+    "blocking evidence is incomplete; root attribution and independence are withheld.": "阻塞证据不完整，根阻塞归属和请求独立性尚未核验。",
+    "blocking evidence does not prove this slow request is independent.": "阻塞证据不足，无法确认慢请求是否独立。",
+    "no triage candidate was observed in this snapshot; this is not a health assertion.": "本次未观测到分诊候选，整体健康状态仍未评估。",
+    "optional diagnostic evidence is unavailable or partial.": "可选诊断证据不可用或仅部分可用。",
+    "collector row limit reached": "已达到采集行数上限",
+    "required evidence was not collected.": "未取得必需证据。",
+    "optional context was not collected.": "未采集可选上下文。",
+    "current/last batch is contextual evidence, not proof of the statement that acquired a lock.":
+        "当前或上一批语句仅用于现场参考，无法据此确认取得锁的语句。",
+    "sequential dmv samples are not an atomic snapshot; counts are observed values.":
+        "DMV 顺序采样，非原子快照。计数仅反映各自采样时点的观测值。",
+}
+
+_SLOW_COLLECTOR_LABELS = {
+    "active_requests": "活动请求", "active_sessions": "活动会话", "transactions": "事务",
+    "connections": "连接来源", "blocking": "阻塞关系", "long_running": "长运行请求",
+    "current_wait_detail": "当前等待详情", "previous_sql": "上一条 SQL", "recent_statements": "近期语句",
+}
+
+
+def display_slow_collector(value: str) -> str:
+    name = _SLOW_COLLECTOR_LABELS.get(value)
+    return f"{name}（{value}）" if name else display_slow_label(value)
+
+
+def display_slow_label(value: str) -> str:
+    if match := re.fullmatch(r"Unknown \((-?\d+)\)", value):
+        return f"未知（原始值 {match[1]}）"
+    if match := re.fullmatch(r"Blocking evidence source (\w+) (is missing|failed|was truncated)\.", value):
+        reason = {"is missing": "缺失", "failed": "采集失败", "was truncated": "已截断"}[match[2]]
+        return f"阻塞证据来源 {match[1]} {reason}。"
+    if match := re.fullmatch(r"Root blocker affecting (\d+) sessions", value):
+        return f"根阻塞会话影响 {match[1]} 个会话"
+    return _SLOW_HTML_LABELS.get(value.casefold(), display_label(value))
+
+
+def display_slow_wait(value: str) -> str:
+    if value.upper().startswith("LCK_M_"):
+        return f"{value}（锁等待）"
+    if value.upper().startswith(("PAGEIOLATCH_", "IO_COMPLETION")):
+        return f"{value}（I/O 等待）"
+    return f"{value}（主动延迟）" if value.upper() == "WAITFOR" else value
+
+
+def display_slow_value(field: str, value: str) -> str:
+    normalized = " ".join(field.replace("_", " ").split()).casefold()
+    if normalized in {"wait", "wait type", "wait event", "等待类型"}:
+        return display_slow_wait(value)
+    if normalized in {"data completeness", "采集完整性"} and value == "PARTIAL":
+        return "部分完整"
+    if normalized in _REQUEST_STATUS_FIELDS or normalized in {"status", "状态"}:
+        return display_status_value(field, value)
+    if normalized in _STATUS_FIELDS or normalized in {
+        "type", "state", "role", "version", "environment", "capture started", "capture finished",
+        "triage completed", "transaction observed", "transaction identity verified", "transaction identity quality",
+        "open transaction", "open txn", "root cause status", "lock acquiring statement", "rollback risk", "采集完整性",
+        "rollback duration", "toolkit executed", "dba approval required", "wait category", "observation",
+    }:
+        return display_slow_label(value)
+    return display_slow_label(value) if normalized in {"reason", "evidence limitation"} else display_report_value(field, value)
 
 
 def display_label(value: str) -> str:
@@ -858,16 +980,24 @@ def display_value(value: Any) -> Any:
     return value
 
 
+def display_request_status(value: str) -> str:
+    return _REQUEST_STATUS_LABELS.get(value.upper(), value)
+
+
 def display_status_value(field: str, value: str) -> str:
     """Translate enum-like values only when the field is explicitly a status."""
     normalized = " ".join(field.replace("_", " ").split()).casefold()
+    if normalized in _REQUEST_STATUS_FIELDS:
+        return display_request_status(value)
+    if normalized in {"status", "状态"}:
+        return _STATUS_DISPLAY_VALUES.get(value, display_request_status(value))
     return display_label(value) if normalized in _STATUS_FIELDS else value
 
 
 def display_report_value(field: str, value: str) -> str:
     """Translate only known presentation text while preserving native evidence."""
     normalized = " ".join(field.replace("_", " ").split()).casefold()
-    if normalized in _STATUS_FIELDS:
+    if normalized in _STATUS_FIELDS or normalized in _REQUEST_STATUS_FIELDS:
         return display_status_value(field, value)
     if normalized in {"metric semantics", "semantics"}:
         return display_label(value)

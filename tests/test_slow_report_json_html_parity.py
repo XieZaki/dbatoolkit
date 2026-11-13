@@ -41,9 +41,9 @@ from dba.top_sql import (
     TopSQLResult,
 )
 from dba.top_sql_integration import associate_slow_sql_text
+from dba.top_sql_report import TopSQLDiagnosticReport
 
 _STAMP = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
-_SQL_MARKER = "\n[SQL 文本因人工报告长度上限而省略。]"
 _MATCHED_SQL = "SELECT 'PARITY_SPECIAL_<tag>&\"quote\"'\nFROM parity_source\nWHERE note = 'two lines';"
 _UNMATCHED_SQL = "UNMATCHED_CANDIDATE_MUST_NOT_LEAK_87c1"
 _ENGINES = (
@@ -185,7 +185,9 @@ def _top_sql_result(engine: DatabaseType, state: str, *, identifier: str | None 
     if state in {"complete_matched", "partial_unmatched"}:
         identity, plan, source_row = _identity_and_source(
             engine, identifier=identifier, sql_text=sql_text, matched=state == "complete_matched")
-        items = (TopSQLItem(identity, 42, rank=1, plan_identity=plan),)
+        metric_value = 42_000_000 if engine is DatabaseType.SQLSERVER else 42
+        items = (TopSQLItem(identity, metric_value, rank=1, plan_identity=plan,
+                            database_name="parity_db" if engine is DatabaseType.SQLSERVER else None),)
         rows = [source_row]
 
     completeness = (Completeness.PARTIAL if state == "partial_unmatched" else
@@ -235,24 +237,18 @@ def _slow_snapshot(engine: DatabaseType) -> SlowReport:
                                                      "incomplete": False})
 
 
-def _attach_top_sql(report: SlowReport, result: TopSQLResult, source: dict[str, Any]) -> None:
-    payload = result.to_dict()
-    source_key = _ENGINE_CONTRACTS[result.database_engine]["source_key"]
-    payload["items"] = associate_slow_sql_text(
-        result.database_engine, payload["items"], {source_key: source.get(source_key, [])})
-    report.details["top_sql"] = payload
-    report.details["top_sql_integration"] = {
-        "status": result.collection_status.value,
-        "database_engine": result.database_engine.value,
-        "database_version": result.database_version,
-        "ranking_metric": result.ranking_metric,
-        "top_sql": payload,
-    }
+def _top_sql_snapshot(engine: DatabaseType, payload: dict[str, Any]) -> TopSQLDiagnosticReport:
+    instance = _slow_snapshot(engine).instance
+    return TopSQLDiagnosticReport(instance, _STAMP, "top-sql", (), {
+        "version": _ENGINE_CONTRACTS[engine]["version"], "top_sql": payload,
+        "incomplete": payload["completeness"] != "COMPLETE",
+    })
 
 
-def _json_report(report: SlowReport, summary: IncidentSummary) -> dict[str, Any]:
+def _json_report(report: SlowReport | TopSQLDiagnosticReport, summary: IncidentSummary) -> dict[str, Any]:
     output = {
-        "success": not bool(report.details.get("incomplete", True)),
+        "success": (report.details["top_sql"]["collection_status"] == "COLLECTED"
+                    if report.scenario == "top-sql" else not bool(report.details.get("incomplete", True))),
         "report": asdict(report),
         "incident_summary": asdict(summary),
     }
@@ -265,15 +261,13 @@ def _top_sql_section(model: ReportModel) -> ReportSection:
 
 @pytest.mark.parametrize("engine", _ENGINES, ids=lambda item: item.value)
 @pytest.mark.parametrize("state", ("complete_matched", "partial_unmatched", "complete_empty", "failed"))
-def test_slow_report_json_html_semantic_parity_for_four_engines(
+def test_independent_top_sql_json_html_semantic_parity_for_four_engines(
     engine: DatabaseType, state: str,
 ) -> None:
     contract = _ENGINE_CONTRACTS[engine]
-    report = _slow_snapshot(engine)
-    baseline = _slow_snapshot(engine)
-    baseline_summary = build_incident_summary(baseline, "reports/parity.html")
     result, source = _top_sql_result(engine, state)
-    _attach_top_sql(report, result, source)
+    payload = result.to_dict()
+    report = _top_sql_snapshot(engine, payload)
 
     summary = build_incident_summary(report, "reports/parity.html")
     model = build_report_model(report, summary)
@@ -303,72 +297,65 @@ def test_slow_report_json_html_semantic_parity_for_four_engines(
     assert fields["Metric Semantics"] == json_top_sql["metric_semantics"]
     assert fields["Metric Scope"] == json_top_sql["metric_scope"]
     assert fields["Collection Scope"] == json_top_sql["collection_scope"]
+    if json_top_sql["items"]:
+        expected_items = result.to_dict()["items"]
+        for index, item in enumerate(json_top_sql["items"]):
+            assert item["sql_identity"] == expected_items[index]["sql_identity"]
+            assert item["plan_identity"] == expected_items[index]["plan_identity"]
+    identity_markers = {
+        DatabaseType.SQLSERVER: ("handle-001", "plan-handle-001", "query-hash-001",
+                                 "plan-hash-001", "database_id=7"),
+        DatabaseType.MYSQL: ("digest-001", "schema_name="),
+        DatabaseType.POSTGRESQL: ("queryid=8107", "dbid=16384", "userid=10", "toplevel=1"),
+        DatabaseType.ORACLE: ("abc1234567890", "child_number=2", "inst_id=1", "plan_hash_value="),
+    }[engine]
+    assert all(marker not in html_top_sql for marker in identity_markers)
     assert "采集状态" in html_top_sql
-    assert display_label(json_top_sql["collection_status"]) in html_top_sql
     for label, value in fields.items():
         assert display_label(label) in html_top_sql
-        display_value = display_report_value(label, value)
-        assert display_value in html_top_sql
-    assert json_document["success"] is True
-    assert summary.status == baseline_summary.status
-    assert summary.severity == baseline_summary.severity
-    assert summary.primary_problem == baseline_summary.primary_problem
-    assert summary.root_cause_candidate == baseline_summary.root_cause_candidate
-    assert summary.data_completeness == baseline_summary.data_completeness
-    quality = next(section for section in model.sections if section.section_id == "collection-quality")
-    quality_row = next(row for table in quality.tables for row in table.rows
-                       if row[0] == f"{engine.value}_top_sql")
-    assert quality_row[1] == {
-        "complete_matched": "完整", "partial_unmatched": "PARTIAL",
-        "complete_empty": "完整", "failed": "FAILED",
-    }[state]
+        assert display_report_value(label, value) in html_top_sql
+    section = _top_sql_section(model)
+    assert not section.code_blocks
+    assert all("sql_text_association" not in item for item in json_top_sql["items"])
+    assert json_document["success"] is (state != "failed")
 
+    # Association remains a separate strict contract for previously captured evidence.
+    associated = associate_slow_sql_text(engine, payload["items"], source)
     if state == "complete_matched":
-        association = json_top_sql["items"][0]["sql_text_association"]
-        section = _top_sql_section(model)
         assert json_top_sql["collection_status"] == "COLLECTED"
         assert json_top_sql["completeness"] == "COMPLETE"
-        assert association["status"] == "MATCHED"
-        assert section.tables[0].rows[0][-2 if engine is DatabaseType.SQLSERVER else -1] == "MATCHED"
-        assert len(section.code_blocks) == 1
-        assert section.code_blocks[0].content == association["sql_text"]
-        assert " ".join(_MATCHED_SQL.split()) in html_top_sql
-        assert "PARITY_SPECIAL_&lt;tag&gt;" in html
-        assert "PARITY_SPECIAL_<tag>" not in html
+        assert associated[0]["sql_text_association"]["status"] == "MATCHED"
+        assert associated[0]["sql_text_association"]["sql_text"] == _MATCHED_SQL
+        assert section.tables[0].headers[1] == "Database Name"
+        assert section.tables[0].rows[0][1:] == (
+            "parity_db" if engine in {DatabaseType.SQLSERVER, DatabaseType.MYSQL} else "名称未采集",
+            str(json_top_sql["items"][0]["metric_value"]),
+        )
+        assert "PARITY_SPECIAL_" not in html
     elif state == "partial_unmatched":
-        association = json_top_sql["items"][0]["sql_text_association"]
-        section = _top_sql_section(model)
+        association = associated[0]["sql_text_association"]
         assert json_top_sql["collection_status"] == "COLLECTED"
-        assert json_top_sql["completeness"] == "PARTIAL"
-        assert json_top_sql["data_visibility"] == "PARTIAL"
-        assert fields["Completeness"] != "完整"
+        assert json_top_sql["completeness"] == json_top_sql["data_visibility"] == "PARTIAL"
         assert fields["Completeness"] == "PARTIAL"
-        assert "证据完整性 部分可用" in html_top_sql
+        assert "部分可用" in html_top_sql
         if engine is DatabaseType.SQLSERVER:
             assert association["status"] == "IDENTITY_INCOMPLETE"
             assert association["reason"] == "SLOW_REQUEST_IDENTITY_INCOMPLETE"
-            assert "活动请求身份字段不完整" in html_top_sql
-            assert section.tables[0].rows[0][-2] == "身份信息不完整"
         else:
             assert association["status"] == "UNMATCHED"
             assert association["reason"] == "NO_EXACT_NATIVE_IDENTITY_MATCH"
-            assert section.tables[0].rows[0][-1] == "UNMATCHED"
         assert "sql_text" not in association
-        assert all(reason in fields["Limitations"] for reason in
-                   json_top_sql["limitations"])
+        assert all(reason in fields["Limitations"] for reason in json_top_sql["limitations"])
         assert _UNMATCHED_SQL not in json.dumps(json_document, ensure_ascii=False)
         assert _UNMATCHED_SQL not in html
     elif state == "complete_empty":
-        section = _top_sql_section(model)
         assert json_top_sql["collection_status"] == "COLLECTED"
         assert json_top_sql["completeness"] == "COMPLETE"
         assert json_top_sql["items"] == []
         assert fields["Returned Records"] == "0"
-        assert "没有匹配记录" in section.summary
         assert "没有匹配记录" in html_top_sql
         assert "ConnectionFailed" not in html_top_sql
     else:
-        section = _top_sql_section(model)
         assert json_top_sql["collection_status"] == "FAILED"
         assert json_top_sql["completeness"] == "UNKNOWN"
         assert json_top_sql["data_visibility"] == "UNAVAILABLE"
@@ -378,7 +365,6 @@ def test_slow_report_json_html_semantic_parity_for_four_engines(
         assert "失败" in html_top_sql
         assert "ConnectionFailed" not in html_top_sql
         assert not section.tables
-        assert json_document["success"] is True
 
 
 @pytest.mark.parametrize("engine", _ENGINES, ids=lambda item: item.value)
@@ -389,46 +375,47 @@ def test_report_boundary_values_stay_bounded_escaped_and_structured(engine: Data
                 + "\nTAIL_MARKER_NOT_RENDERED")
     result, source = _top_sql_result(engine, "complete_matched", identifier=identifier, sql_text=sql_text)
     report = _slow_snapshot(engine)
-    _attach_top_sql(report, result, source)
-    summary = build_incident_summary(report, "reports/parity.html")
+    source_key = _ENGINE_CONTRACTS[engine]["source_key"]
+    request = {**source[source_key][0], "session_id": 123}
+    if engine is DatabaseType.SQLSERVER:
+        request["statement_sql_text"] = sql_text
+    report.details.update({"all_requests": [request], source_key: [request]})
+    summary = build_incident_summary(report)
     model = build_report_model(report, summary)
     html = render_bounded(model, HtmlReportRenderer().render)
-    html_top_sql = _section_text(html)
+    card = _section_text(html, "current-request-001")
     json_document = _json_report(report, summary)
-    payload = json_document["report"]["details"]["top_sql"]
-    identity_key = str(_ENGINE_CONTRACTS[engine]["identity_field"])
-    association = payload["items"][0]["sql_text_association"]
-    identity_value = payload["items"][0]["sql_identity"]["fields"][identity_key]
+    raw_request = json_document["report"]["details"][source_key][0]
+    identity_key = _ENGINE_CONTRACTS[engine]["identity_field"]
+    assert raw_request[identity_key] == identifier
+    assert raw_request[_ENGINE_CONTRACTS[engine]["text_key"]] == sql_text
+    assert "top_sql" not in json_document["report"]["details"]
 
-    assert identity_value == identifier
-    assert len(association["sql_text"]) == DEFAULT_HUMAN_REPORT_POLICY.max_sql_chars + len(_SQL_MARKER)
-    assert association["sql_text"].endswith(_SQL_MARKER)
-    assert association["truncated_by_report_policy"] is True
-    assert "\n-- multiline synthetic query\n" in association["sql_text"]
-    assert _UNMATCHED_SQL not in html
+    # The standalone report also keeps the full identity in JSON and hides it in HTML.
+    payload = result.to_dict()
+    top_report = _top_sql_snapshot(engine, payload)
+    top_summary = build_incident_summary(top_report)
+    top_html = HtmlReportRenderer().render(build_report_model(top_report, top_summary))
+    top_json = _json_report(top_report, top_summary)["report"]["details"]["top_sql"]
+    assert top_json["items"][0]["sql_identity"]["fields"][identity_key] == identifier
+    assert identifier not in top_html
 
-
-    section = _top_sql_section(model)
-    identity_text = section.tables[0].rows[0][1]
-    assert section.code_blocks[0].content == association["sql_text"]
-    assert "A" * 100 in identity_text
-    assert "A" * 101 not in identity_text
-    assert "B" not in identity_text
+    if engine is not DatabaseType.ORACLE:
+        assert "A" * 100 not in card
     assert len(html) < DEFAULT_HUMAN_REPORT_POLICY.hard_report_bytes
     assert "PARITY_BOUNDARY_&lt;script&gt;&amp;&quot;quote&quot;" in html
     assert "PARITY_BOUNDARY_<script>" not in html
-    assert "TAIL_MARKER_NOT_RENDERED" not in html_top_sql
-    assert "SQL 文本因人工报告长度上限而省略。" in html_top_sql
-    assert "PARITY_BOUNDARY_<script>&\"quote\"" in html_top_sql
+    assert "TAIL_MARKER_NOT_RENDERED" not in card
+    assert "SQL 文本因人工报告长度上限而省略。" in card
+    assert 'PARITY_BOUNDARY_<script>&"quote"' in card
 
 
-@pytest.mark.parametrize(("state", "expected_status", "expected_reason_labels"), [
-    ("no_active_requests", "NO_ACTIVE_REQUESTS", ("无活动请求",)),
-    ("incomplete_top_identity", "IDENTITY_INCOMPLETE",
-     ("Top SQL 身份字段不完整", "无活动请求")),
+@pytest.mark.parametrize(("state", "expected_status"), [
+    ("no_active_requests", "NO_ACTIVE_REQUESTS"),
+    ("incomplete_top_identity", "IDENTITY_INCOMPLETE"),
 ])
-def test_sqlserver_identity_state_has_json_html_parity(
-    state: str, expected_status: str, expected_reason_labels: tuple[str, ...],
+def test_sqlserver_legacy_association_state_stays_in_json_without_slow_html(
+    state: str, expected_status: str,
 ) -> None:
     report = _slow_snapshot(DatabaseType.SQLSERVER)
     result, _ = _top_sql_result(DatabaseType.SQLSERVER, "complete_matched")
@@ -450,19 +437,42 @@ def test_sqlserver_identity_state_has_json_html_parity(
     html = render_bounded(model, HtmlReportRenderer().render)
     json_document = _json_report(report, summary)
     json_association = json_document["report"]["details"]["top_sql"]["items"][0]["sql_text_association"]
-    section = _top_sql_section(model)
 
     assert json_association["status"] == expected_status
     assert json_association["reason"] == (
         "NO_ACTIVE_REQUESTS" if state == "no_active_requests" else "TOP_SQL_IDENTITY_INCOMPLETE")
-    assert section.tables is not None
-    assert section.tables[0].headers[-1] == "Association reason"
-    for label in expected_reason_labels:
-        assert label in html
-    assert display_label(expected_status) in html
+    assert all(section.section_id != "top-sql" for section in model.sections)
+    assert 'id="top-sql"' not in html
     assert _UNMATCHED_SQL not in json.dumps(json_document, ensure_ascii=False)
     assert _UNMATCHED_SQL not in html
 
+
+
+
+def test_sqlserver_independent_top_sql_hides_native_ids_and_labels_missing_database_name() -> None:
+    result, _ = _top_sql_result(DatabaseType.SQLSERVER, "complete_matched")
+    payload = result.to_dict()
+    payload["items"][0].pop("database_name")
+    report = _top_sql_snapshot(DatabaseType.SQLSERVER, payload)
+
+    summary = build_incident_summary(report, "reports/sqlserver-readable-top-sql.html")
+    model = build_report_model(report, summary)
+    html = render_bounded(model, HtmlReportRenderer().render)
+    html_top_sql = _section_text(html)
+    section = _top_sql_section(model)
+    json_document = _json_report(report, summary)
+    item = json_document["report"]["details"]["top_sql"]["items"][0]
+
+    assert section.tables[0].headers[1] == "Database Name"
+    assert section.tables[0].rows[0][1] == "名称未采集"
+    assert "名称未采集" in html_top_sql
+    assert "handle-001" not in html_top_sql
+    assert "plan-handle-001" not in html_top_sql
+    assert "query-hash-001" not in html_top_sql
+    assert "database_id=7" not in html_top_sql
+    assert item["sql_identity"]["fields"]["sql_handle"] == "handle-001"
+    assert item["sql_identity"]["fields"]["database_id"] == 7
+    assert item["plan_identity"]["fields"]["plan_handle"] == "plan-handle-001"
 
 def test_sqlserver_session_identity_is_consistent_in_json_and_html() -> None:
     now = _STAMP
@@ -532,8 +542,7 @@ def test_sparse_top_sql_snapshot_with_missing_optional_fields_is_renderable(engi
     payload = result.to_dict()
     payload.pop("source_metadata")
     payload.pop("database_error")
-    report = _slow_snapshot(engine)
-    report.details["top_sql"] = payload
+    report = _top_sql_snapshot(engine, payload)
     summary = build_incident_summary(report, "reports/parity.html")
     model = build_report_model(report, summary)
 
@@ -546,7 +555,9 @@ def test_sparse_top_sql_snapshot_with_missing_optional_fields_is_renderable(engi
     assert json_top_sql["collection_status"] == fields["Collection Status"] == "COLLECTED"
     assert json_top_sql["items"] == []
     assert fields["Returned Records"] == "0"
-    assert "已采集" in _section_text(html)
+    top_sql_text = _section_text(html)
+    assert "没有匹配记录" in top_sql_text
+    assert "ConnectionFailed" not in top_sql_text
 
 
 def test_uri_redaction_handles_long_non_uri_identifiers_and_keeps_credentials_hidden() -> None:

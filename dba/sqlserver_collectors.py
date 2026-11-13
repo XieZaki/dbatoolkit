@@ -51,6 +51,19 @@ class ConnectionsCollector(SQLServerCollector):
     script_name = "connections"
 
 
+class LockResourcesCollector(SQLServerCollector):
+    script_name = "lock_resources"
+
+    def collect(self, instance: DatabaseInstance) -> CollectorResult:
+        if instance != self.adapter.instance:
+            raise ToolkitError(
+                "InstanceMismatch", "Collector and adapter must refer to the same instance."
+            )
+        name = script_for_slow(self.adapter, self.script_name, self.script_name)
+        result = self.adapter.execute_readonly(self.adapter.script_for(name))
+        return replace(result, collector_name=self.script_name)
+
+
 class LongRunningRequestsCollector(ActiveRequestsCollector):
     def collect(self, instance: DatabaseInstance) -> CollectorResult:
         started = time.monotonic()

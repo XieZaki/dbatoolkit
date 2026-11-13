@@ -19,6 +19,7 @@ from dba.incident import build_incident_summary
 from dba.logging import redact
 from dba.presentation import render_human
 from dba.reporting import HtmlReportRenderer, build_report_model
+from dba.settings import SQLServerSettings
 from dba.top_sql_collectors import SQLServerTopSQLCollector
 from dba.versioning import PROFILE_RESOLVER, DetectedDatabaseVersion
 from scripts.acceptance import verify_sqlserver_top_sql as acceptance
@@ -106,7 +107,7 @@ def _envelope(top: dict[str, Any]) -> dict[str, Any]:
 def _html_for(top: dict[str, Any]) -> str:
     rows = acceptance._presenter_html_rows(acceptance._json_rows(top))
     table = [
-        "<table><tr><th>Rank</th><th>SQL Identity</th><th>Metric Value</th></tr>"
+        "<table><tr><th>Rank</th><th>Database Name</th><th>Metric Value</th></tr>"
     ]
     table.extend("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
     table.append("</table>")
@@ -350,6 +351,9 @@ def test_one_collector_result_drives_json_html_and_human_cli(
     assert json_rows[0]["plan_fields"]["query_plan_hash"] == PLAN_FIELDS["query_plan_hash"]
     assert json_rows[0]["plan_fields"]["plan_generation_num"] == PLAN_FIELDS["plan_generation_num"]
     assert html_parity["status"] == "MATCH"
+    assert "0x01" not in html_page and "0x02" not in html_page
+    assert "sql_handle" not in html_page and "query_hash" not in html_page
+    assert "plan_handle" not in html_page and "query_plan_hash" not in html_page
     assert human_parity["classification"] == "MATCH"
     assert "累计统计" in human_text and "实例级" in human_text
     assert "累计统计" in html_page and "实例级" in html_page
@@ -388,7 +392,7 @@ def test_fixed_independent_expectation_rejects_wrong_identity_plan_metric_or_ran
     assert not _matches_fixed_expected_record(top, item, "cpu_time")
 
 
-def test_html_and_cli_parity_reject_wrong_identity_rank_value_and_unit(
+def test_html_database_name_and_cli_identity_parity_reject_rank_value_and_unit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     top = _top("cpu_time", (100, 80))
@@ -399,9 +403,10 @@ def test_html_and_cli_parity_reject_wrong_identity_rank_value_and_unit(
         acceptance._human_cli_rows(render_human("top-sql", top)), rows,
     )["classification"] == "MATCH"
 
-    wrong_identity = [list(row) for row in html]
-    wrong_identity[0][1] = wrong_identity[0][1].replace("0x01", "0xFF")
-    assert acceptance._html_parity_result(wrong_identity, rows)["failure_reason"] == "IDENTITY_MISMATCH"
+    wrong_database_name = [list(row) for row in html]
+    wrong_database_name[0][1] = "different-db"
+    assert (acceptance._html_parity_result(wrong_database_name, rows)["failure_reason"]
+            == "DATABASE_NAME_MISMATCH")
 
     wrong_value = [list(row) for row in html]
     wrong_value[0][2] = "101"
@@ -533,7 +538,7 @@ def test_acceptance_runs_exactly_one_toolkit_collection_per_metric(
     )
     inventory = SimpleNamespace(get=Mock(return_value=instance))
     monkeypatch.setattr(acceptance, "Inventory", SimpleNamespace(load=Mock(return_value=inventory)))
-    settings = SimpleNamespace(
+    settings = SQLServerSettings(
         connect_timeout=5, query_timeout=10, encrypt=True, trust_server_certificate=False,
     )
     monkeypatch.setattr(
@@ -635,12 +640,12 @@ def test_sanitized_exception_payload_omits_sensitive_message() -> None:
     assert secret not in json.dumps(payload)
 
 
-def test_same_source_failure_reasons_keep_identity_and_value_errors_distinct() -> None:
+def test_same_source_failure_reasons_keep_database_name_and_value_errors_distinct() -> None:
     top = _top("cpu_time", (100, 80))
     items = acceptance._json_rows(top)
     html = acceptance._presenter_html_rows(items)
-    html[1][1] = html[1][1].replace("0x02", "0xEE")
-    assert acceptance._html_parity_result(html, items)["failure_reason"] == "IDENTITY_MISMATCH"
+    html[1][1] = "different-db"
+    assert acceptance._html_parity_result(html, items)["failure_reason"] == "DATABASE_NAME_MISMATCH"
 
     html = acceptance._presenter_html_rows(items)
     html[1][2] = "79"

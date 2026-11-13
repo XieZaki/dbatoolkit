@@ -10,7 +10,6 @@ from dba.core import DatabaseInstance, DatabaseType
 from dba.incident import build_incident_summary
 from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.reporting.model import HumanReportPolicy
-from dba.reporting.presenters import render_report_section_text
 from dba.top_sql import CollectionStatus, MetricValueStatus
 
 
@@ -290,15 +289,12 @@ def test_ambiguous_native_identity_is_unmatched_and_never_displays_candidate_sql
         "items": [{**item, "sql_text_association": ambiguous}],
     }
     model = build_report_model(report, build_incident_summary(report))
-    section = next(part for part in model.sections if part.section_id == "top-sql")
-    cli_text = render_report_section_text(section)
+    assert all(part.section_id != "top-sql" for part in model.sections)
     html = HtmlReportRenderer().render(model)
-    assert "身份未匹配" in cli_text and "身份未匹配" in html
     for candidate in (
         "FUZZY_ONLY_SENTINEL", "EXACT_MATCH_SENTINEL",
         "AMBIGUOUS_SQL_ONE_SENTINEL", "AMBIGUOUS_SQL_TWO_SENTINEL",
     ):
-        assert candidate not in cli_text
         assert candidate not in html
 
 
@@ -457,7 +453,7 @@ def test_default_metric_semantics_remain_cumulative_and_collection_is_single_sna
     assert all("delta" not in metric for metric in integration._DEFAULT_METRICS.values())
 
 
-def test_cli_and_html_use_the_same_bounded_top_sql_report_section() -> None:
+def test_slow_ignores_legacy_matched_top_sql_for_display_and_retains_evidence() -> None:
     from tests.test_html_reports import _report
 
     report = _report()
@@ -473,14 +469,13 @@ def test_cli_and_html_use_the_same_bounded_top_sql_report_section() -> None:
                        "status": "MATCHED", "sql_text": "SELECT '&lt;safe&gt;'",}}],
     }
     report.details.update({"top_sql": payload, "top_sql_integration": {"status": "COLLECTED"}})
-    model = build_report_model(report, build_incident_summary(report))
-    section = next(item for item in model.sections if item.section_id == "top-sql")
-    cli_text = render_report_section_text(section)
+    summary = build_incident_summary(report)
+    model = build_report_model(report, summary)
     html = HtmlReportRenderer().render(model)
-    for evidence in ("total_exec_time", "累计统计", "queryid=17", "身份已匹配"):
-        assert evidence in cli_text and evidence in html
-    assert "Top SQL 排名反映数据库统计视图中的累计表现，不代表当前故障根因。" in cli_text
-    assert "SELECT" in cli_text and "SELECT" in html
+    assert all(item.section_id != "top-sql" for item in model.sections)
+    assert 'id="top-sql"' not in html and "total_exec_time" not in html
+    assert "SELECT '&lt;safe&gt;'" not in html
+    assert report.details["top_sql"] == payload
 
 
 def test_unmatched_top_sql_never_displays_sql_details() -> None:
@@ -500,14 +495,12 @@ def test_unmatched_top_sql_never_displays_sql_details() -> None:
     }
     report.details["top_sql"] = payload
     model = build_report_model(report, build_incident_summary(report))
-    section = next(item for item in model.sections if item.section_id == "top-sql")
     html = HtmlReportRenderer().render(model)
-    assert "身份未匹配" in render_report_section_text(section)
-    assert "MUST_NOT_BE_SHOWN" not in render_report_section_text(section)
-    assert "身份未匹配" in html and "MUST_NOT_BE_SHOWN" not in html
+    assert all(item.section_id != "top-sql" for item in model.sections)
+    assert "MUST_NOT_BE_SHOWN" not in html and "身份未匹配" not in html
 
 
-def test_status_only_top_sql_is_presented_without_marking_slow_incomplete() -> None:
+def test_legacy_top_sql_status_does_not_mark_slow_incomplete() -> None:
     from tests.test_html_reports import _report
 
     report = _report()
@@ -516,6 +509,8 @@ def test_status_only_top_sql_is_presented_without_marking_slow_incomplete() -> N
         "reason": "CORE_EVIDENCE_INCOMPLETE",
     }
     model = build_report_model(report, build_incident_summary(report))
-    section = next(item for item in model.sections if item.section_id == "top-sql")
-    assert "未采集" in render_report_section_text(section)
+    html = HtmlReportRenderer().render(model)
+    assert all(item.section_id != "top-sql" for item in model.sections)
+    assert "CORE_EVIDENCE_INCOMPLETE" not in html
+    assert report.details["top_sql_integration"]["status"] == "NOT_COLLECTED"
     assert report.details.get("incomplete") is False

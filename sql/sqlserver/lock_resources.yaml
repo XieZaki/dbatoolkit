@@ -1,0 +1,21 @@
+name: lock_resources
+database_type: sqlserver
+risk: READ_ONLY
+timeout_seconds: 10
+max_rows: 2000
+reviewed: true
+description: Reviewed lock DMV read limited to resources with a waiting or converting
+  request plus every request on those same resources; native request mode and status
+  are kept, and object, index and partition names are resolved only from the resource
+  database's own metadata or database-aware metadata functions.
+feature: slow
+version_families:
+- 2008r2
+- '2012'
+- '2014'
+- '2016'
+- '2017'
+- '2019'
+- '2022'
+runtime_variants:
+- default

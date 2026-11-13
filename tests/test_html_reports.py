@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -16,6 +17,167 @@ from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.reporting.presenters import _local_time
 from dba.slow import SlowReport
 from dba.top_sql_report import TopSQLDiagnosticReport
+
+
+@pytest.mark.parametrize(("engine", "row", "expected", "runtime", "event", "timing_label"), [
+    (DatabaseType.MYSQL, {"processlist_id": 42, "duration_ms": 1250, "rows_examined": 40, "rows_affected": 0,
+                         "rows_sent": 99, "cpu_ms": 123, "current_wait": "wait/io/file/innodb/innodb_data_file",
+                         "sql_text": "SELECT '采集状态=COMPLETE' AS synthetic_mysql"},
+     {"检查行数（当前语句截至采集）": "40 行", "影响行数（当前语句截至采集）": "0 行",
+      "统计口径": "当前语句截至采集时刻的计数，单次采集，不是采样区间增量。"}, "00:00:01（1250 毫秒）",
+     "wait/io/file/innodb/innodb_data_file", "当前等待事件"),
+    (DatabaseType.POSTGRESQL, {"pid": 42, "duration_ms": 420, "datname": "fixture_pg", "cpu_ms": 123,
+                              "reads": 8, "wait_event": "DataFileRead", "wait_event_type": "IO",
+                              "query": "SELECT synthetic_pg"},
+     {"请求级资源计数": "不支持：pg_stat_activity 不提供单条执行的 CPU 或读取计数。"},
+     "00:00:00（420 毫秒）", "DataFileRead", "当前等待事件"),
+    (DatabaseType.ORACLE, {"sid": 42, "inst_id": 2, "sql_id": "synthetic", "duration_seconds": 3,
+                           "duration_source": "LAST_CALL_ET_ACTIVE", "sql_cumulative_cpu_us": 9000,
+                           "sql_cumulative_buffer_gets": 12, "sql_cumulative_disk_reads": 0,
+                           "state": "WAITED KNOWN TIME", "event": "db file sequential read",
+                           "sql_text": "SELECT synthetic_oracle"},
+     {"请求级资源计数": "未采集：Slow 未采集本次执行的 CPU、逻辑读或物理读；"
+                  "V$SQL 子游标累计统计覆盖该游标的全部执行，不作为当前请求指标。"},
+     "00:00:03（活动调用时长，3 秒）", "db file sequential read", "采样事件（当前等待未确认）"),
+])
+def test_slow_resource_cards_preserve_native_units_and_scopes(
+    engine: DatabaseType, row: dict, expected: dict, runtime: str, event: str, timing_label: str,
+) -> None:
+    instance = DatabaseInstance("fixture", "Fixture", engine, "192.0.2.1", 1, "monitor")
+    report = SlowReport(instance, datetime(2026, 11, 10, tzinfo=timezone.utc), "slow", (),
+                        {"active_requests": [row], "blocking_graph": {"roots": [], "children": {}}})
+    original = asdict(report)
+    model = build_report_model(report, build_incident_summary(report))
+    request = next(section for section in model.sections if section.section_id == "current-request-001")
+    assert runtime in dict(request.fields).values()
+    assert set(expected).isdisjoint(dict(request.fields))
+    card = next(section for section in model.sections if section.section_id == "sql-resource-001")
+    metrics = dict(card.fields)
+    assert {key: metrics[key] for key in expected} == expected
+    assert metrics[timing_label] == event
+    assert "返回行数" not in metrics and all("累计" not in key for key in metrics)
+    assert runtime not in metrics.values()
+    if engine is DatabaseType.ORACLE:
+        assert "当前等待事件" not in metrics and "当前等待时长" not in metrics
+        assert not any("子游标" in key for key in metrics)
+        assert "9,000" not in "".join(metrics.values()) and "V$SQL" not in metrics["性能分析"]
+    else:
+        assert metrics["当前等待时长"] == "未采集" and "I/O 相关等待" in metrics["性能分析"]
+    page = HtmlReportRenderer().render(model)
+    assert 'id="sql-resource-001"' in page and 'href="#current-request-001"' in page
+    assert "资源计数自请求开始累计至采集时刻" not in page
+    assert "9,000 µs" not in page and "子游标累计 CPU" not in page
+    if engine is DatabaseType.MYSQL:
+        assert "采集状态=COMPLETE" in page.split('id="sql-resource-001"', 1)[1].split("</section>", 1)[0]
+    assert asdict(report) == original
+
+
+@pytest.mark.parametrize(("engine", "row", "identity", "access", "port"), [
+    (DatabaseType.SQLSERVER, {"session_id": 61, "elapsed_ms": 10, "query_hash": "0xAB",
+                              "statement_sql_text": "SELECT 1"},
+     "query_hash 0xAB", "dba diagnose fixture plan --session 61",
+     "未采集（原因：当前 Slow 采集未读取客户端源端口）"),
+    (DatabaseType.ORACLE, {"sid": 61, "sql_id": "synthetic", "child_number": 2, "duration_seconds": 1,
+                           "sql_text": "SELECT 1 FROM dual"},
+     "SQL_ID synthetic / CHILD_NUMBER 2", "dba diagnose fixture plan --sql-id synthetic --child-number 2",
+     "未采集（原因：当前 Slow 采集未读取客户端源端口）"),
+    (DatabaseType.POSTGRESQL, {"pid": 61, "duration_ms": 10, "client_port": 50432, "query": "SELECT 1"},
+     "数据库未提供可用于计划关联的 SQL 标识", "不支持", "50432"),
+    (DatabaseType.MYSQL, {"processlist_id": 61, "duration_ms": 10, "sql_text": "SELECT 1"},
+     "数据库未提供可用于计划关联的 SQL 标识", "不支持",
+     "未单独采集（原因：客户端主机为 PROCESSLIST_HOST 原值，TCP 连接通常包含端口）"),
+])
+def test_slow_workbench_states_plan_port_and_resource_scope_without_fabricating(
+    engine: DatabaseType, row: dict, identity: str, access: str, port: str,
+) -> None:
+    instance = DatabaseInstance("fixture", "Fixture", engine, "192.0.2.1", 1521, "monitor")
+    report = SlowReport(instance, datetime(2026, 11, 10, tzinfo=timezone.utc), "slow", (),
+                        {"active_requests": [row], "blocking_graph": {"roots": [], "children": {}}})
+    original = asdict(report)
+    model = build_report_model(report, build_incident_summary(report))
+    assert ("Endpoint", "192.0.2.1:1521") in model.metadata
+    request = next(section for section in model.sections if section.section_id == "current-request-001")
+    assert dict(request.detail_fields)["客户端源端口"] == port
+    plan = next(section for section in model.sections if section.section_id == "plan-status")
+    plan_row = plan.tables[0].rows[0]
+    plan_state = "待开发" if access != "不支持" else "不支持"
+    assert plan_row[0] == "1" and plan_row[3] == (identity if access != "不支持" else "不支持")
+    assert plan_row[5] == plan_row[6] == plan_state and plan_row[7].startswith(access)
+    assert plan.tables[0].cell_links == ((0, 1, "#current-request-001"),)
+    resources = next(section for section in model.sections if section.section_id == "wb-resources")
+    scope = dict(resources.fields)
+    assert scope["区间增量"] == "待开发" and scope["并发"] == "1 个活动请求"
+    assert all(not key.startswith("主机") and value != "待开发" for key, value in scope.items() if key != "区间增量")
+    assert resources.summary == "活动请求采样不完整，不给出数据库侧资源判断。"
+    page = HtmlReportRenderer().render(model)
+    assert all(f'data-tab="{tab}"' in page for tab in (
+        "page-overview", "page-sessions", "page-blocking", "page-sql", "page-plans", "page-resources"))
+    plans = page.split('id="plans"', 1)[1].split('id="page-resources"', 1)[0]
+    assert plan_state in plans and 'href="#current-request-001"' in plans and "执行计划树" in plans
+    assert "plan-node-meta\"><span>Slow 报告不内嵌计划" in plans
+    chips = page.split('aria-label="当前诊断目标实例">', 1)[1].split("</div>", 1)[0]
+    assert "192.0.2.1:1521" in chips and "（版本未知）" in chips and "不可用" not in chips
+    assert asdict(report) == original
+
+
+@pytest.mark.parametrize(("engine", "request_row", "session_rows", "counters", "previous"), [
+    (DatabaseType.POSTGRESQL, {"pid": 42, "duration_ms": 10, "query": "SELECT 42"},
+     [{"pid": 42, "state": "active", "query": "SELECT 42"},
+      {"pid": 43, "state": "idle in transaction", "query": "UPDATE fixture_rows SET v = 1"},
+      {"pid": 44, "state": "active"}],
+     ("不支持", "不支持", "不支持"),
+     {"43": ("上一条 SQL（pg_stat_activity.query，会话非 active）", "UPDATE fixture_rows SET v = 1"),
+      "44": ("上一条 SQL", "未采集")}),
+    (DatabaseType.MYSQL, {"processlist_id": 42, "duration_ms": 10, "sql_text": "SELECT 42"},
+     [{"processlist_id": 42, "command": "Query"}, {"processlist_id": 43, "command": "Sleep"}],
+     ("待开发", "不支持", "不支持"), {"43": ("上一条 SQL", "待开发")}),
+    (DatabaseType.ORACLE, {"sid": 42, "duration_seconds": 1, "sql_text": "SELECT 42 FROM dual"},
+     [{"sid": 42, "status": "ACTIVE"}, {"sid": 43, "status": "INACTIVE"}],
+     ("待开发", "待开发", "待开发"), {"43": ("上一条 SQL", "待开发")}),
+])
+def test_slow_workbench_previous_sql_and_counters_only_use_reliable_sources(
+    engine: DatabaseType, request_row: dict, session_rows: list[dict], counters: tuple[str, ...],
+    previous: dict[str, tuple[str, str]],
+) -> None:
+    instance = DatabaseInstance("fixture", "Fixture", engine, "192.0.2.1", 1, "monitor")
+    report = SlowReport(instance, datetime(2026, 11, 10, tzinfo=timezone.utc), "slow", (),
+                        {"active_requests": [request_row], "all_sessions": session_rows,
+                         "blocking_graph": {"roots": [], "children": {}}})
+    original = asdict(report)
+    model = build_report_model(report, build_incident_summary(report))
+    sections = {section.section_id: section for section in model.sections}
+    session_table = sections["wb-sessions"].tables[0]
+    request_index = next(i for i, row in enumerate(session_table.rows) if row[0] == "42")
+    assert session_table.rows[request_index][7:10] == counters
+    details = sections["wb-session-details"].tables[0]
+    by_session = {row[0]: row for row in details.rows}
+    assert details.headers[14:16] == ("SQL 来源", "SQL 文本")
+    assert ("42", 14, "#current-request-001") in {(details.rows[r][0], c, link) for r, c, link in details.cell_links}
+    assert {sid: by_session[sid][14:16] for sid in previous} == previous
+    resources = dict(sections["wb-resources"].fields)
+    assert resources["并发"] == "1 个活动请求" and resources["区间增量"] == "待开发"
+    assert resources["内存授予等待"] == "不支持"
+    assert resources["CPU 调度等待"] == ("未采集" if engine is DatabaseType.ORACLE else "不支持")
+    assert resources["I/O 等待"] == "未采集"
+    assert all("待开发" not in value for name, value in sections["wb-engine-signals"].fields)
+    page = HtmlReportRenderer().render(model)
+    overview = page.split('id="page-overview"', 1)[1].split('id="page-sql"', 1)[0]
+    assert "SELECT 42" not in overview and "UPDATE fixture_rows" not in overview
+    sessions = page.split('id="page-sessions"', 1)[1].split('id="session-appendix"', 1)[0]
+    assert sessions.count('data-session-detail="') == len(details.rows)
+    assert 'id="sessionFilter"' in sessions and 'data-filter="active"' in sessions
+    if engine is DatabaseType.POSTGRESQL:
+        assert sessions.count("<code>UPDATE fixture_rows SET v = 1</code>") == 1
+    assert asdict(report) == original
+
+
+def test_slow_plan_status_without_current_requests_does_not_show_history() -> None:
+    instance = DatabaseInstance("fixture", "Fixture", DatabaseType.SQLSERVER, "192.0.2.1", 1433, "monitor")
+    report = SlowReport(instance, datetime(2026, 11, 10, tzinfo=timezone.utc), "slow", (),
+                        {"active_requests": [], "blocking_graph": {"roots": [], "children": {}}})
+    model = build_report_model(report, build_incident_summary(report))
+    plan = next(section for section in model.sections if section.section_id == "plan-status")
+    assert plan.tables == () and plan.summary == "本次采样没有当前活动 SQL，不展示历史 SQL 的执行计划。"
 
 
 def _report() -> SlowReport:
@@ -128,6 +290,9 @@ class _HTMLReferences(HTMLParser):
 
 def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() -> None:
     report = _report()
+    report.details["all_requests"][-1].update(
+        request_kind="ACTIVE_WAIT", request_interpretation="WAITFOR 主动等待")
+    report.details["long_running"] = report.details["long_running"][:-1]
     summary = build_incident_summary(report, "reports/sqlserver2022_slow.html")
     page = HtmlReportRenderer().render(build_report_model(report, summary))
     assert '<html lang="zh-CN">' in page
@@ -137,12 +302,19 @@ def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() 
     assert "锁与阻塞链" in page and "会话身份与来源" in page
     assert "长期未提交事务" in page and "请求运行信息" in page
     assert "59" in page and "67" in page
-    assert "长运行请求 3 条" in page and "阻塞相关 2 条" in page and "非阻塞 1 条" in page
+    workload = next(section for section in build_report_model(report, summary).sections
+                    if section.section_id == "workload-summary")
+    assert workload.summary == "长运行请求 2 条 · 阻塞相关 2 条 · 非阻塞 0 条。"
+    assert workload.summary not in page
     assert 'class="report-section manual-action"' in page
     assert "Toolkit 不执行 KILL" in page
     assert "KILL 57;" in page and "Toolkit 是否执行" in page and "回滚风险" in page
-    assert "长时间主动等待（WAITFOR）" in page and "LCK_M_X" in page
-    assert "直接阻塞会话" in page and "间接受影响会话" in page
+    assert "WAITFOR 主动等待" in page and "LCK_M_X" in page
+    blocking = next(section for section in build_report_model(report, summary).sections
+                    if section.section_id == "blocking")
+    assert [row[0].strip().removeprefix("└─ ") for row in blocking.tables[0].rows] == ["57", "59", "67"]
+    assert [row[2] for row in blocking.tables[0].rows] == ["—", "57", "59"]
+    assert [row[3] for row in blocking.tables[0].rows] == ["0", "1", "2"]
     assert "共" in page and "省略" in page
     command_index = page.index("KILL 57;")
     assert "<details" in page[:command_index] and "执行前必须重新核对会话身份" in page
@@ -150,7 +322,8 @@ def test_html_slow_report_formats_incident_evidence_and_escapes_database_text() 
     assert "<img src=x" not in page
     assert "<script>alert(1)</script>" not in page
     assert 'data-copy="UPDATE t SET value = &#x27;&lt;script&gt;alert(1)' in page
-    assert '<details' in page and "会话 59 SQL" in page
+    assert '<details' in page and "会话 59 / 请求 未知 · 当前执行语句" in page
+    assert "UPDATE t SET value = 1" in page[page.index('id="session-appendix"'):]
     assert '{"session_id"' not in page and "{'session_id'" not in page
     assert "https://" not in page and "http://" not in page
     assert '<script src=' not in page and "<script>alert(1)</script>" not in page
@@ -288,6 +461,167 @@ def test_slow_html_preserves_native_session_identity_by_database(
     assert "synthetic_current_sql" in page
 
 
+def test_sqlserver_current_request_cards_keep_statement_and_exact_session_sources_together() -> None:
+    report = _report()
+    report.details.update({
+        "all_sessions": [
+            {"session_id": 70, "login_name": "login-a", "original_login_name": "original-a",
+             "nt_user_name": "DOMAIN\\a", "host_name": "same-host",
+             "client_net_address": "192.0.2.70", "program_name": "client-a",
+             "client_interface_name": "ODBC", "host_process_id": 7000,
+             "database_name": "AppDb"},
+            {"session_id": 71, "login_name": "login-b", "original_login_name": "original-b",
+             "nt_user_name": "DOMAIN\\b", "host_name": "same-host",
+             "client_net_address": "192.0.2.71", "program_name": "client-b",
+             "client_interface_name": ".Net SqlClient", "host_process_id": 7100,
+             "database_name": "AppDb"},
+        ],
+        "all_requests": [
+            {"session_id": 70, "request_id": 1, "status": "running", "database_id": 5,
+             "database_name": "AppDb", "start_time": "2026-11-08T12:00:00+00:00",
+             "elapsed_ms": 2000, "cpu_ms": 125, "logical_reads": 8, "reads": 2, "writes": 1,
+             "wait_type": None, "wait_ms": 0, "blocking_session_id": 0, "wait_resource": None,
+             "sql_text": "BATCH_SQL_MUST_NOT_APPEAR: SELECT 0; SELECT first_stmt",
+             "statement_start_offset": 32, "statement_end_offset": 60,
+             "statement_sql_text": "SELECT first_stmt", "statement_sql_text_truncated": False},
+            {"session_id": 70, "request_id": 2, "status": "suspended", "database_id": 5,
+             "database_name": "AppDb", "start_time": "2026-11-08T12:00:01+00:00",
+             "elapsed_ms": 3000, "cpu_ms": 250, "logical_reads": 18, "reads": 3, "writes": 0,
+             "wait_type": "LCK_M_X", "wait_ms": 1500, "blocking_session_id": 72,
+             "wait_resource": "KEY: 5:7200", "sql_text": "BATCH_SQL_MUST_NOT_APPEAR: SELECT 0; SELECT second_stmt",
+             "statement_start_offset": 32, "statement_end_offset": 62,
+             "statement_sql_text": "SELECT second_stmt", "statement_sql_text_truncated": False},
+            {"session_id": 71, "request_id": 1, "status": "running", "database_id": 5,
+             "database_name": "AppDb", "elapsed_ms": 1000, "cpu_ms": 5,
+             "logical_reads": 1, "reads": 0, "writes": 0, "wait_type": None,
+             "wait_ms": 0, "blocking_session_id": 0, "wait_resource": None,
+             "sql_text": "BATCH_SQL_MUST_NOT_APPEAR: SELECT third_stmt",
+             "statement_sql_text": "SELECT third_stmt", "statement_sql_text_truncated": False},
+        ],
+        "long_running": [],
+        "blocking_graph": {"roots": [], "children": {}, "anomalies": []},
+        "samples": [{"collector": "active_requests", "success": True,
+                     "truncated": False, "row_count": 3}],
+    })
+    model = build_report_model(report, build_incident_summary(report, "reports/current.html"))
+    page = HtmlReportRenderer().render(model)
+    serialized = json.dumps(asdict(report), ensure_ascii=False, default=str)
+
+    assert "BATCH_SQL_MUST_NOT_APPEAR" in serialized
+    assert "statement_sql_text" in serialized and "SELECT second_stmt" in serialized
+    assert page.count('id="current-request-') == 3
+    assert "BATCH_SQL_MUST_NOT_APPEAR" not in page
+    assert "SELECT first_stmt" in page and "SELECT second_stmt" in page
+    first = re.search(r'<section class="report-section" id="current-request-001">.*?</section>',
+                      page, re.DOTALL)
+    second = re.search(r'<section class="report-section" id="current-request-002">.*?</section>',
+                       page, re.DOTALL)
+    third = re.search(r'<section class="report-section" id="current-request-003">.*?</section>',
+                      page, re.DOTALL)
+    assert first and second and third
+    assert "login-a" in first.group() and "SELECT first_stmt" in first.group()
+    assert "login-a" in second.group() and "SELECT second_stmt" in second.group()
+    assert "login-b" in third.group() and "192.0.2.71" in third.group()
+    assert "CPU 时间" not in first.group() and "逻辑读取" not in first.group()
+    assert "阻塞者" not in second.group() and "LCK_M_X" not in second.group()
+    resources = {section.section_id: dict(section.fields) for section in model.sections
+                 if section.section_id.startswith("sql-resource-")}
+    assert resources["sql-resource-001"]["CPU 时间（自请求开始累计）"] == "125 ms"
+    assert resources["sql-resource-001"]["逻辑读取（自请求开始累计）"] == "8 页（按 8 KiB/页折合 64 KiB）"
+    assert resources["sql-resource-001"]["写入计数（自请求开始累计）"] == "1 次"
+    assert resources["sql-resource-001"]["统计口径"] == "自请求开始累计至采集时刻，单次采集，不是采样区间增量。"
+    assert resources["sql-resource-002"]["当前等待事件"].startswith("LCK_M_X")
+    assert "等待会话 72" in resources["sql-resource-002"]["性能分析"]
+
+
+def test_slow_sql_cards_retain_non_info_severity_badges() -> None:
+    report = _report()
+    model = build_report_model(report, build_incident_summary(report))
+    severities = {"current-request-001": "WARNING", "sql-resource-001": "CRITICAL"}
+    model = replace(model, sections=tuple(
+        replace(section, severity=severities[section.section_id]) if section.section_id in severities else section
+        for section in model.sections))
+    page = HtmlReportRenderer().render(model)
+    for section_id, severity in severities.items():
+        card = page.split(f'id="{section_id}"', 1)[1].split("</section>", 1)[0]
+        assert f'class="badge {severity}"' in card
+
+
+def test_sqlserver_current_request_without_exact_session_does_not_borrow_another_identity() -> None:
+    report = _report()
+    report.details.update({
+        "all_sessions": [{"session_id": 81, "login_name": "unrelated-user",
+                          "host_name": "unrelated-host"}],
+        "all_requests": [{"session_id": 82, "request_id": 1, "status": "running",
+                          "database_name": "AppDb", "elapsed_ms": 1, "cpu_ms": 0,
+                          "logical_reads": 0, "reads": 0, "writes": 0,
+                          "wait_type": None, "wait_ms": 0, "blocking_session_id": 0,
+                          "sql_text": "batch", "statement_sql_text": "SELECT '<script>unmatched</script>'",
+                          "statement_sql_text_truncated": True}],
+        "long_running": [],
+        "blocking_graph": {"roots": [], "children": {}, "anomalies": []},
+        "samples": [{"collector": "active_requests", "success": True,
+                     "truncated": False, "row_count": 1}],
+    })
+    page = HtmlReportRenderer().render(build_report_model(
+        report, build_incident_summary(report, "reports/unmatched.html")))
+    card = re.search(r'<section class="report-section" id="current-request-001">.*?</section>',
+                     page, re.DOTALL)
+
+    assert card is not None
+    assert "unrelated-user" not in card.group()
+    assert "没有找到相同会话 ID 的会话采样" in card.group()
+    assert "SELECT &#x27;&lt;script&gt;unmatched&lt;/script&gt;&#x27;" in card.group()
+    assert "<script>unmatched</script>" not in page and "已截断" in card.group()
+
+
+def test_sqlserver_current_request_never_labels_batch_text_as_statement_when_offsets_exist() -> None:
+    report = _report()
+    report.details.update({
+        "all_sessions": [{"session_id": 91, "login_name": "exact-user"}],
+        "all_requests": [{"session_id": 91, "request_id": 2, "status": "running",
+                          "database_name": "AppDb", "elapsed_ms": 1,
+                          "statement_start_offset": 10, "statement_end_offset": 30,
+                          "sql_text": "BATCH_ONLY_MUST_NOT_BE_PRESENT"}],
+        "long_running": [],
+        "blocking_graph": {"roots": [], "children": {}, "anomalies": []},
+        "samples": [{"collector": "active_requests", "success": True,
+                     "truncated": False, "row_count": 1}],
+    })
+    page = HtmlReportRenderer().render(build_report_model(
+        report, build_incident_summary(report, "reports/missing-statement.html")))
+    card = re.search(r'<section class="report-section" id="current-request-001">.*?</section>',
+                     page, re.DOTALL)
+
+    assert card is not None
+    assert "BATCH_ONLY_MUST_NOT_BE_PRESENT" not in page
+    assert "采集器未返回按当前语句偏移提取的 SQL 文本" in card.group()
+
+
+@pytest.mark.parametrize(
+    "success,expected",
+    [(True, "本次采样没有活动请求"), (False, "活动请求采集失败；本次不能据此判断实例没有活动 SQL")],
+)
+def test_sqlserver_current_request_empty_state_distinguishes_no_rows_from_failure(
+    success: bool, expected: str,
+) -> None:
+    report = _report()
+    report.details.update({
+        "all_sessions": [], "all_requests": [], "long_running": [],
+        "blocking_graph": {"roots": [], "children": {}, "anomalies": []},
+        "samples": [{"collector": "active_requests", "success": success,
+                     "truncated": False, "row_count": 0}],
+    })
+    page = HtmlReportRenderer().render(build_report_model(
+        report, build_incident_summary(report, "reports/empty.html")))
+
+    assert expected in page
+    if success:
+        assert "活动请求采集失败" not in page
+    else:
+        assert "本次采样没有活动请求" not in page
+
+
 def test_mysql_recent_statement_evidence_is_escaped_and_collapsed() -> None:
     report = _report()
     report = replace(report, instance=DatabaseInstance(
@@ -370,11 +704,13 @@ def test_report_policy_bounds_high_concurrency_and_discloses_omissions() -> None
                                soft_report_bytes=2 * 1024 * 1024,
                                hard_report_bytes=8 * 1024 * 1024)
     summary = build_incident_summary(report, "reports/report.html")
-    page = render_bounded(build_report_model(report, summary, policy=policy),
-                          HtmlReportRenderer().render, policy)
+    model = build_report_model(report, summary, policy=policy)
+    page = render_bounded(model, HtmlReportRenderer().render, policy)
     assert "省略" in page
     assert "人工处置参考" in page and "根因候选" in page
-    assert "长运行请求 303 条 · 阻塞相关 302 条 · 非阻塞 1 条" in page
+    workload = next(section for section in model.sections if section.section_id == "workload-summary")
+    assert workload.summary == "长运行请求 303 条 · 阻塞相关 302 条 · 非阻塞 1 条。"
+    assert workload.summary not in page
     assert len(page.encode("utf-8")) < policy.hard_report_bytes
     assert page.count("<tr>") < 100
 
@@ -407,6 +743,10 @@ def test_hard_report_size_fallback_keeps_incident_and_recovery() -> None:
     assert "证据完整性" in page
     assert "报告达到大小上限，已收敛部分证据内容" in page
     assert len(page.encode("utf-8")) <= policy.hard_report_bytes
+    parser = _HTMLReferences()
+    parser.feed(page)
+    assert not any(target.startswith("current-request-") for target in parser.fragments)
+    assert set(parser.fragments).issubset(set(parser.ids))
 
 
 def test_transaction_enums_are_database_specific_and_unknown_values_remain_visible() -> None:
@@ -418,8 +758,8 @@ def test_transaction_enums_are_database_specific_and_unknown_values_remain_visib
         "transaction_age_seconds": 4, "transaction_type": 99, "transaction_state": 99})
     summary = build_incident_summary(report, "reports/report.html")
     page = HtmlReportRenderer().render(build_report_model(report, summary))
-    assert "Read/Write" in page and "Active" in page
-    assert "Unknown (99)" in page
+    assert "读写事务" in page and "活动中" in page
+    assert "未知（原始值 99）" in page
 
 
 def test_displayed_sql_obeys_report_character_policy() -> None:
@@ -485,21 +825,12 @@ def test_report_filename_timestamp_and_collision(monkeypatch: pytest.MonkeyPatch
 
 
 def test_mysql_top_sql_quality_distinguishes_collection_from_partial_completeness() -> None:
-    report = replace(_report(), instance=DatabaseInstance(
-        "mysql-test", "MySQL", DatabaseType.MYSQL, "localhost", 3306,
-        "synthetic-monitor", environment="test"))
-    report.details["top_sql"] = _top_sql_payload()
+    report = _top_sql_report()
     model = build_report_model(report, build_incident_summary(report))
-    quality = next(section for section in model.sections if section.section_id == "collection-quality")
-    rows = {row[0]: row for row in quality.tables[0].rows}
-
-    assert rows["mysql_top_sql"][1] == "PARTIAL"
-    assert "采集状态=COLLECTED" in rows["mysql_top_sql"][2]
-    assert "证据完整性=PARTIAL" in rows["mysql_top_sql"][2]
-    assert "COUNTER_EPOCH_UNKNOWN" in rows["mysql_top_sql"][2]
-    assert "SOURCE_COVERAGE_INCOMPLETE" in rows["mysql_top_sql"][2]
     page = HtmlReportRenderer().render(model)
-    assert "采集状态=已采集" in page and "证据完整性=部分可用" in page
+    assert "status-collected" in page and "completeness-partial" in page
+    assert "已采集" in page and "部分可用" in page
+    assert "COUNTER_EPOCH_UNKNOWN" in page and "数据源覆盖不完整" in page
     top_sql = next(section for section in model.sections if section.section_id == "top-sql")
     top_sql_fields = dict(top_sql.fields)
     assert top_sql_fields["Database Engine"] == "MySQL"
@@ -507,25 +838,22 @@ def test_mysql_top_sql_quality_distinguishes_collection_from_partial_completenes
     assert "Statement Instrument Count: 214" in source_metadata
     assert "Statement Instrument Disabled Count: 15" in source_metadata
     assert "Statement Instrument Untimed Count: 15" in source_metadata
-    assert model.incident_summary.data_completeness == "COMPLETE"
 
 
 @pytest.mark.parametrize(("completeness", "visibility", "expected"), [
     ("COMPLETE", "COMPLETE", "完整"),
     ("UNKNOWN", "UNKNOWN", "未知"),
-    ("COMPLETE", "UNKNOWN", "未知"),
+    ("COMPLETE", "UNKNOWN", "完整"),
 ])
 def test_top_sql_quality_never_promotes_unknown_to_complete(
         completeness: str, visibility: str, expected: str) -> None:
-    report = replace(_report(), instance=DatabaseInstance(
-        "mysql-test", "MySQL", DatabaseType.MYSQL, "localhost", 3306,
-        "synthetic-monitor", environment="test"))
-    report.details["top_sql"] = _top_sql_payload(
-        completeness=completeness, visibility=visibility)
+    report = _top_sql_report(completeness=completeness, visibility=visibility)
     model = build_report_model(report, build_incident_summary(report))
-    quality = next(section for section in model.sections if section.section_id == "collection-quality")
-    row = next(row for row in quality.tables[0].rows if row[0] == "mysql_top_sql")
-    assert row[1] == expected
+    page = HtmlReportRenderer().render(model)
+    assert f'completeness-{completeness.lower()}' in page
+    assert expected in page
+    section = next(section for section in model.sections if section.section_id == "top-sql")
+    assert dict(section.fields)["Data Visibility"] == {"UNKNOWN": "未知", "COMPLETE": "完整"}[visibility]
 
 
 def test_top_sql_completeness_does_not_raise_incomplete_slow_core() -> None:
@@ -539,8 +867,8 @@ def test_top_sql_completeness_does_not_raise_incomplete_slow_core() -> None:
     report.details["top_sql"] = _top_sql_payload(completeness="COMPLETE", visibility="COMPLETE")
     model = build_report_model(report, build_incident_summary(report))
     quality = next(section for section in model.sections if section.section_id == "collection-quality")
-    row = next(row for row in quality.tables[0].rows if row[0] == "mysql_top_sql")
-    assert row[1] == "完整"
+    assert all(row[0] != "mysql_top_sql" for row in quality.tables[0].rows)
+    assert all(section.section_id != "top-sql" for section in model.sections)
     assert model.incident_summary.data_completeness != "COMPLETE"
 
 
@@ -614,7 +942,7 @@ def test_postgresql_slow_version_is_readable_and_retains_raw_server_version_num(
     assert "版本" in page and "16.15" in page and "160015" in page
 
 
-@pytest.mark.parametrize("database_type", [DatabaseType.MYSQL, DatabaseType.POSTGRESQL])
+@pytest.mark.parametrize("database_type", list(DatabaseType))
 def test_slow_html_ids_are_unique_and_navigation_fragments_resolve(database_type: DatabaseType) -> None:
     report = replace(_report(), instance=DatabaseInstance(
         "synthetic", "Synthetic", database_type, "localhost", 1,
@@ -629,16 +957,25 @@ def test_slow_html_ids_are_unique_and_navigation_fragments_resolve(database_type
     assert "collection-quality-panel" in parser.ids
     assert set(parser.fragments).issubset(set(parser.ids))
     assert 'href="#collection-quality"' in page
+    anchors = ("summary", "root-assessment", "current-requests", "blocking-chain",
+               "transactions", "evidence", "session-appendix")
+    assert [parser.ids.index(anchor) for anchor in anchors] == sorted(parser.ids.index(anchor) for anchor in anchors)
+    assert '<details class="panel-group" id="session-appendix" data-expandable>' in page
+    blocking = page.split('id="blocking-chain"', 1)[1].split('id="manual-action"', 1)[0]
+    assert 'href="#current-request-001"' in blocking and "直接阻塞者" in blocking
+    assert "等待" not in blocking and "LCK_M_X" not in blocking
+    assert 'id="blocking-evidence"' in page.split('id="session-appendix"', 1)[1]
 
 
-def test_independent_top_sql_report_uses_statistics_summary_and_keeps_native_identity() -> None:
+def test_independent_top_sql_report_uses_statistics_summary_without_native_identity() -> None:
     report = _top_sql_report(DatabaseType.POSTGRESQL, completeness="PARTIAL", visibility="PARTIAL")
     page = HtmlReportRenderer().render(build_report_model(report, build_incident_summary(report)))
 
     for expected in ("数据库类型", "PostgreSQL", "数据库版本", "16.15", "采集状态",
                      "证据完整性", "部分可用", "返回记录数", "排序指标", "指标单位",
-                     "累计统计", "统计范围", "数据来源", "采集时间", "queryid=8107"):
+                     "累计统计", "统计范围", "数据来源", "采集时间", "名称未采集"):
         assert expected in page
+    assert "queryid=8107" not in page
     for inappropriate in ("严重程度", "主要问题", "当前观测", "采集开始", "初报完成", "N/A"):
         assert inappropriate not in page
     assert "MUST_NOT_BE_SHOWN" not in page
@@ -661,9 +998,9 @@ def test_mysql_wait_detail_unavailable_does_not_mark_active_requests_failed() ->
     model = build_report_model(report, build_incident_summary(report))
     quality = next(section for section in model.sections if section.section_id == "collection-quality")
     rows = {row[0]: row for row in quality.tables[0].rows}
-    assert rows["active_requests"][1] == "完整"
-    assert rows["current_wait_detail"][1] == "UNAVAILABLE"
-    assert "intentionally projects NULL" in rows["current_wait_detail"][2]
+    assert rows["活动请求（active_requests）"][1] == "完整"
+    assert rows["当前等待详情（current_wait_detail）"][1] == "UNAVAILABLE"
+    assert "intentionally projects NULL" in rows["当前等待详情（current_wait_detail）"][2]
 
 
 def test_postgresql_healthy_slow_html_describes_only_this_snapshot() -> None:

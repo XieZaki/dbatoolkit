@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import time
 from collections.abc import Mapping, Sequence
@@ -16,13 +17,19 @@ from dba.adapters import Adapter
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import CredentialProvider, Mode, validate_monitoring_credential
-from dba.database_errors import normalize_oracle_error
-from dba.errors import ToolkitError
+from dba.database_errors import normalize_oracle_error, with_timeout_evidence
+from dba.errors import (
+    ToolkitError,
+    client_sql_deadline_error,
+    database_error_log_fields,
+    set_database_error_connection_status,
+)
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
 from dba.oracle_identity import OraclePrincipal
-from dba.registry import SqlScript, SqlScriptRegistry, fetch_bounded_rows
+from dba.registry import MAX_SQL_TIMEOUT_SECONDS, SqlScript, SqlScriptRegistry, fetch_bounded_rows
 from dba.settings import OracleSettings
+from dba.sql_timeout import SqlDeadline, SqlDeadlineExpired
 from dba.top_sql import TOP_LIMIT
 
 ORACLE_TOP_SQL_METRICS = frozenset({
@@ -104,20 +111,50 @@ def load_driver() -> Driver:
     return cast(Driver, load_database_driver(DatabaseType.ORACLE, "oracledb"))
 
 
-def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:
+def _driver_error(
+    exc: Exception,
+    phase: str,
+    secret: str = "",
+    *,
+    execution_phase: str | None = None,
+    timeout_seconds: int | None = None,
+    effective_timeout_seconds: int | None = None,
+    script_timeout_seconds: int | None = None,
+    elapsed_ms: int | None = None,
+    script_path: str | None = None,
+) -> ToolkitError:
     # Never pass through a driver exception: it can contain a DSN or credentials.
     detail = normalize_oracle_error(exc, (secret,))
     number = getattr(exc, "code", None)
     if exc.args:
         number = getattr(exc.args[0], "code", number)
-    if isinstance(exc, TimeoutError) or number in {1013, 12170, 12535, 3136}:
+    if script_path is not None and execution_phase is not None:
+        detail = with_timeout_evidence(
+            detail,
+            execution_phase=execution_phase,
+            timeout_seconds=timeout_seconds,
+            effective_timeout_seconds=effective_timeout_seconds,
+            script_timeout_seconds=script_timeout_seconds,
+            elapsed_ms=elapsed_ms,
+            script_path=script_path,
+        )
+    if detail.error_category == "TIMEOUT" or number in {12170, 12535, 3136}:
         return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.", database_error=detail)
-    if detail is not None and detail.classification == "ACCESS_DENIED":
+    if detail.error_category == "PERMISSION_DENIED":
         return ToolkitError(
             f"{phase}Denied",
             f"{detail.message} Review docs/DATABASE_PERMISSIONS.md for this Oracle version and denied operation.",
             database_error=detail,
         )
+    if detail.error_category == "CONNECTION_LOST":
+        error_type = "ConnectionLost" if phase == "Connection" else "QueryConnectionLost"
+        return ToolkitError(error_type, "Connection was lost during database operation.", database_error=detail)
+    if detail.error_category == "CANCELLED_CONFIRMED":
+        return ToolkitError("QueryCancelled", "The database confirmed that the query was cancelled.",
+                            database_error=detail)
+    if detail.error_category == "CANCEL_STATUS_UNKNOWN":
+        return ToolkitError("QueryCancelStatusUnknown", "Query cancellation status is unknown; connection will be discarded.",
+                            database_error=detail)
     if phase == "Query" and number == 1031:
         return ToolkitError(
             "QueryDenied",
@@ -183,6 +220,7 @@ class OracleAdapter(Adapter):
             "sql_script": script, "result": "failed" if error else "ok",
             "elapsed_time": time.monotonic() - started,
             "error_type": error.error_type if error else None,
+            **database_error_log_fields(error.database_error_payload() if error else None),
         }})
 
     def connect(self) -> None:
@@ -211,7 +249,7 @@ class OracleAdapter(Adapter):
                 host=self.instance.host, port=self.instance.port,
                 tcp_connect_timeout=self.settings.connect_timeout, **target)
             self._connection.autocommit = True
-            self._connection.call_timeout = self.settings.call_timeout * 1000
+            self._connection.call_timeout = self.settings.effective_sql_timeout(MAX_SQL_TIMEOUT_SECONDS) * 1000
             if not self._connection.autocommit:
                 raise ToolkitError("AutocommitRequired", "Oracle driver did not enable autocommit.")
             self.preflight_checks["connect"] = True
@@ -456,43 +494,80 @@ class OracleAdapter(Adapter):
         started = time.monotonic()
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
-        database_error: dict[str, Any] | None = None
         truncated = False
         result_bytes = 0
         error: ToolkitError | None = None
         authorized = False
         script_name = "unregistered"
+        execution_phase = "Execute"
+        deadline: SqlDeadline | None = None
         try:
             self.registry.authorize(script, DatabaseType.ORACLE)
             authorized = True
             script_name = script.metadata.name
             if self._connection is None:
                 raise ToolkitError("NotConnected", "Connection is closed.")
-            self._connection.call_timeout = min(script.metadata.timeout_seconds,
-                                                self.settings.call_timeout) * 1000
+            deadline = SqlDeadline.start(
+                self.settings.effective_sql_timeout(script.metadata.timeout_seconds)
+            )
+
+            def set_call_timeout(remaining: float) -> None:
+                assert self._connection is not None
+                self._connection.call_timeout = max(1, math.ceil(remaining * 1000))
+
             cursor = self._connection.cursor()
             cursor.arraysize = min(100, script.metadata.max_rows)
             cursor.prefetchrows = min(100, script.metadata.max_rows)
+            # The driver applies this value per round trip inside the call.
+            set_call_timeout(deadline.require_remaining("Execute"))
+            deadline.require_remaining("Execute")
             if bind_parameters is None:
                 cursor.execute(script.text)
             else:
                 cursor.execute(script.text, dict(bind_parameters))
+            deadline.require_remaining("Execute")
             if cursor.description is None:
                 raise ToolkitError("InvalidResult", "Read-only script returned no rowset.")
             columns = [str(column[0]).lower() for column in cursor.description]
+            execution_phase = "Fetch"
             bounded = fetch_bounded_rows(
-                cursor, script.metadata.max_rows, script.metadata.max_result_bytes
+                cursor, script.metadata.max_rows, script.metadata.max_result_bytes,
+                deadline=deadline, before_fetch=set_call_timeout,
             )
             truncated = bounded.truncated
             result_bytes = bounded.result_bytes
             rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in bounded.rows)
         except ToolkitError as exc:
             error = exc
+        except SqlDeadlineExpired:
+            assert deadline is not None
+            error = client_sql_deadline_error(
+                "oracle", "python-oracledb", execution_phase=execution_phase,
+                timeout_seconds=deadline.timeout_seconds,
+                script_timeout_seconds=script.metadata.timeout_seconds,
+                elapsed_ms=int(deadline.elapsed() * 1000),
+                script_path=f"{script.metadata.database_type.value}/{script_name}.sql",
+            )
         except (ValidationError, OSError, UnicodeError) as exc:
             error = (ToolkitError("RegistryRejected", "SQL is not an unchanged reviewed script from this registry.")
-                     if not authorized else _driver_error(exc, "Query"))
+                     if not authorized else _driver_error(
+                         exc, "Query", self._password, execution_phase=execution_phase,
+                         timeout_seconds=self.settings.effective_sql_timeout(
+                             script.metadata.timeout_seconds),
+                         effective_timeout_seconds=self.settings.effective_sql_timeout(
+                             script.metadata.timeout_seconds),
+                         script_timeout_seconds=script.metadata.timeout_seconds,
+                         elapsed_ms=int((time.monotonic() - started) * 1000),
+                         script_path=f"{script.metadata.database_type.value}/{script_name}.sql"))
         except Exception as exc:
-            error = _driver_error(exc, "Query")
+            error = _driver_error(
+                exc, "Query", self._password, execution_phase=execution_phase,
+                timeout_seconds=self.settings.effective_sql_timeout(script.metadata.timeout_seconds),
+                effective_timeout_seconds=self.settings.effective_sql_timeout(
+                    script.metadata.timeout_seconds),
+                script_timeout_seconds=script.metadata.timeout_seconds,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                script_path=f"{script.metadata.database_type.value}/{script_name}.sql")
         except BaseException:
             self._close()
             raise
@@ -506,21 +581,14 @@ class OracleAdapter(Adapter):
                 rows = ()
                 truncated = False
                 result_bytes = 0
-                if error.database_error is not None:
-                    to_dict = getattr(error.database_error, "to_dict", None)
-                    if callable(to_dict):
-                        payload = to_dict()
-                        if isinstance(payload, dict):
-                            database_error = payload
-                    elif isinstance(error.database_error, dict):
-                        database_error = error.database_error
-                self._close()
+                close_ok = self._close()
+                set_database_error_connection_status(error, "DISCARDED" if close_ok else "UNKNOWN")
             details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
                                        "result_bytes": result_bytes}
             if authorized:
                 details.update({"sql_sha256": hashlib.sha256(script.text.encode()).hexdigest(),
-                                "timeout_seconds": min(script.metadata.timeout_seconds,
-                                                       self.settings.call_timeout),
+                                "timeout_seconds": self.settings.effective_sql_timeout(
+                                    script.metadata.timeout_seconds),
                                 "max_rows": script.metadata.max_rows})
                 details["max_result_bytes"] = script.metadata.max_result_bytes
             self._audit(script_name, started, error, details)
@@ -528,7 +596,7 @@ class OracleAdapter(Adapter):
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,
                                rows, len(rows), truncated, error is None,
                                error.error_type if error else None, str(error) if error else None,
-                               database_error)
+                               error.database_error_payload() if error else None)
 
     def get_server_version(self) -> str:
         if not self._ready:

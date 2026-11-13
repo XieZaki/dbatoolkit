@@ -31,9 +31,9 @@
 - MySQL Registry 的 SELECT 以外只读语句采用封闭精确白名单：`SHOW BINARY LOGS`、`SHOW GRANTS`、`SHOW SLAVE STATUS`、`SHOW REPLICA STATUS`。每条必须是独立审核的固定 Registry 脚本；禁止扩大为任意 SHOW。复制状态查询按版本路由，需要专用监控账号具备只读 `REPLICATION CLIENT`，不得使用 SUPER/BINLOG_ADMIN。
 - 静态 SQL 检查只是附加保护，不是权限控制或安全证明。审查函数副作用，最终边界是数据库监控账号权限。
 - Adapter 只接受自身 Registry 签发并在执行前复核内容/元数据未变更的已审查脚本。禁止任意 SQL 字符串执行接口。
-- SQL Server 使用 pyodbc，Microsoft ODBC Driver 18 优先、17 兼容回退；默认连接超时 5 秒、显式加密并验证证书；autocommit=true，不执行初始化修改语句。每次执行前为新游标设置有效超时=min(metadata.timeout_seconds, runtime.query_timeout)。
-- PostgreSQL 使用 psycopg 3；默认 SSL verify-full、连接超时 5 秒。连接启动参数启用只读事务和有界 statement_timeout，诊断连接 autocommit，断开时关闭；无任意 SQL、修改会话状态的初始化 SQL 或后台取消动作。监控账号需要跨会话统计与设置读取能力，不能是超级用户或具管理属性的账号。
-- MySQL 使用 PyMySQL 1.1 系列；默认 SSL 验证证书和主机名、连接超时 5 秒，autocommit、禁用 local infile。生产只允许专用监控账号；连接安全检查确认身份、Performance Schema 是否启用及已知危险/可写授权与活动角色，不判断单项诊断是否具备所需读取权限。Collector 被数据库拒绝时保留脱敏后的数据库错误并提示查看部署授权文档。流式游标有界提取，截断时关闭连接，避免游标关闭时遍历全部剩余行；read_timeout 是网络读取限制，不等于整批查询绝对墙钟上限。
+- SQL Server 使用 pyodbc，Microsoft ODBC Driver 18 优先、17 兼容回退；默认连接超时 5 秒、显式加密并验证证书；autocommit=true，不执行初始化修改语句。每次执行前为新游标设置有效超时=min(metadata.timeout_seconds, diagnostics.diagnostic_sql_timeout_seconds[, 已配置的 query_timeout])（C-11）。
+- PostgreSQL 使用 psycopg 3；默认 SSL verify-full、连接超时 5 秒。连接启动参数启用只读事务和有界 statement_timeout，诊断连接 autocommit，断开时关闭；无任意 SQL、修改会话状态的初始化 SQL 或后台取消动作。按 C-12，首版不发送协议级 CancelRequest：超时依赖服务端 `statement_timeout`，另设客户端网络等待上限；超时后关闭连接，不复用。监控账号需要跨会话统计与设置读取能力，不能是超级用户或具管理属性的账号。
+- MySQL 使用 PyMySQL 1.1 系列；默认 SSL 验证证书和主机名、连接超时 5 秒，autocommit、禁用 local infile。生产只允许专用监控账号；连接安全检查确认身份、Performance Schema 是否启用及已知危险/可写授权与活动角色，不判断单项诊断是否具备所需读取权限。Collector 被数据库拒绝时保留脱敏后的数据库错误并提示查看部署授权文档。流式游标有界提取，截断时关闭连接，避免游标关闭时遍历全部剩余行；read_timeout 是网络读取限制，不等于整批查询绝对墙钟上限。按 C-13：只读 SELECT 优先使用原生 `max_execution_time` SESSION 设置（5.7.8+）；无法使用该机制的 SHOW 脚本，仅允许经独立控制连接对本次运行实际记录的目标连接执行 `KILL QUERY <CONNECTION_ID>`。这是用户明确批准的唯一 KILL 例外，限制见下方「MySQL KILL QUERY 例外」。
 - Database permissions are deployment preparation documented only in `docs/DATABASE_PERMISSIONS.md`; README links to that guide. Do not maintain a Permission Registry, per-feature readiness/missing-permission calculation, or GRANT/REVOKE generator. When a database denies a reviewed read, retain the sanitized vendor error and point the operator to the guide. Keep version routing, read-only Registry enforcement, and any separately justified dangerous-account safety checks; never execute GRANT/REVOKE or account-management SQL.
 - Oracle 使用 python-oracledb Thin；只接受 service_name 或 SID 其一，账号必须专用且仅持必要直接只读授权。账号安全检查拒绝 SYS/SYSTEM、已授角色、非监控系统权限、写权限对象授权和自有对象；具体 V_$ / DBA 视图可见性由所选只读查询的实际结果判定，可选证据缺失时按场景降级。Toolkit 不执行权限变更；call_timeout 限制驱动调用而非完整流程墙钟。Oracle KILL SESSION 仅为已确认单实例完整根会话的纯文本 ReferenceCommand；RAC 跨实例快照缺失时不生成。任何 Oracle 诊断 SQL 均来自 Registry。
 - fetchmany(max_rows) 有界读取，达到上限就标记 truncated=true（表示可能截断，不额外读取整批结果）；请求 SQL 文本也有独立长度上限和标志。
@@ -55,6 +55,41 @@
 - Runtime 依赖以 deployment/runtime-manifest.yaml、pyproject extras 和 requirements lock 输入共同维护；生产 bootstrap 仅从本地 wheelhouse 使用 --no-index 安装，不自动访问互联网、执行 MSI/RPM/DEB、调用系统包管理器、修改 PATH/注册表或删除已有 .venv。
 - SQL Server ODBC 选择顺序固定为 Driver 18 优先、Driver 17 兼容回退；连接必须显式设置 Encrypt 与 TrustServerCertificate。Oracle 固定默认 Thin Mode，不把 Instant Client 作为必需依赖。
 
+
+
+### 诊断模块独立执行与故障隔离原则
+
+1. DBA Toolkit 的各个诊断功能模块必须具备独立的执行、异常捕获、状态记录和降级能力。
+2. 单个诊断模块执行失败，不得直接导致整个 Slow、Blocking、Incident 或其他诊断报告无法生成。
+3. 当某个模块发生权限不足、SQL 执行失败、超时、版本不兼容、数据不可见或其他异常时：
+   - 捕获该模块的异常。
+   - 记录模块名称、执行对象、数据库原始错误代码、错误状态及原始错误信息。
+   - 将该模块标记为相应的受限、失败或不可用状态。
+   - 继续执行其他不依赖该模块的诊断功能。
+   - 正常生成 HTML、JSON 和 CLI 诊断结果。
+4. 对于权限不足的情况，必须明确展示「功能受限」，并尽可能展示数据库返回的原始错误，例如权限拒绝、对象访问失败及对应错误代码。
+5. 不得把不同类型的失败统一显示成「不支持」或「未采集」。必须区分：
+   - 权限不足：功能受限。
+   - 数据库执行错误：采集失败。
+   - 执行超时：执行超时。
+   - 数据库版本不支持：版本不支持。
+   - 元数据不可见：对象信息无法解析。
+   - 尚未实现：待开发。
+   - 未执行：未采集或未执行。
+6. 数据库原始错误信息应尽可能完整保留，包括原生错误代码、SQLSTATE、错误消息和可用的状态信息。展示前必须脱敏密码、凭据、连接字符串、令牌、敏感参数和其他机密信息。不得将脱敏后的信息描述为未经处理的原始错误。
+7. 不允许通过空值、0、正常状态或默认成功结果掩盖模块执行失败。
+8. 某个模块失败时，只影响该模块的数据完整性和诊断结论。其他模块的有效证据必须继续保留。
+9. 如果模块之间存在依赖关系，下游模块应标记为依赖失败或未执行，并说明原因；不应因此中止其他独立模块。
+10. 如果数据库整体连接失败，只要本地报告生成链路仍可运行，也应尽可能生成连接失败诊断报告，说明连接错误，并将无法执行的模块标记为未执行，而不是直接退出且不产生任何报告。
+11. 模块级错误必须在 HTML、JSON 和 CLI 中保持一致。整体报告可以标记为 PARTIAL，但不能因为单个可选模块失败而丢失其他有效诊断结果。
+12. 不得为了恢复功能而自动扩大数据库权限、切换高权限账号或绕过安全限制。需要新增只读权限时，按数据库权限管理规则申请，并同步更新 `docs/DATABASE_PERMISSIONS.md`。
+13. 新增诊断模块时，必须同时增加成功、权限不足、SQL 执行失败、超时和部分数据不可用等异常场景测试。
+14. 不允许使用宽泛的异常捕获后静默忽略错误。所有异常必须有明确的状态、原因和可追踪记录。
+
+
+
+
+
 ## Windows 本地真实 E2E 执行约束
 
 - SQL Server、PostgreSQL、MySQL、Oracle 的真实连接和 E2E 只能从获准的 Windows 宿主机上下文执行，使用 Windows PowerShell 和项目 `.venv`。终端显示 PowerShell 或路径看似相同，不足以证明进程能访问 Windows 主机资源。
@@ -63,6 +98,73 @@
 - 若工具无法取得获准的 Windows 本地执行上下文，必须在访问数据库前停止，提供用户可在 Windows PowerShell 执行的完整命令并等待结果。不得重复运行已证明被同一隔离限制阻断的连接，不得读取/绕过凭据文件、改用另一套数据库或把 Fake/Mock 测试称为真实 E2E。
 - E2E 报告注明 `WINDOWS_LOCAL_REAL_E2E`、`ISOLATED_OFFLINE_TEST` 或 `NOT_EXECUTED`；这些仅为证据来源标签，不是产品枚举。单元测试与静态检查只能作为离线证据。
 - 导出的诊断 JSON 中将 `report.instance.credential_alias` 脱敏为 `[REDACTED]`；内部凭据解析仍保留真实 alias。不得输出用户名、密码或其他凭据值。
+
+
+
+### 全局诊断 SQL 执行超时与故障隔离原则
+
+1. 所有数据库诊断 SQL 必须遵守统一的全局执行超时配置。
+2. 默认配置：
+   - 参数：`diagnostic_sql_timeout_seconds`
+   - 默认值：30 秒。
+   - 适用范围：SQL Server、Oracle、MySQL、PostgreSQL 的所有诊断 SQL。
+   - 必须通过项目现有的统一配置机制管理，不得在各 Collector 中重复定义超时值。
+3. 超时范围包括 SQL 执行及结果获取阶段。连接超时与 SQL 执行超时分别管理。
+4. 单条诊断 SQL 达到超时限制时：
+   - 必须调用对应数据库驱动或数据库原生的查询取消机制。
+   - 停止当前诊断模块的剩余依赖步骤。
+   - 将当前模块标记为 TIMEOUT。
+   - 记录 SQL 脚本名称、模块名称、实际耗时、超时阈值、执行阶段和原始错误。
+   - 在确认取消完成及连接状态正常之前，不得复用该连接。
+   - 取消成功且连接状态安全后，继续执行下一个独立诊断模块。
+5. 不允许仅通过 Python Future、线程等待超时或异步任务超时来代替数据库端查询取消。必须验证数据库端实际停止执行诊断 SQL。
+6. 如果查询取消无法确认：
+   - 丢弃或关闭当前连接。
+   - 不得将其重新放入可复用连接池。
+   - 只能通过经过验证的独立连接路径继续其他模块；否则停止后续数据库采集，但仍应尽可能生成已有数据的报告。
+7. 查询超时仅允许取消 Toolkit 自己发起的诊断 SQL，不得 KILL、CANCEL、TERMINATE 或影响任何业务会话。
+8. 不同数据库驱动必须分别实现并验证超时和取消机制。不能将 Socket Read Timeout 等同于数据库端查询取消。
+9. 超时信息必须在 HTML、JSON、CLI 中一致展示，包括：
+   - 数据库类型及版本；
+   - 诊断模块；
+   - SQL 脚本相对路径；
+   - 实际执行耗时；
+   - 配置超时值；
+   - Execute / Fetch 等执行阶段；
+   - 数据库原生错误代码和 SQLSTATE（如果有）；
+   - 原始错误信息（敏感信息脱敏）；
+   - 查询取消是否成功。
+10. 必须区分 TIMEOUT、权限不足、SQL 执行失败、版本不支持和未采集，不得混淆。
+11. 一个诊断 SQL 超时不得导致整个诊断报告无法生成，也不得丢弃其他模块已经取得的有效数据。
+12. 新增或修改 Collector 时，必须覆盖正常执行、超过超时限制、查询取消成功、查询取消失败、后续模块继续执行和报告正常生成等测试场景。
+13. 如果某项功能确实需要超过全局默认超时，必须先进行性能评估，说明原因并经用户批准，不允许模块自行延长超时。
+14. 每次新增或调整全局超时机制，必须同步更新项目配置说明、使用文档和测试。
+15. 全局参数调整不代表允许无限制延长诊断 SQL 执行时间。
+
+#### 设计原则（2026-11-12 架构审查确认，设计见 `docs/design/diagnostic-sql-timeout-and-fault-isolation-v0.9.1.md`）
+
+16. 生效超时只由 `dba/sql_timeout.py` 的共享函数确定（C-11，用户 2026-11-13 批准）：`effective = min(Registry 脚本 timeout_seconds, diagnostics.diagnostic_sql_timeout_seconds)`。全局值默认 30 秒、范围 1..60，只能在设置文件的 `diagnostics:` 段配置，不能在引擎段或 Inventory 中重定义。引擎 `query_timeout`（Oracle `call_timeout`）和 Inventory `connection.query_timeout` 保留为可选的更严格上限，默认不设，只能缩短不能延长。审计日志必须分别记录实际下发值（`timeout_seconds`）和单脚本策略值；PostgreSQL `statement_timeout` 与 MySQL `read_timeout` 是连接级值，在单 SQL Deadline 实现前不能代表单脚本限制。
+17. 单条 SQL 的期限覆盖 Execute 和全部 Fetch，使用同一个绝对 Deadline（`SqlDeadline`）。驱动按单次调用或单次往返计时的超时，不等于单条 SQL 的总期限；Fetch 循环必须检查同一期限，不得在每次 Fetch 时重新获得完整超时。
+18. 数据库端取消要求（C-12、C-13 于 2026-11-13 批准）：
+   - SQL Server：ODBC 查询超时，由驱动在本连接发送 Attention。
+   - PostgreSQL：服务端 `statement_timeout`，加客户端网络等待保护；首版不发送协议级 CancelRequest。区分服务端确认取消（`57014`）与客户端取消状态未知。
+   - MySQL：`read_timeout` 只是 Socket 读取上限，不是取消。只读 SELECT 优先使用 `max_execution_time` SESSION 设置（超时返回 `3024`）；SHOW 脚本按下方受限 `KILL QUERY` 例外处理。驱动和版本差异必须先验证，不得假设所有版本一致。
+   - Oracle：`call_timeout` 触发驱动 break，必须区分连接仍可用（`DPY-4024`）与连接失效（`DPY-4011` / session dead）。
+19. 超时结果必须区分五种情形：客户端等待超时、驱动执行超时、数据库端确认停止、取消失败、连接失效或状态未知。只有数据库返回的取消错误（如 PostgreSQL `57014`、MySQL `3024`、Oracle `ORA-01013`）或测试中的独立观测，才能记为数据库端确认停止。
+20. 任何超时后都关闭当前连接，不做「验证后复用」，不重试同一条 SQL。后续独立模块只经完整连接与 Preflight 新建连接；新建失败则停止后续数据库采集，并用已有证据生成报告。
+21. 单模块失败不影响独立模块：超时只终止该模块及其依赖步骤；依赖步骤显式标记依赖失败或未执行；报告整体可为 PARTIAL。保留现有分阶段采集结构。
+22. 超时证据作为增量字段加入现有模块错误结构，HTML、JSON、CLI 从同一份数据生成，不另建平行错误模型。
+
+#### MySQL KILL QUERY 例外（C-13，用户 2026-11-13 明确批准）
+
+这是取消 Toolkit 自身诊断 SQL 的特殊能力，不代表允许一般性的 KILL 操作。权限说明见 `docs/DATABASE_PERMISSIONS.md`。
+
+23. 目标连接执行诊断 SQL 前，必须取得该连接真实的 `CONNECTION_ID()`，并在内存中保存它与本次诊断任务、连接对象的对应关系。
+24. 只能对本次运行实际记录的连接 ID 发送取消；不得根据用户、主机、SQL 文本或进程列表猜测，严禁扫描其他会话 ID。目标身份无法确认时禁止发送取消。
+25. 取消必须经独立控制连接发出，该连接使用同一受控 Toolkit 监控账号，并走完整的连接与 Preflight 路径。
+26. 只允许 `KILL QUERY <已记录的整数 ID>`。严禁 `KILL CONNECTION` 或不带 `QUERY` 的 `KILL`；严禁取消业务连接、其他 Toolkit 任务或人工会话。
+27. 取消失败或无法确认时，关闭目标连接并记录真实取消状态（含数据库错误码），不得记为已取消。
+28. 不得为取消能力申请 `CONNECTION_ADMIN`、`SUPER`、`SYSTEM_USER` 或其他管理权限；现有 MySQL 账号安全检查继续拒绝这些权限。
 
 ## CLI presentation rules
 

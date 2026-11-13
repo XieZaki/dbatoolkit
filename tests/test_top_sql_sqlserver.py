@@ -51,7 +51,7 @@ def row(**changes: Any) -> dict[str, Any]:
         "sql_handle": "0x01", "plan_handle": "0x02", "query_hash": "0x03",
         "query_plan_hash": "0x04", "plan_generation_num": 2,
         "statement_start_offset": 0, "statement_end_offset": 42, "database_id": 7,
-        "sql_text_available": 1, "total_cpu_time": 1000, "total_logical_reads": 120,
+        "database_name": "appdb", "sql_text_available": 1, "total_cpu_time": 1000, "total_logical_reads": 120,
         "total_physical_reads": 8, "execution_count": 4, "total_elapsed_time": 1600,
         "average_cpu_time": "250.0000", "average_elapsed_time": "400.0000",
         "ranking_value": "1000.0000", **changes,
@@ -75,6 +75,7 @@ def test_sqlserver_top_sql_routes_are_explicit_and_2025_unverified() -> None:
     assert "sys.dm_exec_query_stats" in script.text
     assert "sys.dm_exec_sql_text" in script.text
     assert "COALESCE(st.dbid, plan_text.dbid) AS database_id" in script.text
+    assert "DB_NAME(COALESCE(st.dbid, plan_text.dbid)) END AS database_name" in script.text
     assert "OUTER APPLY sys.dm_exec_sql_text(qs.plan_handle) AS plan_text" in script.text
     assert "query_plan_hash" in script.text and "statement_start_offset" in script.text
     assert "TOP (?)" in script.text and "ORDER BY ranking.ranking_value DESC" in script.text
@@ -152,6 +153,7 @@ def test_collector_parameterizes_top_and_returns_all_supported_cumulative_metric
         assert result.items[0].sql_identity.fields["sql_handle"] == "0x01"
         assert result.items[0].sql_identity.fields["query_hash"] == "0x03"
         assert result.items[0].sql_identity.fields["database_id"] == 7
+        assert result.items[0].database_name == "appdb"
         assert result.items[0].sql_identity.fields["statement_start_offset"] == 0
         assert result.items[0].sql_identity.fields["statement_end_offset"] == 42
         assert result.items[0].plan_identity is not None
@@ -298,6 +300,7 @@ def test_sqlserver_top_sql_collection_scope_is_instance_and_item_scope_is_statem
     assert payload["collection_scope"] == "INSTANCE"
     assert payload["metric_scope"] == "SQL_STATEMENT"
     assert payload["items"][0]["sql_identity"]["fields"]["database_id"] == 7
+    assert payload["items"][0]["database_name"] == "appdb"
 
 
 def test_sqlserver_top_sql_cli_json_and_html_share_the_contract() -> None:
@@ -313,7 +316,8 @@ def test_sqlserver_top_sql_cli_json_and_html_share_the_contract() -> None:
         "limitations": ["RESET_SUSPECTED", "CACHE_EVICTED"],
         "items": [{"rank": 1, "sql_identity": {"database_engine": "sqlserver", "kind": "STATEMENT",
             "fields": {"sql_handle": "0x01", "statement_start_offset": 0, "statement_end_offset": 42}},
-            "plan_identity": None, "request_identity": None, "metric_value": 1000, "value_status": "OBSERVED"}],
+            "plan_identity": None, "request_identity": None, "metric_value": 1000,
+            "database_name": "appdb", "value_status": "OBSERVED"}],
     }
     report = TopSQLDiagnosticReport(instance_report.instance, datetime.now(timezone.utc), "top-sql", (),
                                     {"version": "16.0.4305.5", "top_sql": result})
@@ -322,13 +326,16 @@ def test_sqlserver_top_sql_cli_json_and_html_share_the_contract() -> None:
     assert incident.status == "UNKNOWN" and incident.observed_now == "NOT_ASSESSED"
     model = build_report_model(report, incident)
     html = HtmlReportRenderer().render(model)
-    assert "Top SQL" in html and "0x01" in html and "累计统计" in html
+    assert "Top SQL" in html and "appdb" in html and "累计统计" in html
+    assert "原生身份与执行计划标识" not in html and "0x01" not in html
     assert "采集范围" in html and "实例级" in html
     assert "SELECT " not in html
     from dba.presentation import render_human
     cli = render_human("top-sql", result)
     assert "total_cpu_time" in cli
     assert "采集范围" in cli and "实例级" in cli
+    assert "sql_handle=0x01" in cli
+    assert "原生身份（用于精确关联）" not in cli
     assert "0x01" in cli and "1000" in cli
 
 
@@ -352,9 +359,11 @@ def test_top_sql_diagnose_cli_executes_registered_route_and_writes_offline_html(
     output = json.loads(capsys.readouterr().out)
     assert output["success"] is True
     assert output["top_sql"]["items"][0]["sql_identity"]["fields"]["sql_handle"] == "0x01"
+    assert output["top_sql"]["items"][0]["database_name"] == "appdb"
     assert output["top_sql"]["ranking_metric"] == "cpu_time"
     assert driver.connection.bound_parameters[-1] == (7, "cpu_time")
     html = report_path.read_text(encoding="utf-8")
-    assert "Top SQL" in html and "0x01" in html and "microseconds" in html
+    assert "Top SQL" in html and "appdb" in html and "microseconds" in html
+    assert "原生身份与执行计划标识" not in html and "0x01" not in html
     assert "SELECT " not in html
     assert driver.connection.closed

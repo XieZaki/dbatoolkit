@@ -227,7 +227,13 @@ class SQLServerTopSQLCollector:
             if previous_value is not None and value > previous_value:
                 raise ToolkitError("InvalidTopSQLOrder", "SQL Server Top SQL rows are not in declared rank order.")
             previous_value = value
-            items.append(TopSQLItem(sql_identity, value, rank=len(items) + 1, plan_identity=plan_identity))
+            database_name = row.get("database_name")
+            if not isinstance(database_name, str) or not database_name.strip() or len(database_name) > 128:
+                database_name = None
+            items.append(TopSQLItem(
+                sql_identity, value, rank=len(items) + 1, plan_identity=plan_identity,
+                database_name=database_name,
+            ))
         if result.truncated:
             limitations.append(Limitation.TRUNCATED)
         return TopSQLResult(instance.id, DatabaseType.SQLSERVER,

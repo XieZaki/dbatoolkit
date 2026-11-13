@@ -1,7 +1,10 @@
 import io
 import json
 import logging
+import re
 import shutil
+import sqlite3
+from contextlib import closing
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -262,6 +265,7 @@ def test_driver17_honors_explicit_tls_settings(
         (RuntimeError(TEST_CREDENTIAL), "ConnectionFailed"),
         (TimeoutError(TEST_CREDENTIAL), "ConnectionTimeout"),
         (RuntimeError("HYT00", TEST_CREDENTIAL), "ConnectionTimeout"),
+        (RuntimeError("HYT01", "[HYT01] Connection timeout expired"), "ConnectionTimeout"),
         (RuntimeError("08001", "SSL Provider: certificate verify failed"),
          "ConnectionTLSFailed"),
     ],
@@ -275,6 +279,17 @@ def test_connect_failures(
     assert exc.value.error_type == kind and TEST_CREDENTIAL not in str(exc.value)
     assert TEST_CREDENTIAL not in repr(exc.value)
     assert adapter._connection is None and adapter._password == ""
+    if failure.args and failure.args[0] == "HYT01":
+        payload = exc.value.database_error_payload()
+        assert payload is not None and payload["error_category"] == "TIMEOUT"
+        assert payload["sqlstate"] == "HYT01"
+        timeout = payload["timeout"]
+        assert timeout["execution_phase"] == "Connection"
+        assert timeout["timeout_seconds"] == adapter.settings.connect_timeout
+        assert timeout["script_path"] is None
+        assert timeout["cancellation_status"] == "NOT_APPLICABLE"
+        assert timeout["mechanism"] == "ODBC_CONNECTION_TIMEOUT"
+        assert timeout["connection_status"] == "NOT_ESTABLISHED"
 
 
 def test_account_rejections(instance: DatabaseInstance, driver: FakeDriver) -> None:
@@ -549,6 +564,11 @@ def test_query_timeout_audit(adapter: SQLServerAdapter, driver: FakeDriver) -> N
         result = ActiveRequestsCollector(adapter).collect(adapter.instance)
         assert not result.success and result.error_type == "QueryTimeout"
         assert result.rows == () and result.row_count == 0
+        assert result.database_error is not None
+        assert result.database_error["sqlstate"] == "HYT00"
+        assert result.database_error["error_category"] == "TIMEOUT"
+        assert result.database_error["timeout"]["execution_phase"] == "Execute"
+        assert result.database_error["timeout"]["cancellation_status"] == "DRIVER_REPORTED"
         assert TEST_CREDENTIAL not in str(asdict(result))
         assert driver.connection.closed and all(c.closed for c in driver.connection.cursors)
     finally:
@@ -557,6 +577,67 @@ def test_query_timeout_audit(adapter: SQLServerAdapter, driver: FakeDriver) -> N
     assert TEST_CREDENTIAL not in audit and "PWD=" not in audit and "SELECT 1" not in audit
     assert '"error_type": "QueryTimeout"' in audit
     assert '"sql_sha256":' in audit and '"max_rows": 5000' in audit
+
+
+def test_execute_and_fetch_share_one_deadline_and_discard_connection(
+    adapter: SQLServerAdapter, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch,
+    sql_deadline_clock: Any,
+) -> None:
+    adapter.settings = SQLServerSettings(diagnostic_sql_timeout_seconds=3)
+    with adapter:
+        execute = FakeCursor.execute
+        fetchmany = FakeCursor.fetchmany
+
+        def timed_execute(cursor: FakeCursor, text: str, *parameters: object) -> None:
+            execute(cursor, text, *parameters)
+            if cursor.connection.executed[-1] == "active_requests":
+                sql_deadline_clock.advance(1)
+
+        def timed_fetch(cursor: FakeCursor, size: int) -> list[tuple[Any, ...]]:
+            if cursor.connection.executed[-1] == "active_requests":
+                sql_deadline_clock.advance(1.1)
+            return fetchmany(cursor, size)
+
+        monkeypatch.setattr(FakeCursor, "execute", timed_execute)
+        monkeypatch.setattr(FakeCursor, "fetchmany", timed_fetch)
+        result = adapter.execute_readonly(adapter.registry.get("active_requests"))
+
+    assert not result.success and result.error_type == "FetchTimeout"
+    assert result.database_error is not None
+    assert result.database_error["error_category"] == "TIMEOUT"
+    timeout = result.database_error["timeout"]
+    assert timeout["execution_phase"] == "Fetch"
+    assert timeout["cancellation_status"] == "CANCEL_STATUS_UNKNOWN"
+    assert timeout["connection_status"] == "DISCARDED"
+    assert timeout["elapsed_ms"] == pytest.approx(3200, abs=1)
+    assert driver.connection.timeouts[-1] == 3
+    assert driver.connection.closed
+
+
+def test_execute_deadline_requires_fresh_connection_for_independent_query(
+    adapter: SQLServerAdapter, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch,
+    sql_deadline_clock: Any,
+) -> None:
+    adapter.settings = SQLServerSettings(diagnostic_sql_timeout_seconds=3)
+    adapter.connect()
+    old_connection = driver.connection
+    sessions = ActiveSessionsCollector(adapter).collect(adapter.instance)
+    execute = FakeCursor.execute
+
+    def timed_execute(cursor: FakeCursor, text: str, *parameters: object) -> None:
+        execute(cursor, text, *parameters)
+        if cursor.connection.executed[-1] == "active_requests":
+            sql_deadline_clock.advance(3)
+
+    monkeypatch.setattr(FakeCursor, "execute", timed_execute)
+    failure = adapter.execute_readonly(adapter.registry.get("active_requests"))
+    assert failure.error_type == "ExecuteTimeout"
+    assert old_connection.closed and sessions.rows
+    driver.connection = FakeConnection()
+    with adapter:
+        fresh_sessions = ActiveSessionsCollector(adapter).collect(adapter.instance)
+        assert fresh_sessions.success and fresh_sessions.rows == sessions.rows
+        assert len(driver.calls) == 2 and not driver.connection.closed
 
 
 def test_results_collectors_threshold(adapter: SQLServerAdapter, driver: FakeDriver) -> None:
@@ -580,22 +661,27 @@ def test_active_requests_registry_and_collector_preserve_native_identity(
     script = adapter.registry.get("active_requests", DatabaseType.SQLSERVER)
     normalized_sql = " ".join(script.text.split())
     assert "r.database_id" in normalized_sql
+    assert "r.request_id" in normalized_sql
     assert "r.statement_start_offset" in normalized_sql
     assert "r.statement_end_offset" in normalized_sql
+    assert "CONVERT(varbinary(max), t.text) AS batch_bytes" in normalized_sql
+    assert "source.end_offset + 2 - source.start_offset" in normalized_sql
+    assert "source.end_offset IN (-1, source.batch_length)" in normalized_sql
+    assert "AS statement_sql_text_truncated" in normalized_sql
     assert "CONVERT(varchar(130), r.plan_handle, 1) AS plan_handle" in normalized_sql
     assert "CONVERT(varchar(130), r.query_plan_hash, 1) AS query_plan_hash" in normalized_sql
-    assert "LEFT JOIN (" in normalized_sql
-    assert "LEFT JOIN sys.dm_exec_query_stats AS qs" in normalized_sql
-    assert "COUNT(qs.plan_generation_num)" in normalized_sql
-    assert "COUNT(DISTINCT qs.plan_generation_num)" not in normalized_sql
+    assert normalized_sql.count("sys.dm_exec_requests") == 1
+    assert "sys.dm_exec_query_stats" not in normalized_sql
+    assert "plan_generation" not in normalized_sql
+    assert "r.query_hash" in normalized_sql
     assert script.metadata.max_rows == 5000
 
     driver.connection.results["active_requests"] = [{
         "session_id": 52, "database_id": 7, "sql_handle": "0x01",
         "statement_start_offset": 0, "statement_end_offset": 42,
         "plan_handle": "0x02", "query_hash": "0x03", "query_plan_hash": "0x04",
-        "plan_generation_num": 8, "plan_generation_match_count": 1,
-        "sql_text": "SELECT 1", "sql_text_truncated": 0,
+        "request_id": 3, "sql_text": "batch: SELECT 1", "sql_text_truncated": 0,
+        "statement_sql_text": "SELECT 1", "statement_sql_text_truncated": 0,
     }]
     with adapter:
         result = ActiveRequestsCollector(adapter).collect(adapter.instance)
@@ -606,7 +692,22 @@ def test_active_requests_registry_and_collector_preserve_native_identity(
     assert row["sql_handle"] == "0x01"
     assert row["statement_start_offset"] == 0 and row["statement_end_offset"] == 42
     assert row["plan_handle"] == "0x02" and row["query_plan_hash"] == "0x04"
-    assert row["plan_generation_num"] == 8 and row["plan_generation_match_count"] == 1
+    assert row["query_hash"] == "0x03" and row["session_id"] == 52
+    assert "plan_generation_num" not in row and "plan_generation_match_count" not in row
+    assert row["request_id"] == 3 and row["statement_sql_text"] == "SELECT 1"
+    assert row["sql_text"] == "batch: SELECT 1"
+
+    sessions = adapter.registry.get("active_sessions", DatabaseType.SQLSERVER)
+    normalized_sessions_sql = " ".join(sessions.text.split())
+    assert "s.original_login_name" in normalized_sessions_sql
+    assert "s.nt_user_name" in normalized_sessions_sql
+    assert "s.host_process_id" in normalized_sessions_sql
+    assert normalized_sessions_sql.count("s.client_interface_name") == 2
+    assert "c.client_interface_name" not in normalized_sessions_sql
+    assert normalized_sessions_sql.count("sys.dm_exec_connections") == 1
+    legacy = adapter.registry.get("active_sessions_legacy", DatabaseType.SQLSERVER)
+    assert legacy.text.count("s.client_interface_name") == 2
+    assert "c.client_interface_name" not in legacy.text
 
 
 @pytest.mark.parametrize("size,truncated", [(0, False), (1, False), (2, True), (100, True)])
@@ -633,6 +734,20 @@ def test_query_timeout_configuration(instance: DatabaseInstance, driver: FakeDri
         adapter.execute_readonly(adapter.registry.get("server_info"))
         assert driver.connection.timeouts[-1] == 5
         assert driver.calls[0]["timeout"] == 3
+
+
+@pytest.mark.parametrize("global_timeout,active,server_info", [(30, 10, 5), (6, 6, 5), (3, 3, 3)])
+def test_global_diagnostic_sql_timeout_caps_per_script_limits(
+    instance: DatabaseInstance, driver: FakeDriver, global_timeout: int, active: int, server_info: int,
+) -> None:
+    with SQLServerAdapter(
+        instance, MemoryCredentialProvider(), SqlScriptRegistry(ROOT / "sql"),
+        SQLServerSettings(diagnostic_sql_timeout_seconds=global_timeout), driver=driver,
+    ) as adapter:
+        adapter.execute_readonly(adapter.registry.get("active_requests"))
+        assert driver.connection.timeouts[-1] == active
+        adapter.execute_readonly(adapter.registry.get("server_info"))
+        assert driver.connection.timeouts[-1] == server_info
 
 
 @pytest.mark.parametrize("source", ["string", "forged", "other_registry", "unreviewed"])
@@ -1036,3 +1151,77 @@ def test_interrupted_preflight_closes(adapter: SQLServerAdapter, driver: FakeDri
     with pytest.raises(KeyboardInterrupt):
         adapter.connect()
     assert driver.connection.closed and adapter._connection is None
+
+
+def evaluate_active_request_text(batch: str | None, start: int | None,
+                                 end: int | None) -> tuple[Any, ...]:
+    """Exercise the Registry's byte expressions on SQLite blobs without a live DMV."""
+    sql = (ROOT / "sql/sqlserver/active_requests.sql").read_text(encoding="utf-8")
+    projection = sql[sql.index("CONVERT(nvarchar(max), SUBSTRING"):sql.index("FROM sys.dm_exec_requests")]
+    stages = re.findall(r"CROSS APPLY \(\s*SELECT (.*?)\n\) AS (\w+)", sql, re.DOTALL)
+    assert [alias for _, alias in stages] == ["source", "span", "limits"]
+
+    def sqlite_syntax(expression: str) -> str:
+        for original, replacement in (
+                ("CONVERT(varbinary(max), ", "utf16("), ("CONVERT(nvarchar(max), ", "decode_utf16("),
+                ("CONVERT(bigint, ", "as_bigint(")):
+            expression = expression.replace(original, replacement)
+        return re.sub(r"0x([0-9a-fA-F]+)", r"X'\1'", expression)
+
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.create_function("utf16", 1, lambda value: value.encode("utf-16-le") if value is not None else None)
+        connection.create_function("decode_utf16", 1, lambda value: value.decode("utf-16-le") if value is not None else None)
+        connection.create_function("DATALENGTH", 1, lambda value: len(value.encode("utf-16-le")) if value is not None else None)
+        connection.create_function("as_bigint", 1, lambda value: value)
+        ctes = ["t(text) AS (VALUES (?))", "r(statement_start_offset, statement_end_offset) AS (VALUES (?, ?))"]
+        sources = ["t", "r"]
+        for expression, alias in stages:
+            ctes.append(f"{alias} AS (SELECT {sqlite_syntax(expression)} FROM {', '.join(sources)})")
+            sources.append(alias)
+        row = connection.execute(
+            f"WITH {', '.join(ctes)} SELECT {sqlite_syntax(projection)} FROM {', '.join(sources)}",
+            (batch, start, end),
+        ).fetchone()
+    assert isinstance(row, tuple)
+    return row
+
+
+@pytest.mark.parametrize("statement", [
+    "SELECT 1 OPTION (HASH JOIN, MAXDOP 1)",
+    "SELECT 1 AS x",
+    "SELECT 17",
+    "SELECT N'中文🚀'",
+    "WAITFOR DELAY '00:00:01'",
+])
+def test_active_request_inclusive_end_offset_preserves_final_character(statement: str) -> None:
+    prefix = "SELECT N'前😀';\n"
+    batch = prefix + statement + ";\nSELECT 3;"
+    start = len(prefix.encode("utf-16-le"))
+    end = start + len(statement.encode("utf-16-le")) - 2
+    assert evaluate_active_request_text(batch, start, end) == (batch, 0, statement, None, 0)
+
+
+def test_active_request_utf16_pair_end_and_batch_end_sentinel() -> None:
+    assert evaluate_active_request_text("a🚀b", 2, 2)[2:] == ("🚀", None, 0)
+    assert evaluate_active_request_text("a🚀b", 2, 4)[2:] == ("🚀", None, 0)
+    assert evaluate_active_request_text("SELECT 1;SELECT N'😀'  ", 18, -1)[2:] == ("SELECT N'😀'  ", None, 0)
+    assert evaluate_active_request_text("SELECT 1", 0, 16)[2:] == ("SELECT 1", None, 0)
+
+
+@pytest.mark.parametrize(("start", "end"), [(None, -1), (1, -1), (4, 2), (4, 100), (4, -2), (4, 5)])
+def test_active_request_rejects_invalid_or_split_start_offsets(start: int | None, end: int) -> None:
+    row = evaluate_active_request_text("a🚀b", start, end)
+    assert row[2:] == (None, "Current statement offsets are unavailable or invalid", 0)
+
+
+def test_active_request_caps_batch_and_statement_without_splitting_surrogate() -> None:
+    prefix = "x" * 16383
+    batch = prefix + "😀tail"
+    for end in (-1, len(batch.encode("utf-16-le")) - 2):
+        assert evaluate_active_request_text(batch, 0, end) == (prefix, 1, prefix, None, 1)
+    start = len((prefix + "😀").encode("utf-16-le"))
+    assert evaluate_active_request_text(batch, start, -1) == (prefix, 1, "tail", None, 0)
+    assert evaluate_active_request_text("x", 2, -1)[2:] == (
+        None, "Current statement contains no text at the sampled offsets", 0)
+    assert evaluate_active_request_text(None, 0, 40000) == (
+        None, 0, None, "SQL text unavailable from sys.dm_exec_sql_text", 0)

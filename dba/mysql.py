@@ -3,32 +3,150 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import socket
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import TracebackType
-from typing import Any, Protocol, cast
+from typing import Any, NoReturn, Protocol, cast
 
 from dba.adapters import Adapter
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import CredentialProvider, Mode, validate_monitoring_credential
-from dba.database_errors import normalize_mysql_error
-from dba.errors import ToolkitError
+from dba.database_errors import DatabaseErrorDetail, normalize_mysql_error, with_timeout_evidence
+from dba.errors import (
+    ToolkitError,
+    client_sql_deadline_error,
+    database_error_log_fields,
+    set_database_error_connection_status,
+)
 from dba.inventory import ValidationError
 from dba.logging import SENSITIVE, configure_logging, redact
 from dba.mysql_privileges import classify_mysql_grants
-from dba.registry import SqlScript, SqlScriptRegistry, fetch_bounded_rows
+from dba.registry import MAX_SQL_TIMEOUT_SECONDS, SqlScript, SqlScriptRegistry, fetch_bounded_rows
 from dba.settings import MySQLSettings
+from dba.sql_timeout import SqlDeadline, SqlDeadlineExpired
 from dba.top_sql import TOP_LIMIT
 
 MYSQL_TOP_SQL_METRICS = frozenset({
     "sum_timer_wait", "avg_timer_wait", "count_star", "sum_rows_examined",
     "sum_rows_sent", "sum_created_tmp_disk_tables", "sum_no_index_used",
 })
+
+_SET_EXECUTION_LIMIT = "SET SESSION max_execution_time = %s"
+_SHOW_SCRIPTS = frozenset({
+    "disk_binlogs", "monitor_grants", "replication_status", "replication_status_legacy",
+})
+
+
+def _supports_execution_limit(version: str, comment: str) -> bool:
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:[-+]|$)", version)
+    product = comment.casefold()
+    return (match is not None and "mysql" in product
+            and not any(fork in (version + " " + comment).casefold()
+                        for fork in ("mariadb", "percona", "tidb", "aurora"))
+            and (int(match[1]), int(match[2])) in {(5, 7), (8, 0), (8, 4)}
+            and tuple(map(int, match.groups())) >= (5, 7, 8))
+
+
+class _DeadlineSocket:
+    """Proxy PyMySQL's socket so every packet read/write uses current remaining time."""
+
+    def __init__(self, sock: Any) -> None:
+        self._sock = sock
+        self._deadline: SqlDeadline | None = None
+        self._phase = "Execute"
+
+    def set_deadline(self, deadline: SqlDeadline | None, phase: str = "Execute") -> None:
+        self._deadline = deadline
+        self._phase = phase
+
+    def settimeout(self, timeout: float | None) -> None:
+        self._sock.settimeout(timeout)
+
+    def _arm(self) -> None:
+        if self._deadline is not None:
+            self._sock.settimeout(self._deadline.require_remaining(self._phase))
+
+    def _expired_socket_error(self, exc: OSError) -> NoReturn:
+        if self._deadline is not None:
+            raise SqlDeadlineExpired(self._phase) from None
+        raise exc
+
+    def sendall(self, data: bytes) -> None:
+        self._arm()
+        try:
+            self._sock.sendall(data)
+        except (TimeoutError, socket.timeout) as exc:
+            self._expired_socket_error(exc)
+
+    def recv(self, size: int, flags: int = 0) -> bytes:
+        self._arm()
+        try:
+            return cast(bytes, self._sock.recv(size, flags))
+        except (TimeoutError, socket.timeout) as exc:
+            self._expired_socket_error(exc)
+
+    def recv_into(self, buffer: Any, nbytes: int = 0, flags: int = 0) -> int:
+        self._arm()
+        try:
+            if nbytes:
+                return cast(int, self._sock.recv_into(buffer, nbytes, flags))
+            return cast(int, self._sock.recv_into(buffer, flags=flags))
+        except (TimeoutError, socket.timeout) as exc:
+            self._expired_socket_error(exc)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sock, name)
+
+
+class _DeadlineReader:
+    """Keep PyMySQL's existing buffered bytes while rearming each raw read."""
+
+    def __init__(self, reader: Any, sock: _DeadlineSocket) -> None:
+        self._reader = reader
+        self._sock = sock
+
+    def read(self, size: int = -1) -> bytes:
+        deadline = self._sock._deadline
+        if deadline is None:
+            return cast(bytes, self._reader.read(size))
+        if size < 0:
+            raise RuntimeError("Unbounded MySQL socket reads are prohibited during SQL execution.")
+        chunks = bytearray()
+        while len(chunks) < size:
+            self._sock._arm()
+            try:
+                part = self._reader.read1(size - len(chunks))
+            except (TimeoutError, socket.timeout) as exc:
+                self._sock._expired_socket_error(exc)
+            if not part:
+                break
+            chunks.extend(part)
+        deadline.require_remaining(self._sock._phase)
+        return bytes(chunks)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._reader, name)
+
+
+def _install_mysql_deadline_socket(connection: Any) -> _DeadlineSocket | None:
+    """Wrap PyMySQL's socket and buffered reader without discarding buffered data."""
+    sock = getattr(connection, "_sock", None)
+    reader = getattr(connection, "_rfile", None)
+    if sock is None or reader is None or not callable(getattr(reader, "read1", None)):
+        return None
+    if isinstance(sock, _DeadlineSocket):
+        return sock
+    proxy = _DeadlineSocket(sock)
+    connection._sock = proxy
+    connection._rfile = _DeadlineReader(reader, proxy)
+    return proxy
 
 
 class Cursor(Protocol):
@@ -56,17 +174,47 @@ def load_driver() -> Driver:
     return cast(Driver, load_database_driver(DatabaseType.MYSQL, "pymysql"))
 
 
-def _driver_error(exc: Exception, phase: str, secret: str = "") -> ToolkitError:
+def _driver_error(
+    exc: Exception,
+    phase: str,
+    secret: str = "",
+    *,
+    execution_phase: str | None = None,
+    timeout_seconds: int | None = None,
+    effective_timeout_seconds: int | None = None,
+    script_timeout_seconds: int | None = None,
+    elapsed_ms: int | None = None,
+    script_path: str | None = None,
+) -> ToolkitError:
     detail = normalize_mysql_error(exc, (secret,))
-    code = exc.args[0] if exc.args and type(exc.args[0]) is int else None
-    if isinstance(exc, (TimeoutError, socket.timeout)) or code in {1205, 3024}:
+    if script_path is not None and execution_phase is not None:
+        detail = with_timeout_evidence(
+            detail,
+            execution_phase=execution_phase,
+            timeout_seconds=timeout_seconds,
+            effective_timeout_seconds=effective_timeout_seconds,
+            script_timeout_seconds=script_timeout_seconds,
+            elapsed_ms=elapsed_ms,
+            script_path=script_path,
+        )
+    code = detail.vendor_code
+    if detail.error_category == "TIMEOUT":
         return ToolkitError(f"{phase}Timeout", f"{phase} timed out; check configured limits.", database_error=detail)
-    if code in {1044, 1045, 1142, 1227}:
+    if detail.error_category == "PERMISSION_DENIED":
         return ToolkitError(
             f"{phase}Denied",
             f"{detail.message} Review docs/DATABASE_PERMISSIONS.md for this MySQL version and denied operation.",
             database_error=detail,
         )
+    if detail.error_category == "CONNECTION_LOST":
+        error_type = "ConnectionLost" if phase == "Connection" else "QueryConnectionLost"
+        return ToolkitError(error_type, "Connection was lost during database operation.", database_error=detail)
+    if detail.error_category == "CANCELLED_CONFIRMED":
+        return ToolkitError("QueryCancelled", "The database confirmed that the query was cancelled.",
+                            database_error=detail)
+    if detail.error_category == "CANCEL_STATUS_UNKNOWN":
+        return ToolkitError("QueryCancelStatusUnknown", "Query cancellation status is unknown; connection will be discarded.",
+                            database_error=detail)
     if code in {1054, 1146}:
         return ToolkitError("CapabilityUnavailable", "Required MySQL monitoring view or column is unavailable.", database_error=detail)
     error_type = "ConnectionFailed" if phase == "Connection" else f"{phase}Failed"
@@ -107,14 +255,16 @@ class MySQLAdapter(Adapter):
         self._password = ""
         self._ready = False
         self._version = ""
+        self._server_execution_limit = False
+        self._session_identity: tuple[Connection, int] | None = None
         self._statement_script = "active_requests"
-        self._read_timeout = self.settings.query_timeout
+        self._read_timeout = self.settings.effective_sql_timeout(MAX_SQL_TIMEOUT_SECONDS)
+        self._deadline_socket: _DeadlineSocket | None = None
         self._streaming_cursor: Any | None = None
         self.preflight_checks: dict[str, bool] = {}
         self.statement_history_consumer: bool | None = None
         self.privilege_classification: dict[str, Any] = {"classification": "UNKNOWN"}
         self.current_user: str | None = None
-        self._last_database_error: object | None = None
 
     @property
     def statement_script(self) -> str:
@@ -127,6 +277,7 @@ class MySQLAdapter(Adapter):
             "sql_script": script, "result": "failed" if error else "ok",
             "elapsed_time": time.monotonic() - started,
             "error_type": error.error_type if error else None,
+            **database_error_log_fields(error.database_error_payload() if error else None),
         }})
 
     def connect(self) -> None:
@@ -139,8 +290,9 @@ class MySQLAdapter(Adapter):
             scripts = [self.registry.get(name, DatabaseType.MYSQL) for name in self.REQUIRED]
             for script in scripts:
                 self.registry.authorize(script, DatabaseType.MYSQL)
-            self._read_timeout = min(self.settings.query_timeout,
-                                     *(script.metadata.timeout_seconds for script in scripts))
+            # read_timeout is a connection-wide socket bound, not a server-side cancel.
+            self._read_timeout = min(self.settings.effective_sql_timeout(script.metadata.timeout_seconds)
+                                     for script in scripts)
             phase = "Connection"
             driver = self._driver or load_driver()
             try:
@@ -163,6 +315,12 @@ class MySQLAdapter(Adapter):
                     self.settings.ssl_verify_identity if self.settings.ssl_enabled else False
                 ),
             )
+            self._deadline_socket = _install_mysql_deadline_socket(self._connection)
+            if self._driver is None and self._deadline_socket is None:
+                raise ToolkitError(
+                    "DeadlineUnavailable",
+                    "The MySQL driver does not expose a bounded packet-read path.",
+                )
             if not self._connection.get_autocommit():
                 raise ToolkitError("AutocommitRequired", "Driver did not enable autocommit.")
             self.preflight_checks["connect"] = True
@@ -200,10 +358,16 @@ class MySQLAdapter(Adapter):
         if not isinstance(version, str):
             raise ToolkitError("UnsupportedVersion", "MySQL 5.7 or newer requires a reviewed version profile.")
         match = re.match(r"^(\d+)\.(\d+)\.", version)
+        comment = row.get("version_comment")
+        product_text = f"{version} {comment if isinstance(comment, str) else ''}".casefold()
         if (match is None or (int(match[1]), int(match[2])) < (5, 7)
-                or "mariadb" in version.casefold()):
+                or "mariadb" in product_text):
             raise ToolkitError("UnsupportedVersion", "MySQL 5.7 or newer requires a reviewed version profile.")
         self._version = version
+        connection_id = row.get("connection_id")
+        if self._connection is None or type(connection_id) is not int or connection_id <= 0:
+            raise ToolkitError("PreflightFailed", "MySQL connection identity unavailable.")
+        self._session_identity = (self._connection, connection_id)
         active_roles = "NONE"
         if tuple(int(part) for part in match.groups()) >= (8, 0):
             role_result = self._run(self.registry.get("preflight_roles", DatabaseType.MYSQL))
@@ -221,8 +385,6 @@ class MySQLAdapter(Adapter):
             active_roles = role_value
         if row.get("performance_schema_enabled") != 1:
             raise ToolkitError("PreflightDenied", "Missing enabled Performance Schema.")
-        if type(row.get("connection_id")) is not int or row["connection_id"] <= 0:
-            raise ToolkitError("PreflightFailed", "MySQL connection identity unavailable.")
         current_user = row.get("monitor_user")
         if not isinstance(current_user, str) or "@" not in current_user:
             raise ToolkitError("PreflightFailed", "MySQL CURRENT_USER identity is unavailable.")
@@ -231,7 +393,7 @@ class MySQLAdapter(Adapter):
         if not grants_result.success or grants_result.truncated or not grants_result.rows:
             raise ToolkitError("PermissionInspectionFailed",
                                "MySQL account grants could not be inspected safely.",
-                               database_error=self._last_database_error)
+                               database_error=grants_result.database_error)
         grants = [str(next(iter(grant.values()))) for grant in grants_result.rows if grant]
         self.privilege_classification = classify_mysql_grants(grants, current_user, active_roles)
         if self.privilege_classification["classification"] == "PRIVILEGED":
@@ -264,6 +426,9 @@ class MySQLAdapter(Adapter):
             )
         self.preflight_checks["performance_schema"] = True
         self.preflight_checks["privilege_classification"] = True
+        self._server_execution_limit = (
+            isinstance(comment, str) and _supports_execution_limit(version, comment)
+        )
         if row.get("statements_consumer") != 1:
             self._statement_script = "active_requests_basic"
         elif row.get("waits_consumer") != 1:
@@ -284,7 +449,10 @@ class MySQLAdapter(Adapter):
         self._ready = False
         self._password = ""
         self._version = ""
+        self._server_execution_limit = False
+        self._session_identity = None
         self._streaming_cursor = None
+        self._deadline_socket = None
         ok = True
         if connection is not None:
             try:
@@ -353,12 +521,15 @@ class MySQLAdapter(Adapter):
         started = time.monotonic()
         cursor: Cursor | None = None
         rows: tuple[dict[str, Any], ...] = ()
-        database_error_payload: dict[str, Any] | None = None
         truncated = False
         result_bytes = 0
         error: ToolkitError | None = None
         authorized = False
         script_name = "unregistered"
+        execution_phase = "Execute"
+        deadline: SqlDeadline | None = None
+        statement_started = False
+        server_limit_ms: int | None = None
         try:
             self.registry.authorize(script, DatabaseType.MYSQL)
             authorized = True
@@ -381,20 +552,48 @@ class MySQLAdapter(Adapter):
                 raise ToolkitError("RegistryRejected", "This reviewed query requires validated bound parameters.")
             if self._connection is None:
                 raise ToolkitError("NotConnected", "Connection is closed.")
+            effective_timeout = min(
+                self.settings.effective_sql_timeout(script.metadata.timeout_seconds),
+                self._read_timeout,
+            )
+            deadline = SqlDeadline.start(effective_timeout)
+            if self._deadline_socket is not None:
+                self._deadline_socket.set_deadline(deadline, "Execute")
+            if self._server_execution_limit and script_name not in _SHOW_SCRIPTS:
+                setup = self._connection.cursor()
+                try:
+                    # SET itself spends part of the client deadline. The client
+                    # still enforces the original deadline after SET returns.
+                    server_limit_ms = math.floor(deadline.require_remaining("Execute") * 1000)
+                    if server_limit_ms < 1:
+                        raise SqlDeadlineExpired("Execute")
+                    setup.execute(_SET_EXECUTION_LIMIT, (server_limit_ms,))
+                finally:
+                    setup.close()
             streaming = script.metadata.name in self.STREAMING_SCRIPTS
             if streaming and self._streaming_cursor is not None:
                 cursor = self._connection.cursor(self._streaming_cursor)
             else:
                 cursor = self._connection.cursor()
+            deadline.require_remaining("Execute")
+            statement_started = True
             if parameters is None:
                 cursor.execute(script.text)
             else:
                 cursor.execute(script.text, parameters)
+            deadline.require_remaining("Execute")
             if cursor.description is None:
                 raise ToolkitError("InvalidResult", "Read-only script returned no rowset.")
             columns = [str(column[0]) for column in cursor.description]
+            execution_phase = "Fetch"
+
+            def before_fetch(_remaining: float) -> None:
+                if self._deadline_socket is not None:
+                    self._deadline_socket.set_deadline(deadline, "Fetch")
+
             bounded = fetch_bounded_rows(
-                cursor, script.metadata.max_rows, script.metadata.max_result_bytes
+                cursor, script.metadata.max_rows, script.metadata.max_result_bytes,
+                deadline=deadline, before_fetch=before_fetch,
             )
             # The recent-statement Registry SQL uses an explicit LIMIT 5.
             # Exactly five rows means the sample limit was reached, but does
@@ -405,28 +604,51 @@ class MySQLAdapter(Adapter):
             rows = tuple(self._safe_value(dict(zip(columns, row, strict=True))) for row in bounded.rows)
         except ToolkitError as exc:
             error = exc
+        except SqlDeadlineExpired:
+            assert deadline is not None
+            error = client_sql_deadline_error(
+                "mysql", "PyMySQL", execution_phase=execution_phase,
+                timeout_seconds=deadline.timeout_seconds,
+                script_timeout_seconds=script.metadata.timeout_seconds,
+                elapsed_ms=int(deadline.elapsed() * 1000),
+                script_path=f"{script.metadata.database_type.value}/{script_name}.sql",
+            )
         except (ValidationError, OSError, UnicodeError) as exc:
             error = (ToolkitError("RegistryRejected", "SQL is not an unchanged reviewed script from this registry.")
-                     if not authorized else _driver_error(exc, "Query"))
+                     if not authorized else _driver_error(
+                         exc, "Query", self._password, execution_phase=execution_phase,
+                         timeout_seconds=deadline.timeout_seconds if deadline else self._read_timeout,
+                         effective_timeout_seconds=(deadline.timeout_seconds if deadline else
+                                                     self.settings.effective_sql_timeout(
+                                                         script.metadata.timeout_seconds)),
+                         script_timeout_seconds=script.metadata.timeout_seconds,
+                         elapsed_ms=int((time.monotonic() - started) * 1000),
+                         script_path=f"{script.metadata.database_type.value}/{script_name}.sql"))
         except Exception as exc:
-            self._last_database_error = normalize_mysql_error(exc, (self._password,))
-            error = _driver_error(exc, "Query", self._password)
-            database_error = error.database_error
-            if database_error is not None:
-                to_dict = getattr(database_error, "to_dict", None)
-                if callable(to_dict):
-                    payload = to_dict()
-                    if isinstance(payload, dict):
-                        database_error_payload = payload
+            error = _driver_error(
+                exc, "Query", self._password, execution_phase=execution_phase,
+                timeout_seconds=deadline.timeout_seconds if deadline else self._read_timeout,
+                effective_timeout_seconds=(deadline.timeout_seconds if deadline else
+                                           self.settings.effective_sql_timeout(
+                                               script.metadata.timeout_seconds)),
+                script_timeout_seconds=script.metadata.timeout_seconds,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                script_path=f"{script.metadata.database_type.value}/{script_name}.sql")
         except BaseException:
             error = ToolkitError("Interrupted", "Query was interrupted; connection will be closed.")
             raise
         finally:
+            identity = self._session_identity
+            identity_recorded = identity is not None and identity[0] is self._connection
             streaming_cursor = (cursor is not None
                                 and script.metadata.name in self.STREAMING_SCRIPTS)
             connection_closed_before_cursor = False
+            connection_close_ok: bool | None = None
+            connection_close_attempted = False
             if streaming_cursor and (error is not None or truncated):
-                connection_closed_before_cursor = self._close()
+                connection_close_attempted = True
+                connection_close_ok = self._close()
+                connection_closed_before_cursor = connection_close_ok
                 if not connection_closed_before_cursor:
                     error = error or ToolkitError(
                         "CleanupFailed", "Streaming result connection cleanup failed."
@@ -438,27 +660,47 @@ class MySQLAdapter(Adapter):
                     if not connection_closed_before_cursor:
                         error = error or ToolkitError("CleanupFailed", "Query cursor cleanup failed.")
             if error is not None:
+                detail = error.database_error
+                if (statement_started and script_name in _SHOW_SCRIPTS
+                        and isinstance(detail, DatabaseErrorDetail) and detail.timeout is not None
+                        and detail.timeout.cancellation_status == "CANCEL_STATUS_UNKNOWN"):
+                    # MySQL KILL matches a numeric ID only. A separate lookup
+                    # cannot make identity verification atomic with that match.
+                    error.database_error = replace(
+                        detail, timeout=replace(detail.timeout, cancellation_reason=(
+                            "show_target_identity_not_atomic"
+                            if identity_recorded
+                            else "show_target_identity_unavailable"
+                        )),
+                    )
                 rows = ()
                 truncated = False
                 result_bytes = 0
-                if not connection_closed_before_cursor:
-                    self._close()
-            elif truncated and streaming_cursor and not connection_closed_before_cursor:
+                if not connection_close_attempted:
+                    connection_close_attempted = True
+                    connection_close_ok = self._close()
+                set_database_error_connection_status(
+                    error, "DISCARDED" if connection_close_ok is True else "UNKNOWN")
+            elif truncated and streaming_cursor and not connection_close_attempted:
                 self._close()
             details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
                                        "result_bytes": result_bytes}
             if authorized:
                 details.update({"sql_sha256": hashlib.sha256(script.text.encode()).hexdigest(),
-                                "timeout_seconds": min(script.metadata.timeout_seconds,
-                                                       self._read_timeout),
+                                "timeout_seconds": deadline.timeout_seconds if deadline else self._read_timeout,
+                                "effective_timeout_seconds": self.settings.effective_sql_timeout(
+                                    script.metadata.timeout_seconds) if deadline is None else
+                                    deadline.timeout_seconds,
                                 "max_rows": script.metadata.max_rows})
                 details["max_result_bytes"] = script.metadata.max_result_bytes
+                if server_limit_ms is not None:
+                    details["server_execution_limit_ms"] = server_limit_ms
             self._audit(script_name, started, error, details)
         return CollectorResult(self.instance.id, script_name, started_at,
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,
                                rows, len(rows), truncated, error is None,
                                error.error_type if error else None, str(error) if error else None,
-                               database_error_payload)
+                               error.database_error_payload() if error else None)
 
     def get_server_version(self) -> str:
         if not self._ready:

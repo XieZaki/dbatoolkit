@@ -3,18 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 import weakref
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import yaml
 
 from dba.core import DatabaseType
 from dba.inventory import UniqueKeyLoader, ValidationError
 from dba.security import check_sql
+
+if TYPE_CHECKING:
+    from dba.sql_timeout import SqlDeadline
 
 MAX_SQL_SOURCE_BYTES = 1024 * 1024
 MAX_METADATA_SOURCE_BYTES = 64 * 1024
@@ -80,6 +83,8 @@ def _value_payload_bytes(value: Any) -> int:
 
 def fetch_bounded_rows(
     cursor: FetchCursor, max_rows: int, max_result_bytes: int = DEFAULT_MAX_RESULT_BYTES,
+    *, deadline: SqlDeadline | None = None,
+    before_fetch: Callable[[float], None] | None = None,
 ) -> BoundedFetch:
     """Read at most one row per fetch and stop at the row or payload-byte budget.
 
@@ -95,7 +100,14 @@ def fetch_bounded_rows(
     result_bytes = 0
     byte_limit_reached = False
     while len(rows) < max_rows:
+        if deadline is not None:
+            remaining = deadline.require_remaining("Fetch")
+            if before_fetch is not None:
+                before_fetch(remaining)
+                deadline.require_remaining("Fetch")
         batch = cursor.fetchmany(1)
+        if deadline is not None:
+            deadline.require_remaining("Fetch")
         if not batch:
             break
         row = batch[0]

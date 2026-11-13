@@ -1,4 +1,5 @@
 import json
+import socket
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -14,7 +15,7 @@ from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import Credential, CredentialProvider
 from dba.errors import ToolkitError
-from dba.mysql import MySQLAdapter
+from dba.mysql import MySQLAdapter, _DeadlineReader, _DeadlineSocket
 from dba.mysql_collectors import (
     ActiveRequestsCollector,
     ActiveSessionsCollector,
@@ -25,10 +26,12 @@ from dba.mysql_slow import build_slow_report
 from dba.mysql_slow_reporter import render_console, render_markdown
 from dba.registry import SqlScriptRegistry
 from dba.settings import MySQLSettings
+from dba.sql_timeout import SqlDeadline, SqlDeadlineExpired
 
 INSTANCE = DatabaseInstance("my", "MySQL", DatabaseType.MYSQL, "test.invalid", 3306,
                             "monitor", "test", environment="development")
-PREFLIGHT = {"server_version": "8.0.44", "monitor_user": "toolkit_monitor@%",
+PREFLIGHT = {"server_version": "8.0.44", "version_comment": "MySQL Community Server - GPL",
+             "monitor_user": "toolkit_monitor@%",
              "active_roles": "NONE", "performance_schema_enabled": 1,
              "connection_id": 9, "privileged_grants": 0, "non_readonly_grants": 0,
              "statements_consumer": 1, "waits_consumer": 1, "history_consumer": 1}
@@ -45,6 +48,10 @@ class FakeCursor:
         self.closed = False
 
     def execute(self, sql: str, parameters: tuple[int, ...] | None = None) -> None:
+        if sql == "SET SESSION max_execution_time = %s":
+            assert parameters is not None and len(parameters) == 1
+            self.connection.server_limits.append(parameters[0])
+            return
         name = self.connection.scripts[sql]
         self.script_name = name
         self.connection.executed.append(name)
@@ -85,6 +92,7 @@ class FakeConnection:
         self.closed = False
         self.autocommit = True
         self.rollbacks = 0
+        self.server_limits: list[int] = []
         self.lifecycle: list[str] = []
         self.cursor_classes: list[Any] = []
 
@@ -112,8 +120,10 @@ class FakeDriver:
         self.connection = FakeConnection(scripts)
         self.options: dict[str, Any] = {}
         self.failure: Exception | None = None
+        self.connect_count = 0
 
     def connect(self, **kwargs: Any) -> FakeConnection:
+        self.connect_count += 1
         if self.failure:
             raise self.failure
         self.options = kwargs
@@ -137,6 +147,208 @@ def session(pid: int, command: str = "Query") -> dict[str, Any]:
             "host_raw": "127.0.0.1:4444", "host_ip": "127.0.0.1",
             "database_name": "test", "command_name": command,
             "state_name": None, "sql_text": None if command == "Sleep" else "SELECT 1"}
+
+
+@pytest.mark.parametrize("settings,read_timeout", [
+    (MySQLSettings(ssl_enabled=False), 5),
+    (MySQLSettings(ssl_enabled=False, diagnostic_sql_timeout_seconds=3), 3),
+    (MySQLSettings(ssl_enabled=False, diagnostic_sql_timeout_seconds=20, query_timeout=4), 4),
+])
+def test_read_timeout_uses_global_effective_timeout_and_audits_enforced_value(
+    monkeypatch: pytest.MonkeyPatch, settings: MySQLSettings, read_timeout: int,
+) -> None:
+    target, driver = adapter(settings=settings)
+    audits: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(target, "_audit", lambda script, started, error, details=None:
+                        audits.append((script, details or {})))
+    with target:
+        assert driver.options["read_timeout"] == read_timeout
+    preflight = next(details for script, details in audits if script == "preflight")
+    assert preflight["timeout_seconds"] == read_timeout
+    assert preflight["effective_timeout_seconds"] == settings.effective_sql_timeout(5)
+
+
+@pytest.mark.parametrize("version,comment,expected", [
+    ("5.7.7", "MySQL Community Server", False),
+    ("5.7.8", "MySQL Community Server", True),
+    ("8.0.44", "MySQL Community Server", True),
+    ("8.4.0", "MySQL Enterprise Server", True),
+    ("8.4.0", "Unidentified product", False),
+])
+def test_mysql_session_execution_limit_version_gate(
+    version: str, comment: str, expected: bool,
+) -> None:
+    target, driver = adapter()
+    driver.connection.results["preflight"] = [
+        {**PREFLIGHT, "server_version": version, "version_comment": comment},
+    ]
+    with target:
+        assert target._session_identity == (driver.connection, 9)
+        driver.connection.server_limits.clear()
+        assert target.health_check()
+        assert bool(driver.connection.server_limits) is expected
+        assert all(0 < ms <= 5000 for ms in driver.connection.server_limits)
+    assert target._session_identity is None
+
+
+def test_mysql_mariadb_product_comment_prevents_session_setting() -> None:
+    target, driver = adapter()
+    driver.connection.results["preflight"] = [{**PREFLIGHT, "version_comment": "MariaDB Server"}]
+    with pytest.raises(ToolkitError) as exc:
+        target.connect()
+    assert exc.value.error_type == "UnsupportedVersion"
+    assert driver.connection.server_limits == []
+
+
+@pytest.mark.parametrize("code,expected", [
+    (3024, "CANCELLED_CONFIRMED"), (1317, "CANCELLED_CONFIRMED"),
+    (2006, "CANCEL_STATUS_UNKNOWN"), (2013, "CANCEL_STATUS_UNKNOWN"),
+])
+def test_mysql_native_timeout_and_interruption_evidence(code: int, expected: str) -> None:
+    target, driver = adapter()
+    with target:
+        driver.connection.failures["active_requests"] = Exception(code, "driver error")
+        result = target.execute_readonly(target.registry.get("active_requests", DatabaseType.MYSQL))
+    assert result.database_error is not None
+    assert result.database_error["vendor_code"] == code
+    assert result.database_error["timeout"]["cancellation_status"] == expected
+    if code == 1317:
+        assert result.database_error["timeout"]["cancellation_reason"] == "server_query_interrupted_source_unknown"
+
+
+def test_mysql_show_timeout_skips_control_connection_and_allows_fresh_diagnostic() -> None:
+    target, driver = adapter()
+    target.connect()
+    old = driver.connection
+    old.server_limits.clear()
+    old.failures["disk_binlogs"] = TimeoutError("read timed out")
+    failure = target.execute_readonly(target.registry.get("disk_binlogs", DatabaseType.MYSQL))
+    assert failure.database_error is not None
+    assert failure.database_error["timeout"]["cancellation_status"] == "CANCEL_STATUS_UNKNOWN"
+    assert old.closed and old.server_limits == []
+    assert driver.connect_count == 1
+    driver.connection = FakeConnection(old.scripts)
+    with target:
+        assert target.health_check()
+        assert driver.connect_count == 2
+
+
+@pytest.mark.parametrize("spent,expected_ms", [(1.25, 1750), (2.9995, None)])
+def test_mysql_server_limit_uses_remaining_whole_milliseconds(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any, spent: float, expected_ms: int | None,
+) -> None:
+    target, driver = adapter(settings=MySQLSettings(diagnostic_sql_timeout_seconds=3))
+    with target:
+        driver.connection.server_limits.clear()
+        cursor = FakeConnection.cursor
+
+        def slow_cursor(connection: FakeConnection, cursor_class: Any = None) -> FakeCursor:
+            sql_deadline_clock.advance(spent)
+            return cursor(connection, cursor_class)
+
+        monkeypatch.setattr(FakeConnection, "cursor", slow_cursor)
+        outcome = target.execute_readonly(target.registry.get("active_requests", DatabaseType.MYSQL))
+    # A second cursor allocation may also consume time before the SELECT starts.
+    assert driver.connection.server_limits == ([] if expected_ms is None else [expected_ms])
+    if expected_ms is None:
+        assert outcome.error_type == "ExecuteTimeout"
+        assert "active_requests" not in driver.connection.executed
+
+
+def test_mysql_setup_cannot_start_select_after_deadline(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any,
+) -> None:
+    target, driver = adapter(settings=MySQLSettings(diagnostic_sql_timeout_seconds=3))
+    with target:
+        execute = FakeCursor.execute
+
+        def slow_setup(cursor: FakeCursor, sql: str, parameters: tuple[int, ...] | None = None) -> None:
+            execute(cursor, sql, parameters)
+            if sql == "SET SESSION max_execution_time = %s":
+                sql_deadline_clock.advance(3)
+
+        monkeypatch.setattr(FakeCursor, "execute", slow_setup)
+        failure = target.execute_readonly(target.registry.get("active_requests", DatabaseType.MYSQL))
+    assert failure.error_type == "ExecuteTimeout"
+    assert driver.connection.server_limits[-1] == 3000
+    assert "active_requests" not in driver.connection.executed
+    assert driver.connection.closed
+
+
+def test_mysql_packet_reads_rearm_to_the_remaining_absolute_deadline() -> None:
+    clock = [100.0]
+
+    class RecordingSocket:
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        def settimeout(self, timeout: float | None) -> None:
+            self.timeouts.append(timeout)
+
+    class PartialReader:
+        def __init__(self) -> None:
+            self.data = b"abcd"
+
+        def read1(self, size: int) -> bytes:
+            clock[0] += 1
+            part, self.data = self.data[:min(size, 2)], self.data[min(size, 2):]
+            return part
+
+    sock = _DeadlineSocket(RecordingSocket())
+    reader = _DeadlineReader(PartialReader(), sock)
+    deadline = SqlDeadline.start(5, clock=lambda: clock[0])
+    sock.set_deadline(deadline, "Fetch")
+
+    assert reader.read(4) == b"abcd"
+    assert sock._sock.timeouts == [5, 4]
+    assert deadline.remaining() == 3
+
+
+def test_mysql_packet_read_stops_on_silent_socket_after_partial_data() -> None:
+    receiver, sender = socket.socketpair()
+    with receiver, sender, receiver.makefile("rb") as buffered:
+        sender.sendall(b"ab")
+        sock = _DeadlineSocket(receiver)
+        deadline = SqlDeadline.start(1)
+        sock.set_deadline(SqlDeadline(1, deadline.started_at - 0.95), "Fetch")
+        with pytest.raises(SqlDeadlineExpired, match="Fetch"):
+            _DeadlineReader(buffered, sock).read(4)
+        assert 0 < receiver.gettimeout() <= 0.051
+
+
+def test_mysql_execute_and_fetch_deadline_is_client_only_and_discards_connection(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any,
+) -> None:
+    target, driver = adapter(settings=MySQLSettings(ssl_enabled=False, diagnostic_sql_timeout_seconds=3))
+    driver.connection.results["active_requests"] = [{"process_id": 1}, {"process_id": 2}]
+    with target:
+        execute = FakeCursor.execute
+        fetchmany = FakeCursor.fetchmany
+
+        def timed_execute(cursor: FakeCursor, sql: str, parameters: tuple[int, ...] | None = None) -> None:
+            execute(cursor, sql, parameters)
+            if cursor.connection.executed[-1] == "active_requests":
+                sql_deadline_clock.advance(1)
+
+        def timed_fetch(cursor: FakeCursor, size: int) -> list[tuple[Any, ...]]:
+            if cursor.connection.executed[-1] == "active_requests":
+                sql_deadline_clock.advance(1.1)
+            return fetchmany(cursor, size)
+
+        monkeypatch.setattr(FakeCursor, "execute", timed_execute)
+        monkeypatch.setattr(FakeCursor, "fetchmany", timed_fetch)
+        result = target.execute_readonly(target.registry.get("active_requests", DatabaseType.MYSQL))
+
+    assert not result.success and result.error_type == "FetchTimeout"
+    assert result.database_error is not None
+    assert result.database_error["error_category"] == "TIMEOUT"
+    assert "database-side stop is unconfirmed" in result.database_error["message"]
+    timeout = result.database_error["timeout"]
+    assert timeout["timeout_seconds"] == 3
+    assert timeout["execution_phase"] == "Fetch"
+    assert timeout["cancellation_status"] == "CANCEL_STATUS_UNKNOWN"
+    assert timeout["connection_status"] == "DISCARDED"
+    assert driver.connection.closed
 
 
 def test_adapter_preflight_credentials_timeout_registry_and_cleanup() -> None:
@@ -391,8 +603,8 @@ def test_failed_show_grants_preserves_sanitized_vendor_error() -> None:
         target.connect()
     assert caught.value.error_type == "PermissionInspectionFailed"
     detail = caught.value.database_error
-    assert detail is not None and detail.vendor_code == 1142
-    assert "SHOW command denied" in detail.message
+    assert isinstance(detail, dict) and detail["vendor_code"] == 1142
+    assert "SHOW command denied" in detail["message"]
     assert PASSWORD not in repr(caught.value)
 
 

@@ -5,10 +5,42 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+
+
+class FakeSqlDeadlineClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def sql_deadline_clock(monkeypatch: pytest.MonkeyPatch) -> FakeSqlDeadlineClock:
+    """Inject a deterministic monotonic clock into Adapter-created SQL deadlines."""
+    from dba.sql_timeout import SqlDeadline
+
+    clock = FakeSqlDeadlineClock()
+    original_start = SqlDeadline.start.__func__
+
+    def start(
+        cls: type[SqlDeadline], timeout_seconds: int,
+        *, clock: Callable[[], float] | None = None,
+    ) -> SqlDeadline:
+        return original_start(
+            cls, timeout_seconds, clock=clock if clock is not None else clock_value,
+        )
+
+    clock_value: Callable[[], float] = clock
+    monkeypatch.setattr(SqlDeadline, "start", classmethod(start))
+    return clock
 
 
 @pytest.fixture(autouse=True)

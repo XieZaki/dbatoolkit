@@ -22,14 +22,17 @@ from dba.slow_profiles import (
     optional_collectors_for_adapter,
     profile_for_adapter,
     required_collectors_for_adapter,
+    slow_reconnect_failure,
 )
 from dba.sqlserver import SQLServerAdapter
 from dba.sqlserver_collectors import (
     ActiveRequestsCollector,
     ActiveSessionsCollector,
     ConnectionsCollector,
+    LockResourcesCollector,
     TransactionsCollector,
 )
+from dba.sqlserver_locks import LOCK_COLLECTOR, build_lock_evidence, held_resource_ids
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,30 @@ class SlowReport(DiagnosticReport):
 
 def number(value: Any) -> int:
     return value if type(value) is int else 0
+
+
+# sys.dm_exec_requests.status values; anything else (NULL, missing, unrecognised) stays UNKNOWN.
+SQLSERVER_REQUEST_STATUSES = {
+    "running": "RUNNING", "runnable": "RUNNABLE", "suspended": "SUSPENDED",
+    "sleeping": "SLEEPING", "background": "BACKGROUND",
+}
+
+
+def sqlserver_request_status(value: Any) -> str:
+    """Normalise only the request status column; wait_type is never used to infer it."""
+    return SQLSERVER_REQUEST_STATUSES.get(value.strip().lower(), "UNKNOWN") if isinstance(value, str) else "UNKNOWN"
+
+
+def sqlserver_request_counts(requests: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Request-status and wait-type tallies; each tally sums to the number of requests."""
+    statuses = dict.fromkeys((*SQLSERVER_REQUEST_STATUSES.values(), "UNKNOWN"), 0)
+    waits = {"LOCK": 0, "WAITFOR": 0, "OTHER": 0, "NONE": 0}
+    for row in requests:
+        statuses[sqlserver_request_status(row.get("status"))] += 1
+        wait = str(row.get("wait_type") or "").strip().upper()
+        waits["LOCK" if wait.startswith("LCK_M_") else "WAITFOR" if wait == "WAITFOR"
+              else "OTHER" if wait else "NONE"] += 1
+    return {"request_status_counts": statuses, "wait_type_counts": waits}
 
 
 def blocking_graph(requests: list[dict[str, Any]]) -> dict[str, Any]:
@@ -121,10 +148,10 @@ def descendants(root: int, children: dict[int, list[int]]) -> set[int]:
     return seen - {root}
 
 
-def _attach_session_identity_to_normalized_requests(
-    requests: list[dict[str, Any]], sessions: list[dict[str, Any]],
-) -> None:
-    """Fill missing SQL Server normalized identity from one exact session row."""
+def _unique_session_rows(
+    sessions: list[dict[str, Any]],
+) -> tuple[dict[int, dict[str, Any]], set[int]]:
+    """Index only unambiguous session IDs from the separately sampled session set."""
     sessions_by_id: dict[int, dict[str, Any]] = {}
     ambiguous_session_ids: set[int] = set()
     for session_row in sessions:
@@ -135,6 +162,16 @@ def _attach_session_identity_to_normalized_requests(
             ambiguous_session_ids.add(session_id)
         else:
             sessions_by_id[session_id] = session_row
+    for session_id in ambiguous_session_ids:
+        sessions_by_id.pop(session_id, None)
+    return sessions_by_id, ambiguous_session_ids
+
+
+def _attach_session_identity_to_normalized_requests(
+    requests: list[dict[str, Any]], sessions: list[dict[str, Any]],
+) -> None:
+    """Fill missing request identity from one exact, unambiguous session row."""
+    sessions_by_id, ambiguous_session_ids = _unique_session_rows(sessions)
 
     identity_sources = (
         ("username", "login_name"),
@@ -190,44 +227,148 @@ def build_slow_report(
             )
         return [dict(row) for row in result.rows]
 
+    # Lock-object evidence is supplementary: it carries its own completeness and must not
+    # change the visibility of the existing blocking, transaction and root evidence.
+    optional_collectors = tuple(name for name in optional_collectors if name != LOCK_COLLECTOR)
     requests, sessions = rows("active_requests"), rows("active_sessions")
     _attach_session_identity_to_normalized_requests(requests, sessions)
     transactions, connections = rows("transactions"), rows("connections")
-    session_map = {number(r.get("session_id")): r for r in sessions}
+    transactions_incomplete, _ = collection_completeness(results, ("transactions",))
+    unfinished_transactions = [r for r in transactions if r.get("transaction_state") in (2, 4, 5)
+                               and r.get("transaction_type") in (1, 2, 4)]
+    # The DMV joins transaction-to-session mappings. Count each transaction once.
+    transaction_ids = {max(0, number(r.get("transaction_id"))) for r in unfinished_transactions}
+    unclassified_sessions = {
+        row.get("session_id") for row in transactions
+        if number(row.get("transaction_type")) not in (1, 2, 3, 4)
+        or (row.get("transaction_type") != 3 and
+            (type(row.get("transaction_state")) is not int or row["transaction_state"] not in range(9)))
+    }
+    count_limitation = None
+    if transactions_incomplete:
+        count_limitation = "事务样本缺失、采集失败或已截断，无法确认未结束事务数量。"
+    elif 0 in transaction_ids or unclassified_sessions:
+        count_limitation = "事务样本中的事务 ID、状态或类型不可用，无法确认未结束事务数量。"
+    if count_limitation:
+        quality.append(count_limitation)
+    transaction_identity_incomplete, _ = collection_completeness(results, ("active_sessions", "transactions"))
+    session_map, ambiguous_session_ids = _unique_session_rows(sessions)
     connection_map: dict[int, list[dict[str, Any]]] = {}
     for connection in connections:
         connection_map.setdefault(number(connection.get("session_id")), []).append(connection)
     for request in requests:
-        session = session_map.get(number(request.get("session_id")), {})
-        for key in (
-            "login_name",
-            "host_name",
-            "program_name",
-            "client_net_address",
-            "open_transaction_count",
-        ):
-            request.setdefault(key, session.get(key))
+        session_id = number(request.get("session_id"))
+        session = session_map.get(session_id, {})
+        if session_id not in ambiguous_session_ids:
+            for key in (
+                "login_name",
+                "original_login_name",
+                "nt_user_name",
+                "host_name",
+                "program_name",
+                "client_net_address",
+                "client_interface_name",
+                "host_process_id",
+                "open_transaction_count",
+            ):
+                if request.get(key) in (None, "") and session.get(key) not in (None, ""):
+                    request[key] = session[key]
         request.setdefault("cpu_time", request.get("cpu_ms"))
         request.setdefault("wait_time_ms", request.get("wait_ms"))
     requests.sort(key=lambda row: number(row.get("elapsed_ms")), reverse=True)
-    waiting = [r for r in requests if r.get("wait_type") or r.get("status") == "suspended"]
+    waiting = [r for r in requests
+               if r.get("wait_type") or sqlserver_request_status(r.get("status")) == "SUSPENDED"]
     blocked = [r for r in requests if number(r.get("blocking_session_id")) > 0]
+    graph = blocking_graph(requests)
+    lock_wait_by_blocker: dict[int, int] = {}
+    for request in blocked:
+        request_sid = number(request.get("session_id"))
+        blocker_sid = number(request.get("blocking_session_id"))
+        wait = request.get("wait_time_ms")
+        if (request_sid in graph["children"].get(blocker_sid, ())
+                and str(request.get("wait_type") or "").upper().startswith("LCK_M_")
+                and type(wait) is int and wait >= 0):
+            lock_wait_by_blocker[blocker_sid] = max(lock_wait_by_blocker.get(blocker_sid, 0), wait)
+    blocking_sessions = set(graph["children"]) | {
+        r.get("session_id") for r in requests if number(r.get("blocking_session_id")) != 0
+    }
+    open_transaction_sessions = {
+        r.get("session_id") for r in sessions if number(r.get("open_transaction_count")) > 0
+    } | {
+        r.get("session_id") for r in transactions
+        if r.get("transaction_type") != 3 and r.get("transaction_state") not in (6, 8)
+    }
+    wait_evidence_incomplete, _ = collection_completeness(
+        results, ("active_requests", "active_sessions", "transactions"))
+    unverified_waitfor = False
+    for request in requests:
+        if (str(request.get("command", "")).strip().upper() != "WAITFOR"
+                or str(request.get("wait_type", "")).strip().upper() != "WAITFOR"):
+            continue
+        sid = request.get("session_id")
+        if (sid in blocking_sessions or sid in open_transaction_sessions
+                or number(request.get("open_transaction_count")) > 0):
+            request["request_interpretation"] = "WAITFOR 同时存在阻塞或未结束事务证据，需复核。"
+            continue
+        request["request_kind"] = "ACTIVE_WAIT"
+        blocker = request.get("blocking_session_id")
+        transaction_count = session_map.get(sid, {}).get("open_transaction_count") if type(sid) is int else None
+        if (wait_evidence_incomplete or type(sid) is not int or sid <= 0
+                or type(blocker) is not int or blocker != 0
+                or type(transaction_count) is not int or transaction_count != 0):
+            unverified_waitfor = True
+            request["request_interpretation"] = "已识别 WAITFOR 主动等待，阻塞或事务证据不足，需复核。"
+        else:
+            request["request_interpretation"] = "WAITFOR 主动等待，本次采样未发现该会话的阻塞或未结束事务。"
+    diagnostic_waits = [r for r in waiting if r.get("request_kind") != "ACTIVE_WAIT"]
+    counts = sqlserver_request_counts(requests)
+    requests_complete = (
+        by_name.get("active_requests") is not None and by_name["active_requests"].success
+        and not by_name["active_requests"].truncated
+    )
+    graph_nodes = set(graph["children"]) | {child for kids in graph["children"].values() for child in kids}
+    in_graph = sum(number(r.get("session_id")) in graph_nodes for r in requests)
+    graph_complete = requests_complete and not graph["anomalies"]
     concurrency = {
         "connected_sessions": len(session_map),
         "active_sessions": len({r.get("session_id") for r in requests}),
         "active_requests": len(requests),
-        "running_requests": sum(r.get("status") == "running" for r in requests),
+        "running_requests": counts["request_status_counts"]["RUNNING"],
         "waiting_requests": len(waiting),
         "blocked_requests": len(blocked),
+        **counts,
+        "requests_in_blocking_graph": in_graph,
+        "blocking_graph_complete": graph_complete,
     }
-    graph = blocking_graph(requests)
+    # Request pile-up fully explained by a complete blocking graph is blocking impact, not a separate finding.
+    concurrency_from_blocking = (
+        bool(blocked) and graph_complete and bool(requests) and in_graph == len(requests)
+        and len(requests) >= settings.high_concurrency_threshold
+    )
+    concurrency["high_concurrency_explained_by_blocking"] = concurrency_from_blocking
+    lock_result = by_name.get(LOCK_COLLECTOR)
+    lock_evidence = build_lock_evidence(
+        lock_result.rows if lock_result is not None and lock_result.success else (),
+        collected=lock_result is not None, success=lock_result is not None and lock_result.success,
+        truncated=lock_result is not None and lock_result.truncated, requests=requests)
+    if lock_evidence["status"] in {"FAILED", "TRUNCATED"}:
+        quality.append(f"{LOCK_COLLECTOR}: {lock_evidence['status'].lower()} "
+                       f"({lock_result.error_type if lock_result else 'not collected'}); "
+                       "lock objects are shown only for the rows actually read")
+    elif lock_evidence["unmatched_lock_waits"]:
+        quality.append("lock_resources: some lock waits had no matching pending lock row; "
+                       "samples are sequential, lock-object association is incomplete")
     findings: list[Finding] = []
     if blocked:
+        blocking_evidence: dict[str, Any] = {"blocked_requests": len(blocked), "edges": graph["children"]}
+        if concurrency_from_blocking:
+            blocking_evidence.update(active_requests=len(requests), requests_in_blocking_graph=in_graph,
+                                     high_concurrency_threshold=settings.high_concurrency_threshold)
         findings.append(
             Finding(
                 "BLOCKING",
                 Severity.CRITICAL,
-                {"blocked_requests": len(blocked), "edges": graph["children"]},
+                blocking_evidence,
                 "核对阻塞链和业务事务；联系应用负责人确认提交或回滚方案。",
             )
         )
@@ -245,22 +386,29 @@ def build_slow_report(
         session = session_map.get(sid, {})
         active = [r for r in requests if r.get("session_id") == sid]
         associated = [r for r in transactions if r.get("session_id") == sid]
-        unfinished = [
-            r
-            for r in associated
-            if r.get("transaction_state") in (2, 4, 5) and r.get("transaction_type") in (1, 2, 4)
-        ]
+        unfinished = [r for r in unfinished_transactions if r.get("session_id") == sid]
         identity_quality = "CONFIRMED"
         session_login_time = session.get("login_time")
         transaction_login_times = {str(row.get("login_time")) for row in unfinished
                                    if row.get("login_time") is not None}
         if len(unfinished) > 1:
             identity_quality = "AMBIGUOUS"
-        elif unfinished and (session_login_time is None or len(transaction_login_times) != 1
-                             or str(session_login_time) not in transaction_login_times):
+        elif unfinished and (transaction_identity_incomplete or sid in unclassified_sessions
+                             or session_login_time in (None, "")
+                             or str(session_login_time) not in transaction_login_times
+                             or number(unfinished[0].get("transaction_id")) <= 0):
             identity_quality = "RECHECK_REQUIRED"
-        transaction_identity = (unfinished[0].get("transaction_id")
-                                if len(unfinished) == 1 and identity_quality == "CONFIRMED" else None)
+        elif not unfinished and (sid in unclassified_sessions or number(session.get("open_transaction_count")) > 0 or any(
+            number(row.get("open_transaction_count")) > 0 for row in active
+        )):
+            identity_quality = "RECHECK_REQUIRED"
+        transaction_observed = (True if unfinished else
+                                None if transactions_incomplete or sid in unclassified_sessions else False)
+        transaction_verified = identity_quality == "CONFIRMED" if unfinished else None
+        unfinished_confirmed = (True if transaction_verified else
+                                False if transaction_observed is False and identity_quality == "CONFIRMED"
+                                and session.get("open_transaction_count") == 0
+                                else None)
         sources = connection_map.get(sid, [])
         last = [r.get("last_sql") for r in sources if r.get("last_sql")]
         affected = descendants(sid, graph["children"])
@@ -285,8 +433,11 @@ def build_slow_report(
             "last_sql": last,
             "connections": sources,
             "transactions": associated,
-            "transaction_id": transaction_identity,
-            "transaction_identity_quality": identity_quality if unfinished else "NOT_CONFIRMED",
+            "transaction_id": unfinished[0]["transaction_id"] if transaction_verified else None,
+            "transaction_observed": transaction_observed,
+            "transaction_identity_verified": transaction_verified,
+            "transaction_identity_quality": ("NOT_CONFIRMED" if not unfinished and identity_quality == "CONFIRMED"
+                                             else identity_quality),
             "transaction_begin_time": min(
                 (
                     str(r["transaction_begin_time"])
@@ -305,8 +456,12 @@ def build_slow_report(
             ),
             "blocked_session_count": len(affected),
             "blocked_sessions": sorted(affected),
+            "longest_blocked_lock_wait_ms": max(
+                (lock_wait_by_blocker[blocker] for blocker in affected | {sid} if blocker in lock_wait_by_blocker),
+                default=None),
             "session_available": bool(session),
-            "unfinished_transaction_confirmed": bool(unfinished) and identity_quality == "CONFIRMED",
+            "held_lock_resource_ids": held_resource_ids(lock_evidence, sid),
+            "unfinished_transaction_confirmed": unfinished_confirmed,
             "sql_note": "Current/last batch is contextual evidence, not proof of the statement that acquired a lock.",
         }
         if not root["client_net_address"]:
@@ -314,10 +469,6 @@ def build_slow_report(
                 (r.get("client_net_address") for r in sources if r.get("client_net_address")), None
             )
         roots.append(root)
-        requests_complete = (
-            by_name.get("active_requests") is not None and by_name["active_requests"].success
-            and not by_name["active_requests"].truncated
-        )
         reference_evidence_complete = all(
             by_name.get(name) is not None and by_name[name].success and not by_name[name].truncated
             for name in ("active_requests", "active_sessions", "transactions")
@@ -328,7 +479,7 @@ def build_slow_report(
         references = (
             (
                 ReferenceCommand(
-                    f"KILL {sid};", "仅供 DBA 人工审核；重新确认 session 身份及回滚影响。"
+                    f"KILL {sid};", "仅供 DBA 人工审核；重新核对 session_id、login_time、transaction_id 及回滚影响。"
                 ),
             )
             if session and sid > 0 and affected and reference_evidence_complete and identity_complete
@@ -382,7 +533,8 @@ def build_slow_report(
                 )
             )
     long = [
-        r for r in requests if number(r.get("elapsed_ms")) >= settings.long_running_seconds * 1000
+        r for r in requests if r.get("request_kind") != "ACTIVE_WAIT"
+        and number(r.get("elapsed_ms")) >= settings.long_running_seconds * 1000
     ]
     if long:
         findings.append(
@@ -397,30 +549,38 @@ def build_slow_report(
                 "核对业务预期耗时、当前等待及阻塞证据；耗时本身不证明 CPU/IO 根因。",
             )
         )
-    if len(requests) >= settings.high_concurrency_threshold:
+    if len(requests) >= settings.high_concurrency_threshold and not concurrency_from_blocking:
+        concurrency_evidence: dict[str, Any] = {
+            "active_requests": len(requests),
+            "threshold": settings.high_concurrency_threshold,
+        }
+        if blocked:
+            concurrency_evidence.update(requests_in_blocking_graph=in_graph,
+                                        requests_outside_blocking_graph=len(requests) - in_graph,
+                                        blocking_graph_complete=graph_complete)
         findings.append(
             Finding(
                 "HIGH_CONCURRENCY",
                 Severity.WARNING,
-                {
-                    "active_requests": len(requests),
-                    "threshold": settings.high_concurrency_threshold,
-                },
+                concurrency_evidence,
                 "核对业务并发基线和连接池；不将 connected sessions 当作并发 SQL。",
             )
         )
-    if waiting:
+    if diagnostic_waits:
         findings.append(
             Finding(
                 "WAITING_SQL",
                 Severity.WARNING,
-                {"count": len(waiting), "requests": waiting[: settings.slow_top_n]},
+                {"count": len(diagnostic_waits), "requests": diagnostic_waits[: settings.slow_top_n]},
                 "结合 wait_type 和阻塞链解释当前等待，不据单次快照推断资源根因。",
             )
         )
     incomplete, visibility = collection_completeness(results, required_collectors, optional_collectors)
     if visibility == "PARTIAL":
         quality.append("Optional evidence is unavailable or truncated; visibility is partial.")
+    if unverified_waitfor:
+        incomplete, visibility = True, "PARTIAL"
+        quality.append("WAITFOR 已观测到，但阻塞或事务证据不足，无法确认该会话没有伴随异常。")
     if incomplete:
         findings.append(
             Finding(
@@ -446,7 +606,10 @@ def build_slow_report(
                 "long_running": long[: settings.slow_top_n],
                 "blocking_graph": graph,
                 "roots": roots,
+                "lock_resources": lock_evidence,
                 "transactions": transactions,
+                "open_transaction_count": None if count_limitation else len(transaction_ids),
+                "longest_blocked_lock_wait_ms": max(lock_wait_by_blocker.values(), default=None),
                 "sources": connections,
                 "quality": quality,
                 "incomplete": incomplete,
@@ -505,6 +668,7 @@ _STAGED_COLLECTORS = {
     "active_sessions": ActiveSessionsCollector,
     "transactions": TransactionsCollector,
     "connections": ConnectionsCollector,
+    LOCK_COLLECTOR: LockResourcesCollector,
 }
 
 
@@ -519,9 +683,11 @@ def collect_slow_phase(adapter: SQLServerAdapter, names: tuple[str, ...],
         if name in have:
             continue
         if reconnect_pending:
+            started_at = datetime.now(timezone.utc)
             try:
                 adapter.connect()
-            except Exception:
+            except ToolkitError as exc:
+                results.append(slow_reconnect_failure(adapter.instance.id, started_at, exc))
                 break
             reconnect_pending = False
         collector = _STAGED_COLLECTORS.get(name)
@@ -539,19 +705,19 @@ def collect_slow_phase(adapter: SQLServerAdapter, names: tuple[str, ...],
 
 
 def build_slow_phase_report(adapter: SQLServerAdapter, results: tuple[CollectorResult, ...],
-                            *, emergency: bool) -> SlowReport:
-    version = adapter.get_server_version()
+                            *, emergency: bool, version: str) -> SlowReport:
     required = (emergency_collectors_for_adapter(adapter) if emergency else
                 required_collectors_for_adapter(
                     adapter, ("active_requests", "active_sessions", "transactions", "connections")))
     optional = () if emergency else optional_collectors_for_adapter(adapter)
     report = build_slow_report(adapter.instance, results, adapter.settings, version, required, optional)
+    optional = tuple(name for name in optional if name != LOCK_COLLECTOR)
     by_name = {item.collector_name: item for item in results}
     core = emergency_collectors_for_adapter(adapter)
     emergency_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
                              for name in core)
     full_complete = all(name in by_name and by_name[name].success and not by_name[name].truncated
-                        for name in required + optional)
+                        for name in required + optional) and not report.details["incomplete"]
     report.details.update({
         "diagnostic_phase": "EMERGENCY" if emergency else "FINAL",
         "emergency_evidence_complete": emergency_complete,

@@ -80,6 +80,17 @@ connection:
   query_timeout: 15
 ```
 
+### Diagnostic SQL timeout
+
+Every diagnostic SQL uses `effective timeout = min(reviewed script timeout_seconds, diagnostic_sql_timeout_seconds)`. The global value defaults to 30 seconds, accepts integers 1..60, and is set only in the shared `diagnostics` section of the `--settings` YAML; engine sections and Inventory cannot redefine it. It is a ceiling: shorter per-script limits are never extended.
+
+```yaml
+diagnostics:
+  diagnostic_sql_timeout_seconds: 30
+```
+
+`query_timeout` (in Inventory `connection` or an engine section; Oracle's engine section calls it `call_timeout`) is optional and can only shorten the effective timeout further. It has no default. Each diagnostic SQL statement now shares one absolute deadline from Execute through all Fetch calls; Fetch does not receive a fresh timeout. SQL Server applies the statement query timeout before creating its cursor, Oracle updates `call_timeout` before each round trip, PostgreSQL bounds synchronous network waits and keeps server `statement_timeout` at or below the same SQL deadline (within its existing connection-level cap), and MySQL bounds client socket reads. PostgreSQL and MySQL keep their existing conservative connection-level caps derived from the shortest required script limit, so the per-script `effective_timeout_seconds` is also recorded. DEADLINE-004 was accepted with PARTIAL coverage. Oracle enforces the limit per round trip, and pyodbc sets its timeout at cursor creation. The driver can return after the shared deadline, and physical ODBC disposal is unverified if pooling was already initialized. PostgreSQL uses a bounded client network wait without protocol CancelRequest. MYSQL-005 sets a session `max_execution_time` for reviewed SELECTs on recognized MySQL 5.7.8+, 8.0 and 8.4. Automated SHOW cancellation remains BLOCKED because the target identity cannot be checked atomically when sending KILL QUERY. Client timeout leaves server stop unconfirmed. On a timeout, the adapter closes the connection and drops its reference.
+
 MongoDB and Redis currently have no database Adapter, so no instance connection options are accepted yet. Runtime defaults remain available for batch defaults and old Inventory entries without `connection`.
 
 Run a database command directly after configuring its Inventory `credential_alias`. If the alias is missing from available secure stores, Toolkit prompts for the username and hidden database password, then asks whether to save it securely (default Yes). No uses it for the current command only. If no persistent backend is available, Toolkit continues ephemerally and never initializes a store automatically. An existing encrypted store that fails to unlock or validate stops with an error rather than prompting for replacement credentials.

@@ -1,4 +1,5 @@
 SELECT VERSION() AS server_version, CURRENT_USER() AS monitor_user,
+    @@version_comment AS version_comment,
     @@performance_schema AS performance_schema_enabled,
     CONNECTION_ID() AS connection_id,
     (SELECT COUNT(*) FROM performance_schema.setup_consumers

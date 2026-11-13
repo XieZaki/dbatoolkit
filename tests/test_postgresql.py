@@ -1,6 +1,9 @@
 import json
+import selectors
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,7 +15,7 @@ from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.errors import ToolkitError
 from dba.incident import build_incident_summary, build_priority_candidates, manual_action_decisions
-from dba.postgresql import PostgreSQLAdapter
+from dba.postgresql import PostgreSQLAdapter, _DeadlineWaitMixin
 from dba.postgresql_collectors import ActiveSessionsCollector, LongRunningCollector
 from dba.postgresql_slow import blocking_graph, build_slow_report, collect_slow_phase, diagnose_slow
 from dba.postgresql_slow_reporter import render_console, render_markdown
@@ -20,6 +23,7 @@ from dba.presentation import render_emergency_triage, render_json
 from dba.registry import SqlScriptRegistry
 from dba.reporting import HtmlReportRenderer, build_report_model
 from dba.settings import PostgreSQLSettings
+from dba.sql_timeout import SqlDeadline, SqlDeadlineExpired
 
 INSTANCE = DatabaseInstance("pg", "PG", DatabaseType.POSTGRESQL, "test.invalid", 5432, "monitor",
                             "postgres", environment="development")
@@ -143,6 +147,115 @@ def test_adapter_preflight_credentials_timeout_and_close() -> None:
         assert driver.options["password"] == PASSWORD
         assert PASSWORD not in repr(target)
     assert driver.connection.closed and all(cursor.closed for cursor in driver.connection.cursors)
+
+
+@pytest.mark.parametrize("settings,statement_ms", [
+    (PostgreSQLSettings(sslmode="disable"), 5000),
+    (PostgreSQLSettings(sslmode="disable", diagnostic_sql_timeout_seconds=3), 3000),
+    (PostgreSQLSettings(sslmode="disable", diagnostic_sql_timeout_seconds=20, query_timeout=4), 4000),
+])
+def test_statement_timeout_uses_global_effective_timeout_and_audits_enforced_value(
+    monkeypatch: pytest.MonkeyPatch, settings: PostgreSQLSettings, statement_ms: int,
+) -> None:
+    target, driver = adapter(settings=settings)
+    audits: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(target, "_audit", lambda script, started, error, details=None:
+                        audits.append((script, details or {})))
+    with target:
+        assert f"statement_timeout={statement_ms}" in driver.options["options"]
+    preflight = next(details for script, details in audits if script == "preflight")
+    assert preflight["timeout_seconds"] == statement_ms // 1000
+    assert preflight["effective_timeout_seconds"] == settings.effective_sql_timeout(5)
+
+
+def test_postgresql_execute_wait_receives_current_absolute_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [100.0]
+    observed: list[float | None] = []
+
+    class Selector:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def register(self, sock: int, events: int) -> None:
+            assert (sock, events) == (42, selectors.EVENT_READ)
+
+        def select(self, timeout: float) -> list[tuple[None, int]]:
+            observed.append(timeout)
+            clock[0] += 2
+            return [(None, selectors.EVENT_READ)]
+
+    def operation() -> Any:
+        for _ in range(2):
+            assert (yield selectors.EVENT_READ) == selectors.EVENT_READ
+        return "ready"
+
+    class LegacyConnection:
+        pgconn = SimpleNamespace(socket=42)
+
+        def wait(self, gen: Any, interval: float) -> str:
+            return "ready"
+
+    monkeypatch.setattr(selectors, "DefaultSelector", Selector)
+    deadline_connection_type = type("FakeDeadlineConnection", (_DeadlineWaitMixin, LegacyConnection), {})
+    connection = deadline_connection_type()
+    assert connection.wait(None) == "ready"
+    deadline = SqlDeadline.start(5, clock=lambda: clock[0])
+    connection._dba_sql_deadline = deadline
+
+    assert connection.wait(operation()) == "ready"
+    assert observed == [5, 3]
+
+
+def test_postgresql_silent_socket_exits_at_deadline() -> None:
+    def operation() -> Any:
+        yield selectors.EVENT_READ
+        pytest.fail("No response was sent to this socket")
+
+    receiver, sender = socket.socketpair()
+    with receiver, sender:
+        connection = _DeadlineWaitMixin()
+        connection.pgconn = SimpleNamespace(socket=receiver.fileno())  # type: ignore[attr-defined]
+        deadline = SqlDeadline.start(1)
+        connection._dba_sql_deadline = SqlDeadline(1, deadline.started_at - 0.98)
+        with pytest.raises(SqlDeadlineExpired):
+            connection.wait(operation())
+
+
+def test_postgresql_execute_and_fetch_deadline_closes_connection(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any,
+) -> None:
+    target, driver = adapter(settings=PostgreSQLSettings(sslmode="disable", diagnostic_sql_timeout_seconds=3))
+    driver.connection.results["active_sessions"] = [{"pid": 10}, {"pid": 11}]
+    with target:
+        execute = FakeCursor.execute
+        fetchmany = FakeCursor.fetchmany
+
+        def timed_execute(cursor: FakeCursor, sql: str, params: Any = None) -> None:
+            execute(cursor, sql, params)
+            if cursor.connection.executed[-1] == "active_sessions":
+                sql_deadline_clock.advance(1)
+
+        def timed_fetch(cursor: FakeCursor, size: int) -> list[tuple[Any, ...]]:
+            if cursor.connection.executed[-1] == "active_sessions":
+                sql_deadline_clock.advance(1.1)
+            return fetchmany(cursor, size)
+
+        monkeypatch.setattr(FakeCursor, "execute", timed_execute)
+        monkeypatch.setattr(FakeCursor, "fetchmany", timed_fetch)
+        result = target.execute_readonly(target.registry.get("active_sessions", DatabaseType.POSTGRESQL))
+
+    assert not result.success and result.error_type == "FetchTimeout"
+    assert driver.options["options"].endswith("statement_timeout=3000")
+    assert result.database_error is not None
+    timeout = result.database_error["timeout"]
+    assert timeout["timeout_seconds"] == 3
+    assert timeout["execution_phase"] == "Fetch"
+    assert timeout["cancellation_status"] == "CANCEL_STATUS_UNKNOWN"
+    assert timeout["connection_status"] == "DISCARDED"
+    assert driver.connection.closed
 
 
 @pytest.mark.parametrize("field,value,error", [

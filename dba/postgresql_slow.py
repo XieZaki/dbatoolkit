@@ -23,6 +23,7 @@ from dba.slow_profiles import (
     optional_collectors_for_adapter,
     profile_for_adapter,
     required_collectors_for_adapter,
+    slow_reconnect_failure,
 )
 
 
@@ -398,9 +399,11 @@ def collect_slow_phase(adapter: PostgreSQLAdapter, names: tuple[str, ...],
         if name in have or name not in _STAGED_COLLECTORS:
             continue
         if reconnect_pending:
+            started_at = datetime.now(timezone.utc)
             try:
                 adapter.connect()
-            except Exception:
+            except ToolkitError as exc:
+                results.append(slow_reconnect_failure(adapter.instance.id, started_at, exc))
                 break
             reconnect_pending = False
         result = _STAGED_COLLECTORS[name](adapter).collect(adapter.instance)
@@ -415,11 +418,11 @@ def collect_slow_phase(adapter: PostgreSQLAdapter, names: tuple[str, ...],
 
 
 def build_slow_phase_report(adapter: PostgreSQLAdapter, results: tuple[CollectorResult, ...],
-                            *, emergency: bool) -> PostgreSQLSlowReport:
+                            *, emergency: bool, version: str) -> PostgreSQLSlowReport:
     required = (emergency_collectors_for_adapter(adapter) if emergency else
                 required_collectors_for_adapter(adapter, ("active_sessions", "long_running", "transactions", "blocking")))
     optional = () if emergency else optional_collectors_for_adapter(adapter)
-    report = build_slow_report(adapter.instance, results, adapter.settings, adapter.get_server_version(),
+    report = build_slow_report(adapter.instance, results, adapter.settings, version,
                                required, optional)
     core = emergency_collectors_for_adapter(adapter)
     by_name = {item.collector_name: item for item in results}

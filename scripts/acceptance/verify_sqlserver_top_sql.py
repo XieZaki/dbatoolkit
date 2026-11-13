@@ -222,6 +222,7 @@ def _json_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
             raise TypeError("Unexpected native identity fields")
         parsed.append({
             "rank": item.get("rank"),
+            "database_name": item.get("database_name"),
             "fields": sql_fields,
             "plan_fields": plan_fields,
             "sql_identity": sql_identity,
@@ -273,8 +274,8 @@ def _html_table(path: Path) -> tuple[list[list[str]], str]:
     for table in parser.tables:
         headers = [cell.casefold() for cell in table[0]] if table else []
         if headers in (
-            ["rank", "sql identity", "metric value"],
-            ["排序", "sql 原生身份", "指标值"],
+            ["rank", "database name", "metric value"],
+            ["排序", "数据库名称", "指标值"],
         ):
             return table[1:], "TABLE_FOUND"
     return [], "PARSER_MISMATCH"
@@ -465,12 +466,12 @@ def _html_parity_result(
             return {"status": "MISMATCH", "failure_reason": "PARSER_MISMATCH"}
         if row[0] != str(item.get("rank")):
             return {"status": "MISMATCH", "failure_reason": "ROW_NOT_FOUND"}
-        expected_identity = _presenter_html_rows([item])
-        expected_cell = expected_identity[0][1] if expected_identity else "identity unavailable"
-        if row[1] != expected_cell:
+        expected_name = item.get("database_name")
+        if not isinstance(expected_name, str) or not expected_name.strip():
+            expected_name = "名称未采集"
+        if row[1] != expected_name:
             return {
-                "status": "MISMATCH", "failure_reason": "IDENTITY_MISMATCH",
-                "identity_diff": _identity_diff_summary(expected_cell, row[1]),
+                "status": "MISMATCH", "failure_reason": "DATABASE_NAME_MISMATCH",
             }
         if not _same_number(row[2], item.get("metric_value")):
             return {"status": "MISMATCH", "failure_reason": "VALUE_MISMATCH"}
@@ -713,7 +714,7 @@ def run() -> dict[str, Any]:
     connection = pyodbc.connect(
         connection_string, timeout=settings.connect_timeout, autocommit=True, readonly=True,
     )
-    connection.timeout = settings.query_timeout
+    connection.timeout = settings.effective_sql_timeout(settings.diagnostic_sql_timeout_seconds)
     try:
         cursor = connection.cursor()
         try:

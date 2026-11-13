@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any
 
 from dba.collectors import CollectorResult
@@ -82,10 +83,12 @@ SLOW_SQL_PROFILES: dict[str, dict[str, str]] = {
     "sqlserver_2008r2_slow": {
         "active_sessions": "active_sessions_legacy", "active_requests": "active_requests",
         "transactions": "transactions", "connections": "connections",
+        "lock_resources": "lock_resources",
     },
     "sqlserver_shared_slow": {
         "active_sessions": "active_sessions", "active_requests": "active_requests",
         "transactions": "transactions", "connections": "connections",
+        "lock_resources": "lock_resources",
     },
     "mysql57_slow": {
         "active_sessions": "active_sessions_legacy", "active_requests": "active_requests_legacy",
@@ -130,8 +133,8 @@ SLOW_SQL_PROFILES: dict[str, dict[str, str]] = {
 
 
 SLOW_OPTIONAL_COLLECTORS: dict[str, tuple[str, ...]] = {
-    "sqlserver_2008r2_slow": ("transactions", "connections"),
-    "sqlserver_shared_slow": ("transactions", "connections"),
+    "sqlserver_2008r2_slow": ("transactions", "connections", "lock_resources"),
+    "sqlserver_shared_slow": ("transactions", "connections", "lock_resources"),
     "mysql57_slow": ("transactions", "blocking", "recent_statements"),
     "mysql80_slow": ("transactions", "blocking", "recent_statements"),
     "mysql84_slow": ("transactions", "blocking", "recent_statements"),
@@ -248,6 +251,15 @@ def validate_slow_profiles(registry: Any, bindings: tuple[Any, ...]) -> tuple[st
 def profile_for_adapter(adapter: Any) -> ResolvedDiagnosticProfile | None:
     profile = getattr(adapter, "slow_profile", None)
     return profile if isinstance(profile, ResolvedDiagnosticProfile) and profile.feature == "slow" else None
+
+
+def slow_reconnect_failure(database_id: str, started_at: datetime, error: ToolkitError) -> CollectorResult:
+    finished_at = datetime.now(timezone.utc)
+    return CollectorResult(
+        database_id, "reconnect", started_at, finished_at,
+        (finished_at - started_at).total_seconds() * 1000, (), 0, False, False,
+        error.error_type, str(error), error.database_error_payload(),
+    )
 
 
 def required_collectors_for_adapter(adapter: Any, fallback: tuple[str, ...]) -> tuple[str, ...]:
