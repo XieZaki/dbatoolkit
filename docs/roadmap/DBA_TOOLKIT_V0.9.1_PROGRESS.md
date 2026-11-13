@@ -3,18 +3,68 @@
 ## Current position
 
 ```text
-CURRENT_PHASE: Phase 2 — SQL Server Top SQL identity integration accepted; remaining scopes unchanged
-CURRENT_TASK: V091-P2-TOPSQL-INTEGRATION-001 — DONE; user-accepted SQL Server 2022 Docker E2E scope recorded in Acceptance §63
+CURRENT_PHASE: Long-term / Safety — global diagnostic SQL timeout
+CURRENT_TASK: SQL-TIMEOUT-MYSQL-005
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.1
-BASE_HEAD_FOR_CURRENT_CHECKPOINT: 1332b7b16365ab4caccecab3530432932e71df16
-CURRENT_TASK_DELIVERY: User-provided `WINDOWS_LOCAL_REAL_E2E`: SQL Server 2022 Docker, version 16.0.4305.5, asset sqlserver2022/environment=test; one active request had all four normalized identities populated, top/all parity, and Top SQL rank 3 MATCHED from slow.active_requests. `ISOLATED_OFFLINE_TEST`: 121 targeted tests passed; Ruff and strict MyPy (78 dba sources) passed. Scope and the uninspected HTML visual state are recorded in Acceptance §63.
-LAST_COMPLETED_TASK: `V091-P2-TOPSQL-INTEGRATION-001` — DONE, user-accepted for the recorded scope in Acceptance §63. `BUG-WINDOWS-CI-FAILURES-001` and `SQL-REGISTRY-SAFETY-001` remain VERIFIED in Backlog; evidence remains in Acceptance §§58 and 60.
-NEXT_READY_TASK: No new task started by this documentation closeout; await user selection. `PORTABLE-UPDATE-001` remains E2E_PENDING and `V091-P5-WORKBENCH-001` remains IN_PROGRESS for real four-database reports and real-report JSON/HTML parity. Do not start Top SQL Delta.
-WAITING_FOR_USER_REVIEW: NO — the user explicitly requested formal closure of this task based on the supplied E2E evidence.
-WAITING_FOR_USER_ACTION: Select the next task. Other Backlog states remain unchanged; no next task was started.
-FOLLOWING_ORDER: Preserve all pre-existing Oracle, SQL Registry, Top SQL, P5, release artifacts, untracked files, and current worktree changes. SQL Server Top SQL integration is DONE for the accepted scope in Acceptance §63; all other task states and release evidence remain as recorded in their owning Backlog rows.
+BASE_HEAD_FOR_CURRENT_CHECKPOINT: cdd60198666b303861cc368007f3192f62b560f1
+CURRENT_TASK_DELIVERY: MYSQL-005 partial delivery remains BLOCKED in Backlog. SELECT session timeout passed offline review. SHOW cancellation withheld because MySQL cannot atomically verify the recorded session identity when applying KILL QUERY. See Acceptance §87.
+LAST_COMPLETED_TASK: SQL-TIMEOUT-DEADLINE-004 — user accepted the PARTIAL delivery. CONFIG-002 and CLASSIFY-003 remain accepted.
+NEXT_READY_TASK: SQL-TIMEOUT-ISOLATION-006 follows in Backlog, pending user authorization.
+WAITING_FOR_USER_REVIEW: YES — review MYSQL-005 partial delivery.
+WAITING_FOR_USER_ACTION: Human review of MYSQL-005. Real MySQL verification belongs to CANCEL-VERIFY-009.
+FOLLOWING_ORDER: Preserve all pre-existing Oracle, SQL Registry, Top SQL, P5, release artifacts, untracked files, and current worktree changes. SQL Server Top SQL integration remains DONE for the user-accepted scope in Acceptance §63; other task states remain as recorded in Backlog.
 ```
+
+### SQL-TIMEOUT-DEADLINE-004 — absolute Execute+Fetch deadline — 2026-11-13
+
+The four adapters now use one `SqlDeadline` for each diagnostic SQL from Execute through all Fetch calls. The implementation preserves CONFIG-002 effective-timeout calculation, script-specific policy, and the PostgreSQL/MySQL conservative connection-level caps. SQL Server applies the statement query timeout before opening its cursor and checks the same absolute deadline around Fetch; Oracle recomputes `call_timeout` before each round trip; PostgreSQL caps synchronous driver network waits and keeps server `statement_timeout` at or below the SQL deadline without sending a protocol CancelRequest; MySQL bounds client socket reads/writes and makes no claim that a server query stopped. Timeout paths use the accepted shared `database_error` classification and close/discard the uncertain connection. Existing collectors were not refactored, and MYSQL-005, ISOLATION-006, REPORT-007 were not started.
+
+`ISOLATED_OFFLINE_TEST`: controlled fake-clock and fake-driver tests cover Execute consuming part/all of the budget, repeated and batched Fetch calls sharing the same deadline, deadline exhaustion, each driver’s remaining-time mechanism and connection discard, retained pre-timeout evidence, and HTML/JSON/CLI/JSONL error output. Full pytest: 1663 passed, 3 skipped. Ruff passed; Strict MyPy passed for 80 source files; `dba validate` passed for 4 assets/119 SQL scripts; `git diff --check` passed. The full suite needed workspace-local `TEMP`/`TMP` because an existing SQL Server acceptance test writes a temporary file outside pytest's `--basetemp`; rerun passed after scoping these variables. Real database execution, database-side stop observation, and cancellation verification are `NOT_EXECUTED`. No Inventory, KILL, GRANT, REVOKE, commit, push, or release action occurred. See Acceptance §86. Stop for human acceptance.
+
+### SQL-TIMEOUT-CONFIG-002 — formal user acceptance — 2026-11-13
+
+The user formally accepted CONFIG-002 on 2026-11-13. Backlog status is `DONE`; Acceptance §84 retains the original historical offline evidence (full pytest 1604 passed, 3 skipped) and records that the tests were not rerun during the acceptance decision. The accepted rules include the 30-second global default, the minimum-based effective timeout, SQL Server/Oracle Top SQL at 15 seconds, and retaining PostgreSQL/MySQL's 5-second limits. No further CONFIG-002 implementation is authorized or needed.
+
+### SQL-TIMEOUT-CLASSIFY-003 — four-engine error classification — 2026-11-13
+
+CLASSIFY-003 was formally accepted by the user on 2026-11-13 and is `DONE` in Backlog. The accepted CONFIG-002 files and all unrelated existing worktree changes remain preserved. The existing `database_error` model carries a canonical `error_category` and nested Execute/Fetch, applied/effective/script timeout, elapsed time, cancellation, connection-disposition and script-path evidence. The final audit confirms SQL Server query HYT00 versus connection HYT01; PostgreSQL 57014 requires server-message evidence to identify `statement_timeout`, otherwise cancellation cause remains unknown; MySQL 3024/1317/2013 with unknown cancellation source where applicable; and Oracle DPY-4024/DPY-4011/DPY-1001/ORA-01013. Four-engine permission denial, sanitized source errors and consistent HTML, JSON, CLI and JSONL output are covered. Historical `ISOLATED_OFFLINE_TEST` evidence in Acceptance §85: full pytest 1650 passed, 3 skipped; Ruff passed; Strict MyPy passed for 80 source files; `dba validate` passed for 4 assets/119 SQL scripts; `git diff --check` passed. These tests were not rerun as part of the user's acceptance decision. Real database cancellation verification is `NOT_EXECUTED`; these results do not prove database-side stop. DEADLINE-004 is recorded separately in this Progress pointer and Acceptance §86. No database, GRANT/REVOKE, KILL, commit, push or release. Stop for human acceptance of the current task.
+
+### SQL-TIMEOUT-CONFIG-002 — global timeout configuration — 2026-11-13
+
+User approved `C-11`–`C-13` and phase-2 development. Rules, design §7/§9 and the MySQL `KILL QUERY` permission entry are synced. `diagnostics.diagnostic_sql_timeout_seconds` (default 30, 1..60) is now the ceiling. Effective timeout is min(script, global[, optional query_timeout/call_timeout cap]), computed in `dba/sql_timeout.py`. `SqlDeadline` exists but is not yet wired into fetch. SQL Server and Oracle apply the effective value per script. PostgreSQL and MySQL keep a connection-wide value, still 5 s, and their audit logs record both enforced and effective values. `config/runtime.yaml` no longer sets 10 s. Offline: 86 new tests, full pytest 1604 passed / 3 skipped (Acceptance §84). No database connected. Next in dependency order, after user acceptance: `SQL-TIMEOUT-CLASSIFY-003`.
+
+### Global diagnostic SQL timeout — rules and architecture review — 2026-11-12
+
+Umbrella task `SQL-TIMEOUT-001` and children `CONFIG-002` through `CANCEL-VERIFY-009` are registered in Backlog as TODO. Conflicts `C-11`–`C-13` are recorded in Backlog §6 as pending user decision. AGENTS.md (items 16–20) and PROJECT_RULES (design principles 16–22) were extended; the user's existing timeout section was kept. Design and test plan: `docs/design/diagnostic-sql-timeout-and-fault-isolation-v0.9.1.md`. Static review findings: MySQL `read_timeout` only closes the client socket and its 2013 error is reported as a generic failure; Oracle `DPY-4024` is also reported as a generic failure; PostgreSQL has no client network wait bound; no engine has one Execute+Fetch deadline; reports have no query-timeout label. No code, SQL, Inventory or permission changed; no database connected; no Acceptance entry because no test was executed. Implementation waits for the user's decisions and authorization. The P5 pointer above is unchanged.
+
+### Phase 5 SQL Server lock-object resolution — 2026-11-12
+
+Child task `V091-P5-LOCK-OBJECT-SQLSERVER-001` is registered in Backlog. One reviewed read-only Registry script, `lock_resources`, reads `sys.dm_tran_locks` for contended resources only. It is routed as the last optional SQL Server Slow collector. Objects resolve by native identity: OBJECT through database-aware `OBJECT_NAME`, and HoBT or allocation units through catalog views, but only when the lock is in the connection database. There is no database switching, no dynamic SQL and no new grant. Holder and waiter modes and statuses are shown separately in HTML and CLI from the same `details.lock_resources`. Lock evidence failure does not change blocking, transaction, root or completeness conclusions. Offline: 40 new tests and full pytest 1518 passed. Synthetic samples are in `reports/offline-samples/slow_lock_object_*`. Real SQL Server 2022 E2E is `NOT_EXECUTED`. The approved asset's connection database (`master`, per §75) differs from the lab workload database (`AdventureWorks2022`), so the lab KEY locks would degrade to "other database" unless the user changes the asset scope. See Acceptance §83.
+
+### Phase 5 SQL Server request status and concurrency/blocking dedup — 2026-11-12
+
+SQL Server request status is normalised from the `status` column only. Missing or unrecognised values stay UNKNOWN, and nothing is inferred from `wait_type`. `details.concurrency` adds separate status and wait-type tallies, each summing to the request count, and the HTML reads the same counts. HIGH_CONCURRENCY is not emitted only when the activity sample is complete, the blocking graph has no anomalies, every active request is in the graph, and the existing threshold is reached. Incomplete or partial graphs keep the finding. Finding IDs, WAITFOR rules, root-credibility rules and other engines are unchanged. Offline: 18 new tests and full pytest 1478 passed. Synthetic HTML/JSON samples are in `reports/offline-samples/slow_status_fix_*`. Real SQL Server 2022 re-collection remains `NOT_EXECUTED`. See Acceptance §82.
+
+### Local concurrent transaction-blocking workload
+
+The four local blocking scripts now accept `--sessions` and `--duration`, and can run holder and waiter roles from separate terminals. The scripts read the adjacent `local_config.py` without requiring Toolkit configuration. Acceptance §81 records four dry runs and 40 passing targeted offline tests. Real blocking verification remains `NOT_EXECUTED`. The authorized Windows host retest remains the next Phase 5 step.
+
+### Phase 5 Slow HTML six-page V1 Demo regression — 2026-11-12
+
+The Slow template, Presenter and Renderer now render the six V1 Demo pages from collected evidence only. Previous SQL comes only from session-bound sources. Lock object and mode, interval deltas, and embedded plans and runtime statistics show 待开发. The resource page shows only database-internal evidence: CPU scheduling, memory-grant and I/O waits, plus concurrency. Host CPU, MEM and IO are outside Toolkit scope and are not shown as 待开发 (Acceptance §80). Engine signals keep only entries that have real values or an existing command. No Collector, Registry SQL, rule, JSON contract or Backlog status changed. The acceptance-script DOM dependencies were checked statically but not run on the host. Open items: the follow-up capabilities registered in `docs/TODO.md`, the §75 host retest, and user review of the samples. See Acceptance §§79–80.
+
+### Phase 5 Slow workbench prototype adaptation — 2026-11-12
+
+The Slow HTML template, Presenter and shared Renderer were adapted to `docs/design/DBAToolkit_Incident_Workbench_V1_Final_Prototype.html`. No Collector, Registry SQL or JSON field changed. Each metric now states its scope. SQL Server counters are labelled as cumulative since the request started. Oracle child-cursor totals are removed from current-request cards. Plans and client ports that Slow did not collect are shown as 未获取/未采集 with reasons. Existing anchors and IDs used by the Windows acceptance script are kept, but that script has not yet been run against the new template. Open limits: no interval-delta sampling (V091-P2-TOPSQL-DELTA-001 stays in Backlog), no plans inside Slow, no SQL Server/Oracle client port, and no instance or host resource evidence. The prototype file is still untracked. See Acceptance §78.
+
+### Phase 5 SQL Server request status and report timing — 2026-11-12
+
+The SQL Server request status display uses one translation map. The Slow appendix and JSON share measured timings with explicit capture, diagnostic assembly and HTML write boundaries. Focused pytest 298 passed. Full pytest 1458 passed, 3 skipped. Ruff, Strict MyPy, `dba validate`, and `git diff --check` passed. The reference SQL Server 2022 HTML and JSON files are byte-identical to their pre-change copies. See Acceptance §77. New live verification is `NOT_EXECUTED`. Review the offline evidence, then verify with the approved SQL Server 2022 asset.
+
+### Phase 5 local transaction-blocking fixtures — 2026-11-12
+
+`ISOLATED_OFFLINE_TEST`: four two-session lab fixtures and the Windows PowerShell runbook are available in `DBAToolkit-LoadTest`. All four dry runs and 34 targeted tests passed. See Acceptance §76 for the tested scope. The next live step remains SQL Server 2022 §75 A–D on the approved Windows host. The §76 SQL Server fixture can supply the root and downstream sessions for the mixed-blocking capture. Real runs remain `NOT_EXECUTED`.
 
 ### BUG-WINDOWS-CI-FAILURES-001 — code-complete local acceptance — 2026-11-03
 
@@ -156,12 +206,13 @@ New Bugs must be registered in the Backlog with `bug_id`, `parent_task_id`, `pha
 ## Resume procedure for the next Codex session
 
 1. Read root `AGENTS.md` and `docs/PROJECT_RULES.md` completely.
-2. Read Roadmap, Backlog, this Progress file, and Acceptance.
-3. Run `git status --short` and `git log -1 --oneline`; preserve user files and record any HEAD drift.
-4. Resume only the task explicitly approved by the user. Oracle and SQL Server evidence is scoped to exact lab/version cells in Acceptance; open optional permissions and old-version gaps do not block Phase 1 triage.
-5. `V091-P0-PLAN-003` is verified for its recorded SQL Server lab scope. The approved OS credential provider works without unlocking the encrypted store. Do not use the administrator test-driver identity in Toolkit. Phase 0 is closed; do not modify lab infrastructure for Phase 1 without need and scope.
-6. Phase 1 `V091-P1-TRIAGE-001`, Phase 2 design/contract tasks, and all four Phase 2 Top SQL engine collectors are VERIFIED in Backlog for their documented scopes. Do not repeat collector work. `V091-P2-TOPSQL-INTEGRATION-001` is BLOCKED in the canonical Backlog; resume only after its recorded authorized-Windows, credential-session and test-asset gate is cleared.
-7. Update task status only in Backlog, add actual evidence only to Acceptance, update this pointer, report the next task, and stop.
+2. Read `docs/PROJECT_PLAN.md`, `docs/PROJECT_MEMORY.md`, and `docs/TODO.md` for product intent, durable context, and the concise action index.
+3. Read Roadmap, Backlog, this Progress file, and Acceptance. Backlog is the sole task-status source; Progress is the current handoff pointer; Acceptance is the evidence ledger.
+4. Run `git status --short`, `git branch --show-current`, and `git log -1 --oneline`; preserve user files and record any HEAD drift.
+5. Resume only the task explicitly approved by the user. Oracle and SQL Server evidence is scoped to exact lab/version cells in Acceptance; open optional permissions and old-version gaps do not block unrelated work.
+6. `V091-P0-PLAN-003` is verified for its recorded SQL Server lab scope. The approved OS credential provider works without unlocking the encrypted store. Do not use the administrator test-driver identity in Toolkit. Phase 0 is closed; do not modify lab infrastructure without need and scope.
+7. Phase 1 triage, Phase 2 design/contract tasks, and the four Phase 2 Top SQL engine collectors are VERIFIED in Backlog for their documented scopes. `V091-P2-TOPSQL-INTEGRATION-001` is DONE for its user-accepted scope in Acceptance §63; do not repeat it or infer wider version support. The current Phase 5 task is `V091-P5-WORKBENCH-001`; follow the current position above and do not start Top SQL Delta.
+8. Update task status only in Backlog, add actual evidence only to Acceptance, update this pointer, and refresh the TODO summary. Report the next action and stop.
 
 ## Historical task summary
 
@@ -289,3 +340,9 @@ A documentation-only planning update is recorded in Roadmap Phase 2/3/5, Backlog
 ### V091-P2-TOPSQL-INTEGRATION-001 formal closure — 2026-11-08
 
 The user accepted the integration task as `DONE` based on the SQL Server 2022 Docker E2E report in Acceptance §63. Evidence is limited to version `16.0.4305.5`, asset `sqlserver2022`, and `environment=test`; other server versions and databases are not promoted. The 121 offline regression tests, Ruff, and Strict MyPy remain separate evidence. No manual HTML visual inspection was performed. `PORTABLE-UPDATE-001` remains `E2E_PENDING`; `V091-P5-WORKBENCH-001` remains `IN_PROGRESS`. No other task status changed and no new task was started.
+
+### V091-P5-WORKBENCH-001 — Slow current-request presentation checkpoint — 2026-11-08
+
+The shared Slow report now presents every bounded active request as its own HTML record, grouping current statement SQL, exact session source, and request-level runtime/wait/block data. SQL Server active statement extraction uses DMV byte offsets and preserves the batch text and native fields in JSON. Session-source enrichment uses only a unique exact `session_id` match. No database Collector outside SQL Server was changed; no historical Top SQL or diagnostic conclusion logic was changed.
+
+`ISOLATED_OFFLINE_TEST`: 221 focused tests passed. Targeted Ruff and Strict MyPy for 78 `dba` source files passed. Full pytest reported 1346 passed, 3 skipped, and 9 failures in existing Top SQL HTML identity presentation tests. Real E2E is `NOT_EXECUTED`: the PowerShell process ran from the Codex-managed runtime and did not pass the authorized Windows host gate. No database, Docker, Inventory, Credential Store, or credential was accessed. The P5 status remains `IN_PROGRESS`; four-database real reports/parity remain pending.

@@ -1200,7 +1200,7 @@ User approved production-source integration and explicit legacy-to-SQLite migrat
 
 Implementation: dba/sqlite_credentials.py (opt-in Windows SQLite Provider, AES-GCM/Argon2id, private SID/SYSTEM ACLs, file-ID/UUID binding, DELETE journal and synchronous FULL transactions, mutation/rekey and quarantine-aware copy/verify migration); dba/credential_session.py (protocol 2, server-side target checks, bound SQLite GET/SAVE/SET/DELETE/metadata); dba/cli.py and dba/encrypted_credentials.py (existing command/Resolver routing, no automatic Provider switch). Migration publishes authenticated readiness through a transaction, not a post-validation rename. Old source bytes remain unchanged; failed/incomplete targets are private and rejected. See docs/design/credential-sqlite-provider.md for manual activation, verification, rollback restrictions and exact threat boundaries.
 
-Targeted credential/repository suite: 145 passed, 1 skipped before the final full run; subsequent final-source full regression includes the last safety checks. Final Windows-host run, using D:\DBA\DBAToolKit\.venv\Scripts\python.exe: 1157 passed, 2 skipped, 0 failed, 43.17 seconds. Log: .tmp/credential-stabilization-full-pytest-final.txt. The skips are POSIX permission bits on Windows and the opt-in real database system-test (DBA_TOOLKIT_SYSTEM_TESTS not enabled). Both original failing credential tests now pass. Session IPC tests are isolated and run, not skipped due to an existing user Session. Credential file/IPC tests are ISOLATED_OFFLINE_TEST; no real database E2E was executed.
+Targeted credential/repository suite: 145 passed, 1 skipped before the final full run; subsequent final-source full regression includes the last safety checks. Final Windows-host run, using C:\path\to\DBAToolKit\.venv\Scripts\python.exe: 1157 passed, 2 skipped, 0 failed, 43.17 seconds. Log: .tmp/credential-stabilization-full-pytest-final.txt. The skips are POSIX permission bits on Windows and the opt-in real database system-test (DBA_TOOLKIT_SYSTEM_TESTS not enabled). Both original failing credential tests now pass. Session IPC tests are isolated and run, not skipped due to an existing user Session. Credential file/IPC tests are ISOLATED_OFFLINE_TEST; no real database E2E was executed.
 
 Product fixtures cover normal/new and legacy reads, unchanged aliases across four database IDs, cross-Store GET/SAVE/SET/DELETE/metadata refusal with unchanged wrong-target bytes, legal SAVE then GET, password/key and payload authentication failure, unsupported format, busy transactions, three concurrent process writers, external replacement attempts, interrupted pre/post-commit transactions and actual hot-journal recovery, rekey, migration interruption/readback failure quarantine and the temporary CLI lifecycle. Prototype fault tests remain separate historical supporting evidence.
 
@@ -1216,7 +1216,7 @@ Legacy JSON write rejection is enforced at the Provider boundary for `initialize
 
 `ISOLATED_OFFLINE_TEST`: credential/IPC and old/new Provider focused set: **165 passed, 1 skipped**. This includes both previously failing credential tests, explicit SQLite CLI lifecycle, legacy read-only entry points, migration, source immutability, fail-closed errors, Session binding, crash/journal recovery, and SQLite-backed JIT SAVE followed by Resolver reuse. The one skip is a POSIX-only permission-bit test on Windows.
 
-`WINDOWS_HOST_AUTOMATED_REGRESSION` (not database E2E): normal host context verified as Windows 11, project `.venv` Python 3.12.14, repository root `D:\DBA\DBAToolKit`; full pytest: **1175 passed, 2 skipped, 0 failed** in 44.40 seconds. The skips are POSIX permission bits unavailable on Windows and the opt-in real database system-test (`DBA_TOOLKIT_SYSTEM_TESTS` was unset). No database connection was attempted. Log: `.tmp/credential-readonly-full-pytest-final.txt`.
+`WINDOWS_HOST_AUTOMATED_REGRESSION` (not database E2E): normal host context verified as Windows 11, project `.venv` Python 3.12.14, repository root `C:\path\to\DBAToolKit`; full pytest: **1175 passed, 2 skipped, 0 failed** in 44.40 seconds. The skips are POSIX permission bits unavailable on Windows and the opt-in real database system-test (`DBA_TOOLKIT_SYSTEM_TESTS` was unset). No database connection was attempted. Log: `.tmp/credential-readonly-full-pytest-final.txt`.
 
 Quality gates: Ruff PASS; strict MyPy PASS for 74 source files; `dba validate` PASS (4 configured instances, 122 SQL scripts); `git diff --check` PASS (Git emitted existing LF-to-CRLF normalization warnings only). Secret Scanner PASS on the Git index. A separate current-working-tree scan of the 21 credential implementation, test, security and status files reported 0 findings; unrelated untracked files are outside that supplemental scan. No scanner exception or whitelist was broadened.
 
@@ -1594,7 +1594,7 @@ Backlog remains the status authority and keeps `V091-P2-TOPSQL-INTEGRATION-001` 
 
 ### Host, targets, and credential-session gate
 
-`WINDOWS_LOCAL_REAL_E2E` preflight confirmed a native Windows process (`Win32NT`, host `ZAKKY`, user SID recorded only in the local command output), PowerShell 7.6.5 x64, working directory `D:\DBA\DBAToolKit`, and the repository `.venv` Python 3.12.14 plus `.venv\Scripts\dba.exe`. Only the four user-named assets were inspected using read-only `dba show` metadata: `sqlserver2022` (SQL Server, `environment=test`, loopback:1433, configured family 2022), `mysql84` (MySQL, `environment=test`, loopback:3306, family 8.4), `pg16` (PostgreSQL, `environment=test`, loopback:5432, family 16), and `oraclefree` (Oracle, `environment=test`, loopback:1521, service `freepdb1`, family 26ai). No other Inventory assets were enumerated or selected.
+`WINDOWS_LOCAL_REAL_E2E` preflight confirmed a native Windows process (`Win32NT`, host `[Windows lab host]`, user SID recorded only in the local command output), PowerShell 7.6.5 x64, working directory `C:\path\to\DBAToolKit`, and the repository `.venv` Python 3.12.14 plus `.venv\Scripts\dba.exe`. Only the four user-named assets were inspected using read-only `dba show` metadata: `sqlserver2022` (SQL Server, `environment=test`, loopback:1433, configured family 2022), `mysql84` (MySQL, `environment=test`, loopback:3306, family 8.4), `pg16` (PostgreSQL, `environment=test`, loopback:5432, family 16), and `oraclefree` (Oracle, `environment=test`, loopback:1521, service `freepdb1`, family 26ai). No other Inventory assets were enumerated or selected.
 
 The read-only `dba credentials status --json` check returned `status=LOCKED`, `agent=STOPPED`. The configured aliases could not be served by an active credential session. No unlock, credential read, password prompt, connection attempt, or alternative credential source was used. This is a credential-session availability block, not a database login or database permission result.
 
@@ -1621,7 +1621,7 @@ Overall live database E2E is **BLOCKED** for all four selected assets at the cre
 
 ### Pre-connection gate
 
-The current PowerShell process reports native `Win32NT`, host `ZAKKY`, user `ZAKKY\xieji`, PowerShell 7.6.5 x64, working directory `D:\DBA\DBAToolKit`; the repository `.venv` Python and CLI executables exist. This confirms process facts but does not establish that this process can access the Credential Session Agent.
+The current PowerShell process reports native `Win32NT`, host `[Windows lab host]`, user `[Windows lab host]\xieji`, PowerShell 7.6.5 x64, working directory `C:\path\to\DBAToolKit`; the repository `.venv` Python and CLI executables exist. This confirms process facts but does not establish that this process can access the Credential Session Agent.
 
 The user reported that the session had been unlocked through the normal process. The required read-only `dba credentials status --json` check returned exit code 1 with `CredentialSessionUnavailable` and the sanitized message `Credential session pipe access was denied.` The session's current state therefore could not be confirmed by this process. I stopped before Inventory re-selection, credential resolution, or any database connection; this is not evidence of a bad password, database outage, or database permission denial. No credential was printed, no store was opened/unlocked, and no database SQL ran.
 
@@ -1904,8 +1904,628 @@ The gap was in `build_slow_report`: request normalization had already happened i
 
 `ISOLATED_OFFLINE_TEST`: `tests/test_slow.py`, `tests/test_slow_report_json_html_parity.py`, and `tests/test_html_reports.py` passed **121 tests**. Regressions cover all four fields, unmatched session, missing source fields, existing-value preservation, unmodified source normalized data, top/all parity, and JSON/HTML display consistency. Ruff passed on all changed Python modules/tests. Strict MyPy passed for **78 `dba` source files**.
 
-The pre-fix observation and post-fix acceptance evidence are distinct. The user supplied the following `WINDOWS_LOCAL_REAL_E2E` result for SQL Server 2022 in the Docker test environment: server version `16.0.4305.5`, asset `sqlserver2022`, `environment=test`, report `reports\sqlserver2022_slow_20261108_125142.html`. The report had one successful `active_requests` row for `session_id=55` in `running` state; SQL text was captured without truncation. The normalized values were `username=sa`, `client_host=ZAKKY`, `client_ip=172.17.0.1`, and `application=Navicat`. `top_requests` and `all_requests` carried equal normalized identity fields. Top SQL rank 3 had `sql_text_association.status=MATCHED` and `source=slow.active_requests`; collection completeness was normal and the `active_requests` sample had `success=true`.
+The pre-fix observation and post-fix acceptance evidence are distinct. The user supplied the following `WINDOWS_LOCAL_REAL_E2E` result for SQL Server 2022 in the Docker test environment: server version `16.0.4305.5`, asset `sqlserver2022`, `environment=test`, report `reports\sqlserver2022_slow_20261108_125142.html`. The report had one successful `active_requests` row for `session_id=55` in `running` state; SQL text was captured without truncation. The normalized values were `username=sa`, `client_host=[Windows lab host]`, `client_ip=[private client IP]`, and `application=Navicat`. `top_requests` and `all_requests` carried equal normalized identity fields. Top SQL rank 3 had `sql_text_association.status=MATCHED` and `source=slow.active_requests`; collection completeness was normal and the `active_requests` sample had `success=true`.
 
 The first sample returned zero active requests due to sampling timing and is a normal empty sample, not a collection failure. A second sample used a sustained test SQL statement and verified the positive Top SQL association. This is user-provided real E2E evidence; the agent did not repeat the database connection. It verifies SQL Server 2022 `16.0.4305.5` only and does not establish real compatibility for SQL Server 2008 R2 or other versions/databases.
 
 `ISOLATED_OFFLINE_TEST` remains separate: 121 targeted tests passed; Ruff and Strict MyPy (78 `dba` source files) passed; `git diff --check` passed. These automated checks are not counted as real E2E. The HTML report was generated, but no additional manual visual inspection was performed. No database connection, Docker action, Inventory or Credential Store access, credential read, or permission change was performed by the agent during this documentation closeout. The task is formally accepted as `DONE` in Backlog for the approved integration scope, with the live version scope limited as stated above.
+
+## 64. Slow current active-request evidence and HTML grouping — offline checkpoint — 2026-11-08
+
+This checkpoint extends the shared Slow report presentation. It does not change Top SQL collection, identity matching, findings, or database permissions.
+
+The SQL Server `active_requests` Registry query now returns the request ID and a bounded `statement_sql_text` derived from `statement_start_offset` / `statement_end_offset` byte offsets in `sys.dm_exec_sql_text`. It keeps the original bounded batch text in JSON, marks statement truncation, and returns an explicit reason when the current statement offsets or text are unavailable. The `active_sessions` query already reads `sys.dm_exec_connections` once; it now also returns original login, Windows user, client interface, and client process ID. The Slow report fills only absent request-source fields from one unique row with the same `session_id`; duplicate session IDs are treated as ambiguous and are not used for identity enrichment.
+
+The HTML report has a current-activity panel before blocker analysis. It presents each request separately with its SQL text, database/session/request identity, available execution-source fields, request-level time/resource metrics, wait, and blocker in one record. Multiple requests from one session remain separate. SQL Server batch text is not presented as the active statement when statement offsets exist but the statement projection is missing. An empty successful sample is distinguished from a failed or unknown sample. Other engines use only fields already exposed by their current collectors; no additional cross-engine Collector query was added. JSON retains the raw batch and native DMV fields alongside the statement projection.
+
+`ISOLATED_OFFLINE_TEST`: focused Slow, SQL Server, HTML, and four-engine JSON/HTML Parity tests passed **221 tests**. Targeted Ruff passed; Strict MyPy passed for all **78 `dba` source files**. The complete default suite reported **1346 passed, 3 skipped, 9 failed**. All nine failures are in the pre-existing Top SQL HTML presentation worktree: those assertions still expect internal native identity labels in HTML, while the existing local presentation change omits them. This Slow checkpoint did not change that Top SQL presentation contract. No test failure was in the Slow/SQL Server current-request test set.
+
+Real database evidence is `NOT_EXECUTED`. The shell reported Windows 10 and machine `[Windows lab host]`, but the PowerShell executable was under `[Codex-managed runtime path]`; this does not establish the authorized Windows host context. No Inventory asset was inspected for an E2E run, no credential-session status was queried, and no database or Docker connection was attempted. SQL Server 2022 live statement-offset behavior and active-request source values remain unverified on this worktree. `V091-P5-WORKBENCH-001` remains `IN_PROGRESS` in Backlog.
+
+## 65. V091-P5-WORKBENCH-001 — separate current Slow diagnosis from cumulative Top SQL — 2026-11-09
+
+`diagnose slow` no longer calls the Top SQL integration or emits its section in HTML or its payload in newly collected JSON. The retired `--include-top-sql` option and explicit `--metric` or `--top` on Slow return an argument error before Inventory access, with migration guidance in console and JSON output. The independent `diagnose top-sql` retains its ranking parameters and results. `active-sql` retains its row limit option.
+
+The SQL Server `active_requests` Registry script no longer reads `sys.dm_exec_query_stats` or returns plan generation and match counts. It retains current DMV identities, statement offsets, statement and batch text, truncation indicators, and request runtime and wait evidence. Session identity and blocker analysis retain their existing rules. Top SQL Collectors, ranking SQL, and strict SQL/plan association rules for previously captured evidence were left in place. The other three engines retain their current Collector routes and incident context.
+
+The nine earlier HTML failures reproduced together. Seven tests expected native identifiers in standalone HTML. The revised assertions verify that JSON preserves those identities, HTML keeps its statistics and container context, and native identities stay out of standalone HTML. The other two tested the retired Slow route and now verify that Slow does not collect or display cumulative Top SQL. Coverage also checks that rendering a legacy snapshot leaves its stored association evidence intact.
+
+`ISOLATED_OFFLINE_TEST`: **489 focused tests passed**. Full pytest: **1359 passed, 3 skipped** with the real system test opt-in disabled. Ruff passed for tracked Python files. The broad `ruff check .` found five lint issues in the existing untracked load-test directory. Strict MyPy passed for 78 source files. `dba validate` passed for 4 example assets and 118 Registry scripts. `git diff --check` passed.
+
+Real database E2E is `NOT_EXECUTED`. The PowerShell process was part of the Codex-managed runtime and did not establish authorized Windows host access. The unique test asset and credential-session gates were not attempted. The historical live evidence in §63 remains recorded for that checkpoint. Current-head live SQL Server behavior and four-engine real-report parity still require verification. Backlog retains `V091-P5-WORKBENCH-001` as `IN_PROGRESS`.
+
+## 66. V091-P5-WORKBENCH-001 — SQL Server Slow session query and database error propagation — 2026-11-09
+
+The reported SQL Server 2022 failure was native error 207 with SQLSTATE `42S22`. Both active session Registry variants now obtain `client_interface_name` from `sys.dm_exec_sessions`, including the missing-value check. `sys.dm_exec_connections` continues to provide the client network address. The SQL Server 2022 offline fixture asserts all ten requested fields with two distinct sessions and reversed request order.
+
+The SQL Server query wrapper had omitted normalized driver details from general failures and timeouts. The four adapters now serialize the same sanitized error structure for Collector results and populate the existing JSONL fields from it. Tests exercise native SQL Server errors 207 and 229, PyMySQL numeric errors, psycopg SQLSTATE and diagnostic fields, and python-oracledb codes. Unknown codes and SQLSTATE values remain null.
+
+The staged SQL Server, PostgreSQL and MySQL report builders use the version captured before any query can close the adapter. Oracle already captured its report context before collection. The CLI preserves successful samples and the first Collector error. JSON includes a separate report error when assembly or rendering fails. HTML and terminal output identify the failed Collector and show the sanitized vendor error. Tests also verify incomplete incident status and credential redaction.
+
+`ISOLATED_OFFLINE_TEST`: **390 focused tests passed**. Full pytest reported **1371 passed and 3 skipped** with the real-system opt-in disabled. Ruff passed for tracked Python sources and the new regression test. Strict MyPy passed for 78 source files. `dba validate` passed for 4 example assets and 118 Registry scripts. `git diff --check` passed.
+
+`WINDOWS_LOCAL_REAL_E2E`: **NOT_EXECUTED**. PowerShell ran from the Codex managed runtime, so the authorized host, unique asset and credential-session gates were not established. No database connection was attempted. P5 remains `IN_PROGRESS`.
+
+### Windows SQL Server 2022 verification
+
+Run the preflight in Windows PowerShell on the authorized host. Select the existing Inventory YAML for the one approved test asset. Confirm the actual host, project executables, approved Docker host and port, `environment=test`, and monitoring credential session before continuing.
+
+```powershell
+Set-Location C:\path\to\DBAToolKit
+$repo = (Get-Location).Path
+(Get-Process -Id $PID).Path
+[System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+Resolve-Path .\.venv\Scripts\python.exe, .\.venv\Scripts\dba.exe
+$dba = (Resolve-Path .\.venv\Scripts\dba.exe).Path
+$sql = (Resolve-Path .\sql).Path
+$testInventory = (Resolve-Path -LiteralPath (Read-Host 'Approved single-asset test Inventory YAML')).Path
+& $dba --inventory $testInventory show sqlserver2022 --json
+& $dba credentials status --json
+```
+
+Continue in the same PowerShell session after the gates pass. The unique output directory keeps reports and JSONL separate from earlier evidence.
+
+```powershell
+$verification = Join-Path $repo ('.tmp\slow-207-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $verification -ErrorAction Stop | Out-Null
+Set-Location $verification
+$connection = & $dba --inventory $testInventory --sql-root $sql test-connection sqlserver2022 --json |
+    ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or -not $connection.success -or $connection.version -ne '16.0.4305.5') {
+    throw 'Test connection or expected SQL Server build did not pass.'
+}
+$check = & $dba --inventory $testInventory --sql-root $sql check sqlserver2022 --json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $check.status -ne 'READY') { throw 'check did not report READY.' }
+& $dba --inventory $testInventory --sql-root $sql diagnose sqlserver2022 slow --json --report slow.html |
+    Set-Content -Encoding utf8 slow.json
+if ($LASTEXITCODE -ne 0) { throw 'Slow returned a failure. Inspect slow.json.' }
+$slow = Get-Content -Raw slow.json | ConvertFrom-Json
+$sessions = $slow.report.details.samples | Where-Object collector -eq 'active_sessions'
+if (-not $sessions.success) { throw 'active_sessions did not succeed.' }
+```
+
+Compare the request cards in `slow.html` to `all_requests` in `slow.json` by session and request ID. Compare source fields to the corresponding `all_sessions` row. A sample with no active request cannot verify live request/source parity.
+
+To reproduce error 207 on the same verified asset, restore the invalid alias in a disposable copy of the read-only Registry query.
+
+```powershell
+$faultRegistry = Join-Path $verification 'registry-fault-207'
+Copy-Item -LiteralPath $sql -Destination $faultRegistry -Recurse -ErrorAction Stop
+$faultScript = Join-Path $faultRegistry 'sqlserver\active_sessions.sql'
+$original = [IO.File]::ReadAllText($faultScript)
+if ([regex]::Matches($original, '\bs\.client_interface_name\b').Count -ne 2) {
+    throw 'Expected exactly two session aliases in the copied SQL.'
+}
+[IO.File]::WriteAllText($faultScript, $original.Replace('s.client_interface_name', 'c.client_interface_name'))
+$example = Join-Path $repo 'examples\inventory\demo.yaml'
+& $dba --inventory $example --sql-root $faultRegistry validate
+if ($LASTEXITCODE -ne 0) { throw 'Fault Registry failed static validation.' }
+& $dba --inventory $testInventory --sql-root $faultRegistry diagnose sqlserver2022 slow --json --report slow-207.html |
+    Set-Content -Encoding utf8 slow-207.json
+if ($LASTEXITCODE -ne 1) { throw 'Expected a failed Slow collection.' }
+$fault = Get-Content -Raw slow-207.json | ConvertFrom-Json
+if ($fault.collector_name -ne 'active_sessions' -or $fault.error_type -ne 'QueryFailed' -or
+    $fault.error.sqlstate -ne '42S22' -or $fault.error.vendor_code -ne 207) {
+    throw 'The original SQL Server error was not preserved.'
+}
+$fault.error | Select-Object error_type, database_type, driver, sqlstate, vendor_code, message
+Get-Content .\logs\dba.jsonl | ForEach-Object { $_ | ConvertFrom-Json } |
+    Where-Object { $_.sql_script -eq 'active_sessions' -and $_.vendor_code -eq 207 } |
+    Select-Object sql_script, error_type, driver, sqlstate, vendor_code, sanitized_message
+```
+
+## 67. V091-P5-WORKBENCH-001 — SQL Server Slow WAITFOR classification — 2026-11-09
+
+- Prior SQL Server 2022 evidence supplied by the user shows that `WAITFOR DELAY '00:00:30';` was captured with its SQL text and execution source. The prior diagnostic classified it as `WAITING_SQL` and reported `DEGRADED`. This evidence records the original behavior.
+- `ISOLATED_OFFLINE_TEST` — SQL Server requests with both `command` and `wait_type` set to `WAITFOR` retain their SQL text, execution source, resource metrics and wait details. A standalone wait with sufficient evidence of no blocking or open transaction is excluded from the abnormal-wait and long-running findings. Missing or truncated blocking and transaction evidence keeps the result incomplete and the incident `UNKNOWN` when no independent issue is observed.
+- Regression cases cover idle and short-running snapshots, WAITFOR with open transaction or blocking evidence, native lock, I/O and memory grant waits, the existing slow threshold, the blocking chain, and failed or incomplete collectors. A mixed snapshot retains the genuine abnormal wait in the finding, triage and incident summary while the WAITFOR stays in the current-request display. Unproven causes remain undetermined.
+- Before changes, the focused baseline passed 181 tests. After changes, the focused suite passed 200 tests and full pytest passed 1390 tests with 3 skipped. Ruff, strict MyPy (78 source files), `dba validate` (4 example assets, 118 Registry scripts) and `git diff --check` passed.
+- New `WINDOWS_LOCAL_REAL_E2E` — `NOT_EXECUTED`. This checkpoint used offline fixtures only. A live retest of the revised classification and the existing four-engine real-report and parity requirements remain open.
+
+## 68. V091-P5-WORKBENCH-001 — SQL Server Slow mixed WAITFOR report consistency — 2026-11-10
+
+- The supplied `sqlserver2022_slow_mixed_waitfor_blocking.html` records the pre-fix symptoms. The transaction table contains active rows while the incident KPI is blank. The root candidate has a transaction ID and confirmed identity quality but unknown observation and verification fields. The blocking graph shows a root and a victim while the priority table labels their blocking status unconfirmed.
+- The SQL Server Slow incident KPI counts distinct transaction IDs in the existing unfinished user-transaction classification from the transaction collector. A complete empty sample yields zero. Failed, truncated or unidentifiable transaction evidence leaves the exact KPI unknown. Session open counts remain separate, and the transaction table retains the collected rows.
+- The root candidate reuses the analyzer's observed and verified fields. Verification requires a complete session and transaction sample, a unique eligible transaction for the session, matching login time and a valid native transaction ID. An ambiguous or mismatched observation cannot establish ownership. Priority badges use the same observed blocking graph as the request and transaction sections. An observed edge establishes blocking participation; it does not establish transaction ownership or current identity for manual action.
+- `ISOLATED_OFFLINE_TEST` — 191 focused baseline tests and 195 focused regression tests passed. Full pytest passed 1394 tests with 3 skipped. Coverage includes standalone WAITFOR, WAITFOR with an unfinished transaction, WAITFOR with downstream blocking, deduplicated transaction IDs, unavailable transaction evidence and JSON/HTML consistency. Ruff, strict MyPy, `dba validate` and diff check passed.
+- `WINDOWS_LOCAL_REAL_E2E` — `NOT_EXECUTED` for this fix. The existing report was inspected without changing it. A fresh report from the authorized SQL Server 2022 test asset remains pending.
+
+## 69. V091-P5-WORKBENCH-001 — Slow HTML workbench presentation — 2026-11-10
+
+- `ISOLATED_OFFLINE_TEST` — Slow HTML now groups the incident overview, finding-backed diagnosis, active SQL, blocking, transactions, performance and advanced evidence. Request cards own current SQL and show a preview for longer text. The transaction table links to current activity, uses the collected transaction start and separates confirmed association from a same-session review link. Evidence paths, rules, sample windows and native details remain in the default-collapsed appendix. The independent diagnosis, CLI, JSON serialization, Collector, SQL Registry and manual-action safety contracts remain unchanged.
+- SQL Server mixed-WAITFOR synthetic output is `reports/slow_workbench_synthetic_sqlserver_20261110.html`. It shows the fixture sessions 51 and 55, the 11-second downstream lock wait, transaction ID and actual fixture begin time. The diagnosis states that the statement which acquired the lock cannot be identified from the current WAITFOR. The original real HTML is unchanged. Edge opened the local fixture and produced a screenshot. The exact narrow-viewport probe did not complete.
+- Focused pytest passed 330 tests across Slow, HTML, Incident, Triage, Oracle, MySQL and PostgreSQL. Full pytest passed 1403 tests with 3 skipped. Ruff, strict MyPy (78 source files), `dba validate` (4 example assets and 118 Registry scripts) and `git diff --check` passed. Automated parity checks verify that HTML mapping does not mutate the diagnosis or summary, and preserve native identities, transaction time and incomplete evidence.
+- `WINDOWS_LOCAL_REAL_E2E` — `NOT_EXECUTED`. The terminal process was the Codex-managed PowerShell runtime. No local lab credential file, database or Docker endpoint was opened. P5 remains `IN_PROGRESS` while the new SQL Server 2022 real JSON/HTML acceptance and real-report parity across four engines remain open.
+
+### Windows 本地复验命令
+
+从已授权 Windows 宿主机打开 Windows PowerShell。准备既有隔离混合 WAITFOR 场景，并在下游请求处于锁等待时运行。诊断使用既有独立监控身份，测试驱动身份由实验室单独管理。
+
+```powershell
+Set-Location -LiteralPath 'C:\path\to\DBAToolKit'
+$processPath = (Get-Process -Id $PID).Path
+if ($PSVersionTable.PSEdition -ne 'Desktop' -or
+    $processPath -notlike "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe") {
+    throw 'Run from the authorized Windows host PowerShell.'
+}
+$dba = (Resolve-Path .\.venv\Scripts\dba.exe).Path
+$python = (Resolve-Path .\.venv\Scripts\python.exe).Path
+$sql = (Resolve-Path .\sql).Path
+& $python -c 'import sys; print(sys.executable)'
+$testInventory = (Resolve-Path -LiteralPath (Read-Host 'Approved single-asset test Inventory YAML')).Path
+$asset = & $dba --inventory $testInventory show sqlserver2022 --json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or -not $asset.enabled -or $asset.environment -ne 'test' -or
+    $asset.db_type -ne 'sqlserver' -or $asset.host -ne '127.0.0.1' -or $asset.port -ne 1433) {
+    throw 'The approved SQL Server 2022 test asset could not be confirmed.'
+}
+$session = & $dba credentials status --json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $session.status -ne 'UNLOCKED') {
+    throw 'Confirm the existing monitoring credential session from this Windows host.'
+}
+$connection = & $dba --inventory $testInventory --sql-root $sql test-connection sqlserver2022 --json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or -not $connection.success -or $connection.version -ne '16.0.4305.5') {
+    throw 'Connection or expected SQL Server build could not be confirmed.'
+}
+$check = & $dba --inventory $testInventory --sql-root $sql check sqlserver2022 --json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $check.status -ne 'READY') { throw 'Test asset is not READY.' }
+$output = Join-Path (Resolve-Path .\reports).Path ('slow-workbench-live-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $output -ErrorAction Stop | Out-Null
+$html = Join-Path $output 'mixed-waitfor.html'
+$json = Join-Path $output 'mixed-waitfor.json'
+& $dba --inventory $testInventory --sql-root $sql diagnose sqlserver2022 slow --json --report $html |
+    Set-Content -Encoding utf8 -LiteralPath $json
+if ($LASTEXITCODE -ne 0) { throw 'Inspect the sanitized diagnostic JSON for the failure.' }
+Get-Item -LiteralPath $html, $json | Select-Object Name, Length
+```
+
+在同一快照中核对真实会话、事务 ID、开始时间、根阻塞、受阻请求、锁等待时间和证据边界。HTML、JSON 与实验室产物只保存在本地。
+
+## 70. V091-P5-WORKBENCH-001 — SQL Server Slow 事务分诊证据一致性 — 2026-11-10
+
+- `ISOLATED_OFFLINE_TEST`。SQL Server 根会话事务分诊复用已有会话与事务关联结果，以及 SQL Server 空间诊断已有的 3600 秒活动长事务阈值。完整采样且关联已核验时，20 秒及 3599 秒为 `NOT_TRIGGERED`，达到 3600 秒为 `CONFIRMED`。持续时间缺失、关联歧义或事务采样截断时保留 `UNKNOWN`。
+- 合成快照中的 Session 55 事务关联保持未核验。JSON 和 HTML 使用同一分诊结论，原始证据保持不变。主报告使用「根阻塞关联证据」，锁来源语句仍未确认。
+- 串行定向测试 420 项通过，全量 pytest 1420 项通过、3 项跳过。Ruff、严格 MyPy、`dba validate` 和 `git diff --check` 通过。基准 HTML 的 SHA-256 保持 `1B238E24694E1370B3BB4DC8CB12EE303DDD58DAF595FDA690578B000E07D7FF`。
+- `WINDOWS_LOCAL_REAL_E2E` 为 `NOT_EXECUTED`。等待 DBA 在获准宿主机上验收。
+
+## 71. V091-P5-WORKBENCH-001 — Slow HTML 第 06 节 SQL 资源消耗与等待分析 — 2026-11-11
+
+- `ISOLATED_OFFLINE_TEST`。第 06 节按当前请求展示资源计数、等待和性能解释。SQL 摘要链接到第 03 节对应请求。SQL Server 使用请求级毫秒、读页和写入次数，逻辑读按 8 KiB/页换算。MySQL 使用采样语句耗时、检查行数、影响行数和可见等待。PostgreSQL 使用查询运行时间与可见等待。Oracle 单列请求运行时长估计和 `V$SQL` 子游标累计指标。零值保留，未取得的指标保持缺失。
+- 脱敏样例为 `reports/slow_workbench_synthetic_sqlserver_resources_20261111.html`。会话 55 显示 `LCK_M_X` 等待 02:40:00，阻塞者为会话 51。会话 51 的 WAITFOR 运行 00:01:31，其已核验事务持续 02:40:00。取得锁的语句仍待核查。生成的 HTML 有两张资源卡，13 个页内链接均可定位。上一版合成报告与混合 WAITFOR 实机报告的 SHA-256 与修改前一致。
+- 定向 pytest 340 项通过，全量 pytest 1424 项通过、3 项跳过。全量首跑的模拟 Top SQL 验收因沙箱临时目录权限失败，复跑把 Python 临时目录和 pytest basetemp 放在工作区内。跳过原因为 Windows 无 POSIX 权限位、当前进程令牌无法创建符号链接、实机系统测试需显式启用。Ruff、严格 MyPy（78 个源文件）、`dba validate`（4 个示例资产、118 个脚本）及 `git diff --check` 通过。
+- `WINDOWS_LOCAL_REAL_E2E` 为 `NOT_EXECUTED`。本轮仅验证 HTML 展示和同一诊断对象的 JSON/HTML 一致性。后续仍需 DBA 审阅和四库真实报告验收。
+
+## 72. V091-P5-WORKBENCH-001 — Slow HTML 第 03–06 节展示收尾 — 2026-11-11
+
+- `ISOLATED_OFFLINE_TEST`。第 03 节显示当前语句、执行身份、状态和请求运行时间，连接详情可展开。第 04 节显示会话角色、直接阻塞者、层级、状态和请求链接，原始阻塞边与等待资源可在附录查阅。第 05 节保留事务时间、标识、状态、身份核验和 SQL 链接。第 06 节按请求显示资源、等待和基于样本的中文解释，展示范围说明位于标题下。
+- 脱敏样例为 `reports/slow_workbench_synthetic_sqlserver_p5_display_closeout_20261111.html`。会话 51 的写入采样值为 0 次，WAITFOR 请求运行 91 秒，事务已核验。会话 55 的写入未采集，CPU 为 0 ms，逻辑读为 2 页，物理读为 0 页，受会话 51 阻塞并出现 `LCK_M_X` 等待 02:40:00。样例的 13 个页内链接均有目标。Edge 157.0.4341.42 的桌面验证页显示两张资源卡。
+- 定向 pytest 339 项通过，全量 pytest 1424 项通过、3 项跳过。Ruff、严格 MyPy（78 个源文件）、`dba validate`（4 个示例资产和 118 个 SQL 脚本）及 `git diff --check` 通过。原实机报告 `sqlserver2022_slow_mixed_waitfor_blocking.html` 的 SHA-256 保持 `D043F6DA2990BED74DDC7F4C1657837C928926AFD7471AB9DF548E7814CCFAE4`。
+- `WINDOWS_LOCAL_REAL_E2E` 为 `NOT_EXECUTED`。等待 DBA 审阅完整报告与四库真实报告验收。
+
+## 73. V091-P5-WORKBENCH-001 — Slow HTML 展示冻结 — 2026-11-11
+
+- `ISOLATED_OFFLINE_TEST`。第 06 节将 SQL Server CPU、逻辑读、物理读和写入标为当前请求自开始至采集时刻的累计值。当前等待时长沿用等待事件口径。会话 51 累计写入为 0 次，会话 55 的累计写入未采集。第 03、06 节普通 SQL 卡片省略通用提示徽标，异常徽标保留。第 05 节的「SQL Server 事务 DMV」链接至附录中的 `sys.dm_tran_active_transactions.transaction_begin_time` 来源说明。
+- 新脱敏样例为 `reports/slow_workbench_synthetic_sqlserver_p5_final_presentation_20261111.html`。Edge 157.0.4341.42 检查了 1440×960、414×844 和 320×844 视口。含滚动条的浏览器视口宽度分别为 1440、414 和 320，页面内容宽度与可用宽度分别为 1425、399 和 305，折叠附录展开后仍无页面级横向溢出。字段和性能说明为 12px，表头与表格正文为 11px。Edge 生成的 7 页打印样张保留事务表、SQL 资源卡和完整来源路径，搜索控件和空结果提示不进入打印页。
+- 定向 pytest 340 项通过，全量 pytest 1425 项通过、3 项跳过。回归覆盖四库指标口径和 JSON 原始对象不变。样例的 14 个页内链接均有目标，Edge 检查通过 SQL 跳转、来源跳转、复制文本和打印展开恢复。Ruff、严格 MyPy（78 个源文件）、`dba validate`（4 个示例资产和 118 个 SQL 脚本）及 `git diff --check` 通过。572 份既有 HTML 的 SHA-256 与执行前一致。原实机报告 SHA-256 为 `D043F6DA2990BED74DDC7F4C1657837C928926AFD7471AB9DF548E7814CCFAE4`。
+- Slow HTML 第 03–06 节结构与视觉布局在本离线检查点冻结。后续优先验收 SQL Server 2022、MySQL 8.4、PostgreSQL 16、Oracle 23 的真实报告与 JSON/HTML 一致性。本轮 `WINDOWS_LOCAL_REAL_E2E` 为 `NOT_EXECUTED`。
+
+## 74. V091-P5-WORKBENCH-001 — SQL Server 2022 高并发报告定向修复 — 2026-11-11
+
+- 既有实机证据来自 `reports/sqlserver2022_slow_20261111_193108.html`，SHA-256 为 `3a8af9a873f3cdf7378a083040a3f5e0138ee829ef99a648627131bb28e57251`。89 张活动请求卡与资源卡逐条对应。Q4 为 63 条、8,081 ms、305,776 页、48 条 RUNNABLE；Q2 为 18 条、473 ms、17,906 页、13 条 RUNNABLE；Q3 为 8 条、314 ms、13,156 页、6 条 RUNNABLE。共 67 条 RUNNABLE、22 条 RUNNING。原报告未找到配对 JSON。
+- 原报告正文与复制文本逐条相同。静态读取三个 LoadTest 模板，89 条语句与模板相比分别只缺最后的右括号。旧采集 SQL 对非 `-1` 的结束偏移漏计包含的最后一个 UTF-16 码元。离线对照 Microsoft 的包含末尾示例，并用实际 Registry 截取表达式验证完整模板。新查询按字节切分，保留 `-1` 到批次末尾、语句偏移及 UTF-16 边界，显式标记超过 32 KiB 的文本。原始 SQL 字段结构保持原口径。 [sys.dm_exec_requests 示例 E](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-exec-requests-transact-sql?view=sql-server-ver16) · [SUBSTRING](https://learn.microsoft.com/en-us/sql/t-sql/functions/substring-transact-sql?view=sql-server-ver16)
+- 第 02 节新增有界高并发聚合。语句键由数据库 ID、批次句柄与起止偏移构成，缺少可信键的请求独立列示。指标为可见请求的累计值加总，缺失指标保留缺失及覆盖范围。RUNNABLE 指向待核验的 CPU 调度竞争，当前快照缺少实例 CPU 使用率和调度器运行队列。INDEX(0)、JOIN 条件中的 CONVERT、多表 JOIN、GROUP BY 与 ORDER BY 为人工复核线索。 [SQL Server 调度器 DMV](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-schedulers-transact-sql?view=sql-server-ver16)
+- `ISOLATED_OFFLINE_TEST`。脱敏回放文件为 `reports/slow_workbench_synthetic_sqlserver_load_20261111.html`。请求数、状态与资源计数从旧报告重算，数据库、SQL 对象、会话 ID 和句柄为合成值。89 条 JSON、HTML 正文和复制文本逐条一致。三个真实模板的原始 DMV 偏移、采集后文本及真实 JSON/HTML parity 待新采样核验。
+- 定向 pytest 466 项通过，全量 pytest 1440 项通过、3 项跳过。Ruff、严格 MyPy（78 个源文件）、`dba validate`（4 个示例资产、118 个脚本）及 `git diff --check` 通过。回归覆盖非 `-1` 包含末尾、`-1`、多语句、中文和代理对、长度上限、四库 HTML/JSON 语义及不完整样本。SQLite 仅执行移植的字节截取表达式，实际 SQL Server DMV 调用待实机验证。
+- 修复后的 `WINDOWS_LOCAL_REAL_E2E` 为 `NOT_EXECUTED`。当前进程为 Codex 管理的 PowerShell Core，宿主机门禁在连接前停止。验收脚本已通过 PowerShell 解析、宿主机门禁和 A–D 的合成场景断言。
+
+### 授权 Windows 宿主机验收
+
+在正常 Windows PowerShell 使用下列采集脚本。脚本只针对明确提供的单资产测试 Inventory 选择 `sqlserver2022`。它校验 loopback 测试目标、独立监控凭据会话、SQL Server 2022 指定构建和 READY 状态。每次诊断将同一快照的 HTML 与 JSON 写入独立本地目录。
+
+```powershell
+Set-Location -LiteralPath 'C:\path\to\DBAToolKit'
+$approvedInventory = (Resolve-Path -LiteralPath (Read-Host 'Approved single-asset test Inventory YAML')).Path
+$slowAcceptance = '.\scripts\acceptance\verify_sqlserver_slow_snapshot.ps1'
+& $slowAcceptance -Inventory $approvedInventory -Scenario A -PreflightOnly
+```
+
+若资产有明确获准的运行时设置，在所有脚本调用中传入同一个 `-Settings <路径>`。
+
+**A · 并发 SQL**。预检通过后在单独终端使用既有普通测试驱动账号。指定已经批准的现有配置路径并用静态读取器验证元数据，再启动已审阅的 LoadTest。每轮固定并发、持续时间与超时。先以 10 会话试跑，下列 60 会话采样限于已批准的实验室预算。未采到三个模板或未触发高并发规则时保留本轮证据。
+
+```powershell
+# 负载终端，同一授权 Windows 宿主机
+Set-Location -LiteralPath 'C:\path\to\DBAToolKit'
+$env:DBA_TOOLKIT_CONFIG = (Resolve-Path -LiteralPath (Read-Host 'Approved existing load-test config')).Path
+& .\.venv\Scripts\python.exe -c 'import sys; from dba.lab_config import read_lab_database_config; c=read_lab_database_config(sys.argv[1], ''sqlserver''); assert c.host==''127.0.0.1'' and c.port==1433 and c.database==''AdventureWorks2022''' $env:DBA_TOOLKIT_CONFIG
+if ($LASTEXITCODE -ne 0) { throw 'Load-test target did not match the approved lab.' }
+& .\.venv\Scripts\python.exe .\DBAToolkit-LoadTest\run_sqlserver_load.py --sessions 60 --duration 25 --pause-ms 150 --connect-timeout 5 --query-timeout 20
+```
+
+```powershell
+# 诊断终端，压测运行期间
+$a = & $slowAcceptance -Inventory $approvedInventory -Scenario A
+$a
+```
+
+**B · 非主动等待长 SQL**。用一个普通测试会话执行已审阅的业务型 SELECT，设置客户端查询超时并记录 SPID。在执行超过 10 秒且仍在运行时采集。验收检查其超过阈值、无上游阻塞、非 WAITFOR、语句文本完整。核对 CPU、逻辑读、当前等待和运行时长。若预算内未观测到超过 10 秒的业务请求，记录 `NOT_OBSERVED` 并保留现场结果。
+
+```powershell
+$workloadSpid = [int](Read-Host 'B test workload SPID')
+& $slowAcceptance -Inventory $approvedInventory -Scenario B -WorkloadSessionId $workloadSpid
+```
+
+**C · 锁阻塞**。复用已审阅的实验室事务夹具。根会话在有界 WAITFOR 期间保留其未提交事务，下游 UPDATE 使用有限锁等待。记录两条会话的 SPID，在等待发生后采集，按原夹具路径结束并回滚测试事务。核对根身份、事务 ID、下游锁等待，以及当前 WAITFOR 与实际取得锁语句的区别。
+
+```powershell
+$rootSpid = [int](Read-Host 'C root test SPID')
+$victimSpid = [int](Read-Host 'C victim test SPID')
+$c = & $slowAcceptance -Inventory $approvedInventory -Scenario C -RootSessionId $rootSpid -VictimSessionId $victimSpid
+$c
+```
+
+**D · 解除异常**。等待压测正常结束和测试事务回滚后重新采集，分别对照 A 和 C 的基线。确认活动请求数下降、测试 SQL 消失，旧阻塞根和事务 ID 不残留。
+
+```powershell
+& $slowAcceptance -Inventory $approvedInventory -Scenario D -BaselineJson $a.Json
+& $slowAcceptance -Inventory $approvedInventory -Scenario D -BaselineJson $c.Json
+```
+
+在 DBA 原生客户端可补充以下只读调度器样本。记录多个时点的运行队列与宿主机 CPU 指标。SQL Server 2022 要求已有的 `VIEW SERVER PERFORMANCE STATE`，由 DBA 审核监控权限。
+
+```sql
+SELECT scheduler_id, cpu_id, current_tasks_count, runnable_tasks_count, work_queue_count
+FROM sys.dm_os_schedulers
+WHERE status = N'VISIBLE ONLINE'
+ORDER BY runnable_tasks_count DESC;
+```
+
+## 75. V091-P5-WORKBENCH-001 — SQL Server 2022 实机门禁与 SQL 文本边界 — 2026-11-11
+
+- 开始时为 `feature/top-sql-readable-report-20261108`、HEAD `f02b621b0e5c95d724dd89238d28c8170ed3faa3`。原有未提交修改与未跟踪验收脚本已保留。旧实机报告和 §74 脱敏回放的 SHA-256 与开始时一致。
+- `WINDOWS_LOCAL_REAL_E2E` 为 `NOT_EXECUTED`。宿主机验证为 `BLOCKED`，因为当前进程来自 Codex 管理的 PowerShell Core。脚本在读取 Inventory、查询凭据元数据或建立 SQL 连接之前停止。本轮 A 基线、B 高并发、C 长 SQL 与主动等待、D 混合阻塞与解除均未执行。16.0.4305.5、`sqlserver2022`、`127.0.0.1:1433`、`master` 和 `dba_monitor` 是待宿主机核验的预期值。实机计数、聚合、采集完整性、同次报告和遗留会话均无本轮数据。
+- `ISOLATED_OFFLINE_TEST` / `OFFLINE_PASSED`。补充四个精确上限回归。以 32 KiB 和多一个 BMP 码元为输入，各测试显式包含式结束偏移和 `-1`，同时覆盖零与非零起始偏移、后续语句隔离、中文与 HTML 转义。32 KiB 的末字符完整，32 KiB + 2 字节只保留前 32 KiB，JSON、HTML 正文、复制文本与截断标记一致。既有用例覆盖右括号、UTF-16 代理对、跨上限代理对、空文本和无效偏移。SQLite 执行现有 Registry 字节表达式的离线移植，SQL Server DMV 原始偏移和实际执行仍待宿主机核验。
+- 定向 pytest 294 项通过。Ruff、Strict MyPy（78 个源文件）、`dba validate`（4 个示例资产、118 个脚本）及 `git diff --check` 通过。PowerShell 脚本通过解析和宿主机门禁验证。六份标记为离线的同对象 JSON/HTML 样本通过比较，覆盖空闲基线、高并发、长 SQL 与正常 WAITFOR、文本边界、混合阻塞、解除阻塞。保留旧测试会话的负向样本被拒绝。证据位于 `.tmp/p5-sqlserver-boundary-evidence-20261111/`，以及同目录层级的 `p5-sqlserver-boundary-pytest-20261111.log`、`p5-sqlserver-pair-verifier-20261111.log` 和 `p5-sqlserver-windows-host-gate-20261111.log`。
+- 本轮改动限于验收脚本、边界测试和本地记录。采集 SQL、诊断规则、权限策略及冻结的 03–06 节布局保持原样。单次 RUNNABLE 仍仅作为调度竞争线索，持续 CPU 瓶颈待核验。请求累计 CPU 和逻辑读按样本加总。P5 保持 `IN_PROGRESS`。
+
+### Windows 宿主机续跑命令
+
+本节采用本轮的 A–D 场景名称。脚本沿用 §74 的参数值并增加 `Baseline`。只有在获准 Windows 宿主机的正常 Windows PowerShell 中运行。先验证本地测试资产、基础连接数据库、现有监控凭据的用户名与 SQL Server 构建。诊断一次同时生成 JSON 与 HTML，验证通过后在同一目录写入 `verification.json`。验证失败时保留已经生成的报告。
+
+```powershell
+Set-Location -LiteralPath 'C:\path\to\DBAToolKit'
+$slowAcceptance = '.\scripts\acceptance\verify_sqlserver_slow_snapshot.ps1'
+$labArgs = @{ Inventory = (Resolve-Path -LiteralPath (Read-Host 'Approved single-asset test Inventory YAML')).Path }
+# 如果资产需要已有获准的运行时设置，追加 $labArgs.Settings 为该设置文件路径。
+& $slowAcceptance @labArgs -Scenario Baseline -PreflightOnly
+
+# A · 基线。测试负载未运行。
+$baseline = & $slowAcceptance @labArgs -Scenario Baseline
+$baseline
+```
+
+**B · 高并发**。A 通过后，在同一宿主机的另一终端用批准的普通测试驱动账号启动既有 LoadTest。先确认本轮并发和时长符合批准的实验室预算。驱动配置只通过现有机制使用，元数据检查不输出配置。
+
+```powershell
+Set-Location -LiteralPath 'C:\path\to\DBAToolKit'
+$env:DBA_TOOLKIT_CONFIG = (Resolve-Path -LiteralPath (Read-Host 'Approved existing load-test config')).Path
+& .\.venv\Scripts\python.exe -E -c 'import sys; from dba.lab_config import read_lab_database_config; c=read_lab_database_config(sys.argv[1], ''sqlserver''); assert c.host==''127.0.0.1'' and c.port==1433 and c.database==''AdventureWorks2022'' and c.user.casefold() not in (''sa'', ''dba_monitor'')' $env:DBA_TOOLKIT_CONFIG
+if ($LASTEXITCODE -ne 0) { throw 'Load-test target or identity did not match the approved lab.' }
+& .\.venv\Scripts\python.exe .\DBAToolkit-LoadTest\run_sqlserver_load.py --sessions 100 --duration 45 --pause-ms 100 --connect-timeout 5 --query-timeout 20
+```
+
+```powershell
+# 诊断终端，负载稳定时采集。请求数取自快照。
+$busy = & $slowAcceptance @labArgs -Scenario A
+$busy
+```
+
+**C · 长 SQL 与主动等待**。在批准的测试库使用有限查询超时，执行一个已审阅的、预计超过 10 秒的业务型 SELECT。在另一普通会话运行独立有界 WAITFOR，保持两者同时可见。记录实际 SPID。无符合条件的样本时保留证据并记录未验证，按采集结果复核请求运行时间与累计 CPU。
+
+```powershell
+$longSpid = [int](Read-Host 'Business SQL test SPID')
+$waitSpid = [int](Read-Host 'Independent WAITFOR test SPID')
+$long = & $slowAcceptance @labArgs -Scenario B -WorkloadSessionId $longSpid -WaitforSessionId $waitSpid
+$long
+```
+
+**D · 混合阻塞与解除**。复用已审阅且归属明确的隔离事务夹具。根会话在有界 WAITFOR 期间保留事务，下游更新使用有限锁等待。按夹具流程回滚并正常关闭测试会话，待 LoadTest 退出后再次采集。旧 Windows 模拟器含长时间 WAITFOR 及删除同名测试表的路径，当前未验证其运行对象归属。使用已经批准的有界夹具。
+
+```powershell
+$rootSpid = [int](Read-Host 'Blocking root fixture SPID')
+$victimSpid = [int](Read-Host 'Blocked fixture SPID')
+$blocked = & $slowAcceptance @labArgs -Scenario C -RootSessionId $rootSpid -VictimSessionId $victimSpid
+$blocked
+
+# 正常回滚并关闭测试会话后，分别核对阻塞与并发基线。
+& $slowAcceptance @labArgs -Scenario D -BaselineJson $blocked.Json
+& $slowAcceptance @labArgs -Scenario D -BaselineJson $busy.Json
+```
+
+保留每次采样的完整结果。对照已提交给驱动的已知 SQL 文本核对 Q2、Q3、Q4 的末尾右括号和偏移。实际 DMV 长文本边界只有在可稳定构造并核对原始字节时记录实机通过。若未能在授权宿主机验证指定资产或既有凭据，实机状态保持 `NOT_EXECUTED`。
+
+## 76. V091-P5-WORKBENCH-001 — 四库双会话事务阻塞夹具 — 2026-11-12
+
+`DBAToolkit-LoadTest` 本地新增四库 `run_*_blocking.py` 入口，共用事务回滚与连接关闭流程。SQL Server 对 `AdventureWorks2022.Production.ProductCategory` 的同一行执行可回滚更新，持锁会话在有界 `WAITFOR` 内保留事务。MySQL、PostgreSQL 和 Oracle 对各自样例表的同一行执行 `SELECT FOR UPDATE`。README 第 8 节记录单资产预检、负载与诊断双窗口操作、会话 ID 核对和解除阻塞复查。
+
+`ISOLATED_OFFLINE_TEST`：四个入口的 `--dry-run` 成功，未访问配置或数据库。夹具和 `tests/test_lab_config.py` 定向 pytest 共 34 passed，其中新增 12 项覆盖场景预览、无效资产门禁、回滚顺序与中断关闭。新增 Python 文件 Ruff、Strict MyPy 通过，README 的 11 个 PowerShell 代码块语法检查通过。
+
+`NOT_EXECUTED`：四库阻塞关系和解除后的真实采样仍待获准 Windows 宿主机验证。本轮未连接数据库、读取实验室凭据或更改产品诊断。§75 SQL Server A–D 实机验收仍待执行。
+
+## 77. V091-P5-WORKBENCH-001 — SQL Server 请求状态与诊断耗时 — 2026-11-12
+
+**既有实机报告复核。** `sqlserver2022_slow_20261111_211100` 的 HTML 中存在 `runnable`，并发概述也直接使用 `RUNNABLE`、`RUNNING`。同次 JSON 的采集时间戳间隔为 438.829 ms，原 `collection_ms` 为 438，`full_collection_ms` 为 1766，`total_report_ms` 为 2250。原完整流程的起点在 Inventory 加载前，早于应急采集，已包含连接准备和版本探测。`diagnosed_at` 来自诊断对象组装，至 `report_written_at` 的 537.081 ms 包含后续诊断处理和 HTML 生成，无法用作文件写入耗时。原 `report_write_ms` 固定为 null，`report_write_duration_ms` 已测量打开、写入和关闭文件，但受时钟分辨率与整数舍入影响。当前 Windows Python 的 `monotonic()` 分辨率为 15.625 ms，`perf_counter()` 为 0.0001 ms。
+
+**修复口径。** SQL Server 状态统一显示为可运行、运行中、挂起、空闲，未知原生状态按原值展示，诊断 JSON 保留数据库原始状态。`collection_ms` 从应急采集开始到采集阶段结束，含交错的数据处理和分诊。`full_collection_ms` 从 Inventory 加载前计到诊断组装结束。`report_write_duration_ms` 从打开 HTML 文件到正文刷新完成，`report_write_ms` 保留为同值兼容字段。`total_report_ms` 从 Inventory 加载前计至正文刷新完成，计入 HTML 组装。计时使用单调高分辨率时钟，正耗时不足 1 ms 显示为 1 ms。计时字段回填、文件关闭、最终 JSON 序列化及标准输出在总耗时终点之后。`report_written_at` 仍记录文件成功关闭后的业务时间。没有采集的耗时使用 null 或「未测量」。Slow 的计时说明位于高级诊断附录，`disk-growth` 复用同一计时口径。
+
+**历史文件核验。** 参考 HTML SHA-256 为 `5edcaeee9e185771806e3b8c8806378e00b8897e562558f41ee57bee65ec1e53`，JSON 为 `2ae98e371f8d0349215437342c89073fa119d11e32ea87a42cc1cbf3052cf856`，均与修改前一致。离线兼容性回归覆盖旧数值、null、缺失字段以及历史 0 ms。
+
+`ISOLATED_OFFLINE_TEST`：修改前定向 pytest 284 passed，修改后 298 passed。新增用例覆盖四种状态、大小写、未知状态及转义、原始 JSON 状态不变、初始化与采集时间区间、短写入、写入失败清理、覆盖保护和 HTML/JSON 计时一致性。全量 pytest 1458 passed、3 skipped、0 failed。跳过原因分别为 Windows 缺少 POSIX 权限位、当前令牌无法创建符号链接、真实系统测试未启用。全量运行将临时目录设在工作区 `.tmp`，避开隔离环境默认临时目录的写入限制。Ruff、Strict MyPy、`dba validate`（示例 Inventory，118 个 SQL 脚本）、`git diff --check` 通过。
+
+`NOT_EXECUTED`：本轮修复后的真实数据库复验。现有报告只作为问题复现依据，P5 状态以 Backlog 为准。
+
+## 78. V091-P5-WORKBENCH-001 — Slow 离线报告按 V1 工作台原型适配 — 2026-11-12
+
+**范围。** 以 `docs/design/DBAToolkit_Incident_Workbench_V1_Final_Prototype.html` 为界面基线，只修改 `slow_report.html`、Presenter 与共享 Renderer。报告仍为离线 HTML：页签、会话详情抽屉、人工处置参考弹窗、展开、检索、复制和打印均在页内完成，不连接数据库，不自动刷新，不切换样本。未修改任何 Collector、Registry SQL 或 JSON 结构；`ReportModel`、`HumanReportPolicy`、finding/evidence 关联与 ReferenceCommand 纯文本机制保持不变。原有 DOM 锚点顺序与 `#current-requests`、`#blocking-chain`、`#session-appendix` 等 ID 保留。
+
+**口径。** SQL Server 请求级 CPU、逻辑读、物理读、写入标注「自请求开始累计」，并注明单次采集、不是采样区间增量；MySQL 检查行数和影响行数标注「当前语句截至采集」。Oracle 当前请求不再展示 V$SQL 子游标累计 CPU、Elapsed、Buffer Gets、Disk Reads 和 Executions，改为「未采集」并说明原因；JSON 中的原始 `sql_cumulative_*` 字段和 Top SQL 功能不变。PostgreSQL 请求级资源计数显示「不支持」。客户端源端口：PostgreSQL 展示 `client_port`，SQL Server 与 Oracle 显示「未采集」及原因，MySQL 说明端口包含在 `PROCESSLIST_HOST` 原值中。新增「执行计划状态」：每条当前请求按原生标识关联，计划状态均为「未获取」，并给出独立 `dba diagnose … plan` 命令；没有当前请求时不展示历史计划。新增「资源证据采集范围」，说明采样区间增量、实例级资源压力和主机资源均未采集，不显示为 0。版本缺失时实例标签显示「（版本未知）」。
+
+`ISOLATED_OFFLINE_TEST`：定向 pytest（`test_html_reports.py`、`test_slow.py`、`test_slow_report_interactions.py`）180 passed。新增四库参数化用例覆盖计划状态、计划命令、端口状态、资源范围、连接地址与页签；无当前请求时的计划状态单独覆盖。Node VM 交互用例实际执行，覆盖页签切换、跳转时展开所在折叠块、会话抽屉、Esc 与遮罩关闭、处置参考克隆去除 ID、委托复制、检索和打印。全量 pytest 1452 passed、3 skipped、0 failed；HEAD `a84812c` 收集 1450 项，本轮收集 1455 项。跳过原因同 §77。Ruff、Strict MyPy、`dba validate`（4 个资产，118 个 SQL 脚本）、`git diff --check` 通过。
+
+`ISOLATED_OFFLINE_TEST`（人工查看用样例）：用合成数据生成 `reports/offline-samples/slow_workbench_{sqlserver,oracle,postgresql,mysql}_synthetic.html`（目录被 `.gitignore` 忽略）。数据全部为合成夹具，不是数据库采样。在浏览器中检查了 SQL Server 总览、执行计划页、会话抽屉和 Oracle 资源页。
+
+`NOT_EXECUTED`：真实数据库报告复验，包括 §75 SQL Server 2022 A–D 和 `scripts/acceptance/verify_sqlserver_slow_snapshot.ps1` 对新模板 DOM 的宿主机解析。
+
+## 79. V091-P5-WORKBENCH-001 — Slow HTML 回归 V1 Demo 六页工作台 — 2026-11-12
+
+**范围。** 在 §78 基础上，以 `docs/design/DBAToolkit_Incident_Workbench_V1_Final_Prototype.html` 为唯一界面基线，重写 `slow_report.html`。报告分为诊断总览、活跃会话、阻塞分析、当前执行 SQL、执行计划、资源与引擎诊断六页。本轮修改 `slow_report.html`、`presenters.py`、`html_renderer.py` 和相关测试，并在 `docs/TODO.md` 登记待开发项。Collector、Registry SQL、诊断规则、JSON 契约、权限与凭据体系均未改动。Backlog 状态未改。已保留的锚点包括 `#summary`、`#root-assessment`、`#current-requests`、`current-request-NNN`、`#blocking-chain`、`#manual-action`、`#transactions`、`#evidence` 和 `#session-appendix`，以及验收脚本依赖的 status-pill、hero-description、请求卡片首个 `<code>`/`data-copy` 和截断标记。§78 的「资源证据采集范围」(`resource-context`) 已由「资源概况」(`wb-resources`) 取代；「执行计划状态」改为按影响排序的 TOP 5，状态显示为「待开发」或「不支持」，不再使用「未获取」。
+
+**已实现（仅使用已采集证据）。**
+- **诊断总览**：KPI 卡、首要结论与优先级、业务影响 TOP 3（点击打开会话抽屉）、关键资源指标、实例与采集信息。总览不重复 SQL、事务或来源。
+- **活跃会话**：列表（Session、状态、用户、主机、客户端、程序、运行时间、CPU、逻辑读、物理读、等待事件、阻塞者），支持检索与分类筛选；行点击打开抽屉，展示完整来源、事务与 SQL。
+- **阻塞分析**：根阻塞横幅、分层阻塞关系图、根阻塞者详情（事务、来源、当前 SQL 及可靠来源的上一条 SQL、原始锁等待资源）、下游受阻会话表和人工处置参考弹窗。
+- **当前执行 SQL**：按影响排序的列表，可检索；行点击切换右侧请求详情和资源卡。
+- **执行计划**：左侧 TOP 5、右侧 SQL、计划标识与计划树占位，并附独立 `plan` 命令及复制按钮。
+- **资源与引擎诊断**：CPU、内存、I/O、并发、采样方式、区间增量六张卡，以及按引擎的专项信号。
+
+上一条 SQL 只取会话绑定的可靠来源：SQL Server 根阻塞者 `last_sql`、Oracle 根阻塞者 `previous_sql`、PostgreSQL 根阻塞者 `last_query` 和非 active 会话的 `query`。其他会话显示「待开发」或「未采集」。
+
+**状态口径。** 只使用「待开发」（功能未实现）、「未采集」（功能存在但本次无数据）、「不支持」（引擎或版本不提供）三种状态，0 只用于真实采集到的 0。
+- 显示「待开发」的项目：实例与主机 CPU/内存/I/O、区间增量、锁对象（库/表/索引）、锁模式、内嵌计划与运行统计（SQL Server、Oracle）、SQL Server/Oracle 非根会话及 MySQL 的上一条 SQL、Oracle 当前执行 CPU/读取、MySQL 单语句 CPU、高并发无主导慢 SQL 诊断和各引擎专项信号。
+- 显示「不支持」的项目：PostgreSQL/MySQL 的计划，PostgreSQL 的 CPU/读取，MySQL 的逻辑读/物理读。
+
+这些项目已登记在 `docs/TODO.md`「Slow HTML 工作台中显示「待开发」的能力」，区间增量和资源契约只引用 V091-P2-TOPSQL-DELTA-001 与 V091-P2-RESOURCE-CONTEXT-CONTRACT-001。
+
+`ISOLATED_OFFLINE_TEST`：全量 pytest 1457 passed、3 skipped、0 failed，跳过原因同 §77。
+- **更新的测试**：21 个原有用例按新结构更新断言，即 KPI 取值、计划表结构、资源概况、SQL 详情与资源卡位置和导航标题；数据不变式保持不变。
+- **新增的用例**：
+  - PostgreSQL、MySQL、Oracle 三个参数化用例，覆盖上一条 SQL 来源、计数器状态、资源与专项信号状态、总览不含 SQL、抽屉明细数量与会话筛选；
+  - SQL Server 根阻塞者有、无 `last_sql` 两个用例，覆盖上一条 SQL 只出现一次 `<code>`、锁对象与锁模式为「待开发」以及受阻会话表。
+- **Node VM 交互用例**：实际执行并已重写，覆盖页签与锚点跳转、展开全部、会话检索与分类筛选组合、SQL 行选择、键盘操作与检索、计划选择、抽屉克隆去除 ID、TOP 3 打开会话、抽屉内链接关闭并跳转、Esc 与遮罩关闭、处置参考弹窗、复制和打印前后状态恢复。
+- **静态检查**：Ruff、Strict MyPy（78 个源文件）、`dba validate`（4 个资产，118 个 SQL 脚本）、`git diff --check` 通过，仅有行尾提示。
+- **验收脚本**：静态核对 `scripts/acceptance/verify_sqlserver_slow_snapshot.ps1` 的 DOM 解析依赖，status-pill、hero-description、`current-requests` 至 `blocking-chain` 区间内的请求卡片顺序、首个 `<code>`/`data-copy` 和截断标记均保留；未在宿主机运行该脚本。
+
+`ISOLATED_OFFLINE_TEST`（合成样例）：重新生成 `reports/offline-samples/slow_workbench_{sqlserver,oracle,postgresql,mysql}_synthetic.html`，大小分别为 89,679、68,028、67,943、68,291 字节，SHA-256 前 16 位为 `85190E69F81EAB37`、`5D6A450F79D37189`、`8CC78CD610980BA1`、`C9425658600B5671`。数据全部为合成夹具。本地浏览器检查了 SQL Server 六页与会话抽屉、MySQL 资源页和 PostgreSQL 执行计划页（「不支持」状态）。浏览器中按 Esc 关闭抽屉未能在自动化中确认，改由 Node VM 用例覆盖。
+
+`NOT_EXECUTED`：真实数据库报告复验，§75 SQL Server 2022 A–D，以及验收脚本在宿主机上对新模板的实际解析。
+
+## 80. V091-P5-WORKBENCH-001 — 资源诊断边界：数据库内部指标与主机指标分离 — 2026-11-12
+
+**范围。** 按用户确认的资源边界，只调整资源诊断的展示和文档；六页布局、颜色、组件、Collector、Registry 和数据契约均未改动，Backlog 状态未改。主机 CPU、MEM、IO 不在 Toolkit 范围，不开发 Zabbix API、操作系统 Agent 或主机资源采集，报告中也不再显示为「待开发」。`docs/TODO.md` 删除了「实例与主机 CPU、内存、I/O 资源卡」和泛化的「数据库引擎专项信号」两项，「高并发无主导慢 SQL」一项收窄为只依据数据库内部证据，并新增资源指标边界说明。§79 中关于主机资源、引擎专项信号和高并发诊断显示「待开发」的描述，以本节为准。
+
+**展示。** 资源页和总览改为「数据库内部资源」，卡片按当前请求的数据库等待计数：
+- **CPU 调度等待**：SQL Server 为可运行或 SOS_SCHEDULER_YIELD，Oracle 为 Scheduler 等待类；
+- **内存授予等待**：SQL Server 为 RESOURCE_SEMAPHORE；
+- **I/O 等待**：SQL Server 为 PAGEIOLATCH_*/WRITELOG/IO_COMPLETION，PostgreSQL 为 wait_event_type=IO，MySQL 为 wait/io/*，Oracle 为 User/System I/O 且正在等待；
+- 原有的并发、采样方式和区间增量（待开发，归属 V091-P2-TOPSQL-DELTA-001）三张卡保留。
+
+引擎视图不提供某类等待时显示「不支持」，活动请求采样不完整时显示「未采集」，采样完整时 0 为真实计数。
+
+**资源判断规则。** 同类等待的请求不少于 2 个时，显示「数据库侧观测到资源竞争迹象」，并提示结合 Zabbix 或主机 CPU、MEM、IO 监控人工核实，同时说明单次采样不能确认容量瓶颈。未达到该条件时只显示「数据库侧未观测到足以判断资源瓶颈的竞争证据」；采样不完整时不给出判断。任何情况下都不给出扩容建议。引擎专项信号只保留有真实值或已有独立命令的项目，即 SQL Server 内存授予（memory-grant 命令）、PostgreSQL idle in transaction 计数和 WAL/复制槽（已有诊断命令）。其他引擎显示「本报告未提供该数据库的专项信号」。
+
+`ISOLATED_OFFLINE_TEST`：全量 pytest 1460 passed、3 skipped、0 failed，跳过原因同 §77。新增 SQL Server 参数化用例覆盖三种情况：I/O 竞争迹象、证据不足和采样不完整。断言包括字段值、判断文本在总览和资源页均出现、不出现主机指标卡、不出现「扩容」。已有的四库用例更新为新卡片状态。Ruff、Strict MyPy（78 个源文件）、`dba validate`（4 个资产，118 个 SQL 脚本）、`git diff --check` 通过。重新生成的四个合成样例中，SQL Server 为「0 个请求」及「证据不足」；其余三库的合成夹具不含采样元数据，显示「未采集」且不给出判断。各样例均不含主机指标卡或「扩容」。样例大小分别为 88,990、67,407、67,635、67,603 字节，SHA-256 前 16 位为 `CCA9484AD35D9B29`、`5F09DB20E1C8A1FC`、`7BDF779D8010069A`、`11B0090216FAB558`。
+
+`NOT_EXECUTED`：真实数据库复验；本轮未做浏览器视觉复查（仅文本与 DOM 断言）。
+
+## 81. V091-P5-WORKBENCH-001 — 独立并发事务阻塞脚本
+
+`DBAToolkit-LoadTest` 的四个阻塞入口现在从同目录 `local_config.py` 读取本机样例库的连接信息。启动负载无需 Toolkit CLI、Inventory、项目设置或监控凭据会话。`--sessions 100 --duration 45` 启动一个未提交的持锁事务及 99 个等待会话。`--role holder` 和 `--role waiter` 可在多个 PowerShell 窗口分开运行。持锁方回滚后，等待方完成冲突语句并各自回滚。README 第 8 节提供两种运行方式。
+
+`ISOLATED_OFFLINE_TEST`：四库 100 会话预览及 PostgreSQL 两种分离角色预览均通过，使用 `python -S` 验证入口无需安装 Toolkit 即可启动预览。阻塞脚本与静态配置读取器定向 pytest 40 passed，覆盖仅使用合成 `local_config.py`、拒绝非本机或非样例库目标、并发等待及中断回滚。Ruff、Strict MyPy、README 的 PowerShell 语法检查和 `git diff --check` 通过。
+
+`NOT_EXECUTED`：真实数据库阻塞与解除验证。实际本地配置和凭据未读取。
+
+## 82. V091-P5-WORKBENCH-001 — SQL Server 请求状态分类与高并发/阻塞去重 — 2026-11-12
+
+**问题来源。** 真实报告 `reports/sqlserver2022_slow_20261112_221142.html`（高并发）和 `reports/sqlserver2022_slow_20261112_221745.html`（阻塞）没有对应 JSON，本节据 HTML 分析。逐请求卡片已正确显示「挂起」，但并发聚合只统计可运行和运行中，其余 100 条显示为「其他或状态未采集」。`dba/slow.py` 只做原始小写字符串比较，没有 SUSPENDED 或 UNKNOWN 的计数。HIGH_CONCURRENCY 仅按请求数不小于 `high_concurrency_threshold` 触发，与阻塞图无关，所以在阻塞堆积中与 BLOCKING 重复出现。
+
+**修复。**
+- `sqlserver_request_status` 只规范化请求的 `status` 列：running、runnable、suspended、sleeping、background 映射为大写状态，NULL、缺失或无法识别的值记为 UNKNOWN，不使用 `wait_type` 推断状态。
+- `details.concurrency` 新增以下字段，原有字段保持不变：
+  - `request_status_counts` 和 `wait_type_counts`（LOCK、WAITFOR、OTHER、NONE）。两者分别统计，各自之和等于请求数；
+  - `running_requests`；
+  - `requests_in_blocking_graph`、`blocking_graph_complete` 和 `high_concurrency_explained_by_blocking`。
+- 仅当同时满足以下条件时，不再生成 HIGH_CONCURRENCY，请求堆积改为计入 BLOCKING 的影响范围（在 BLOCKING 证据中追加活动请求数、图内请求数和阈值）：
+  - 存在被阻塞请求；
+  - 活动请求采样完整，且阻塞图没有异常；
+  - 每条活动请求都在阻塞图中；
+  - 请求数达到原有阈值。
+- 未新增阈值，Finding ID 与 WAITFOR 和根阻塞可信度规则均未改动。
+- 阻塞图不完整、存在异常，或有不在图中的请求时，保留 HIGH_CONCURRENCY，并在其证据中记录图内和图外请求数。
+- HTML 的并发聚合、当前 SQL 列表摘要和资源页并发卡读取与 JSON 相同的计数，未知状态显示为「状态未知」。
+- 其他引擎的逻辑未改动。
+
+**行为变化。** 在场景 B（完整阻塞图覆盖全部请求）中，「高并发 SQL 聚合分析」小节和高并发问题不再出现。请求状态与等待类型计数保留在当前 SQL 列表摘要和资源页中。
+
+`ISOLATED_OFFLINE_TEST`（合成夹具，非真实采集）：新增 `tests/test_slow_status_concurrency.py`，共 18 个用例。
+- **A**：85 条请求（可运行 69、运行中 16），无阻塞，CPU 调度等待 69，101 个会话不计为请求。
+- **B**：100 条请求全部挂起，根阻塞者为 55，被阻塞 99，LCK_M_X 99 条，WAITFOR 1 条，无重复 HIGH_CONCURRENCY。
+- **C**：分别为另有 60 条独立可运行请求、活动请求截断、阻塞图异常三种情况，均保留 HIGH_CONCURRENCY。
+- **状态规范化**：9 种取值。
+- **D**：状态缺失记为 UNKNOWN，不推断状态，采样完整与截断两种情况下完整性均正确。
+- **E**：在 A 和 B 中核对 HTML 与 JSON 的总数、状态、等待、根阻塞与被阻塞数、问题与严重度、结论和完整性是否一致。
+
+`test_concurrency_and_ranking` 的精确期望字典只追加了新字段，原有断言未删改。全量 pytest 1478 passed、3 skipped、0 failed。Ruff、Strict MyPy（78 个源文件）、`dba validate`（4 个资产，118 个 SQL 脚本）和 `git diff --check` 通过。
+
+生成的合成报告位于 `reports/offline-samples/`，JSON 已对 `credential_alias` 脱敏：
+
+| 文件 | 字节 | SHA-256 前 16 位 |
+|---|---|---|
+| `slow_status_fix_high_concurrency_synthetic.html` | 537,204 | `476CF063664E3B76` |
+| `slow_status_fix_high_concurrency_synthetic.json` | 56,950 | `163BE31C29699959` |
+| `slow_status_fix_blocking_synthetic.html` | 674,290 | `F9F35BE79ABC4432` |
+| `slow_status_fix_blocking_synthetic.json` | 202,190 | `65B97F87D4AAB5C8` |
+
+`NOT_EXECUTED`：在 SQL Server 2022 上重新采集两种真实场景，并核对同次采集的 HTML 与 JSON。原两份真实报告没有 JSON，无法离线重渲染。
+
+## 83. V091-P5-LOCK-OBJECT-SQLSERVER-001 — SQL Server 锁对象解析 — 2026-11-12
+
+**基线。** 分支 `feature/top-sql-readable-report-20261108`，HEAD `a84812c`，开始时保留了原有未提交修改与未跟踪文件。Backlog 中没有同类任务，因此新登记为 `V091-P5-WORKBENCH-001` 的子任务，与资源上下文契约任务没有冲突。
+
+**根因。** Slow 只从 `sys.dm_exec_requests.wait_resource` 取得等待方的原始资源字符串，没有采集 `sys.dm_tran_locks`。因此无法得到对象名，也无法区分持有方和等待方的锁模式，HTML 中这两项显示「待开发」。
+
+**实现。**
+- 新增经审查的只读 Registry 脚本 `lock_resources`，`max_rows` 2000，超时 10 秒。
+  - 只读取存在 WAIT、CONVERT 或低优先级等待请求的资源，以及这些资源上的全部请求。
+  - 资源身份包括资源类型、数据库 ID、关联实体 ID、资源描述和锁分区。
+- 对象映射规则：
+  - OBJECT 的实体 ID 就是 object_id，名称来自 `OBJECT_NAME`/`OBJECT_SCHEMA_NAME(id, resource_database_id)`，这两个函数接受数据库 ID，不需要动态 SQL。
+  - KEY、PAGE、RID、HOBT、OIB 通过 `sys.partitions.hobt_id` 精确关联。
+  - ALLOCATION_UNIT 先查 `sys.allocation_units`：type 1、3 按 hobt_id 关联分区，type 2 按 partition_id 关联。
+  - 再由分区关联 `sys.objects`、`sys.indexes` 与 schema。
+  - 所有目录视图的关联条件都限定 `resource_database_id = DB_ID()`。连接数据库以外的 HoBT 或分配单元资源明确降级，不切换数据库，不扫描实例。
+- 两个 SQL Server Slow 配置（2008 R2 与 2012–2022）都把它路由为最后一个可选采集器，仅在完整阶段采集，不进入应急首轮。
+- 结果写入 `details.lock_resources`：
+  - 记录状态，以及原生资源字段、对象、解析结果与原因；
+  - 列出每条请求的会话、模式、状态与角色（持有、等待、转换中、未知）；
+  - 对等待方，记录其直接阻塞者是否持有同一资源；
+  - 记录未匹配的锁等待。
+- 每个根阻塞者增加 `held_lock_resource_ids`。HTML 阻塞页的「锁对象与影响范围」卡片和 CLI 根阻塞候选使用同一组文本，原有的「锁等待资源（原始值）」保留。
+- 锁证据单独记录完整性：失败、截断或缺失只影响锁对象字段，不改变原有阻塞、事务、根阻塞、人工处置和总体完整性结论。CLI 出错时也不再用锁采集失败替代真正的错误。
+- 部署权限文档补充了锁 DMV 与元数据可见性边界，未新增任何授权。
+
+**测试调整。** 两项已有断言原先把 SQL Server 锁对象和锁模式固定为「待开发」，现改为「未采集」并附原因；这些夹具没有锁 DMV 样本。CLI 测试中允许执行的脚本清单加入了 `lock_resources`。其余已有断言没有改动。
+
+`ISOLATED_OFFLINE_TEST`（合成夹具，非真实采集）：
+- 新增 `tests/test_sqlserver_lock_resources.py`，共 40 个用例。
+  - T1–T14 全部覆盖：OBJECT、KEY、PAGE/RID、HOBT/OIB、ALLOCATION_UNIT 的 5 种类型值、堆表、分区表、跨数据库（含 SQL 中每个目录关联都受数据库限定的静态检查）、元数据不可见、HoBT 缺失、8 种锁状态与持有/等待/转换分离、多资源不合并、未知或非对象资源类型。
+  - 同一份 JSON 生成的 HTML 与 CLI 文本一致。
+  - 锁证据缺失、失败或为空时，发现项、根阻塞、阻塞图、事务、可见性与完整性都与无锁证据的基线一致。
+  - 截断和未匹配的锁等待都会标记关联不完整。
+  - 版本路由校验通过，且只路由到 SQL Server。
+- 全量 pytest 1518 passed、3 skipped、0 failed。Ruff、Strict MyPy（79 个源文件）、`dba validate`（4 个资产，119 个 SQL 脚本）、`git diff --check` 通过。
+- 本地浏览器查看了已解析样例的阻塞页卡片。
+
+合成样例位于 `reports/offline-samples/`，JSON 已对 `credential_alias` 脱敏：
+
+| 文件 | 字节 | SHA-256 前 16 位 |
+|---|---|---|
+| `slow_lock_object_resolved_synthetic.html` | 89,089 | `EDB7D7F51D718B29` |
+| `slow_lock_object_resolved_synthetic.json` | 48,298 | `8A8F47B24F3AB249` |
+| `slow_lock_object_resolved_synthetic.txt`（CLI） | 3,952 | `164541605F0FF997` |
+| `slow_lock_object_unresolved_synthetic.html` | 89,400 | `1A7431581367C5B5` |
+| `slow_lock_object_unresolved_synthetic.json` | 50,150 | `7DBDC437F50123F7` |
+| `slow_lock_object_unresolved_synthetic.txt`（CLI） | 4,263 | `F38C9DA7653FD1E7` |
+
+**版本与权限边界。** 2008 R2–2019 仅为语法与路由层面的兼容目标，没有实机证据。§75 记录的待核验资产连接数据库为 `master`，而实验室阻塞负载位于 `AdventureWorks2022`。按本节规则，该负载产生的 KEY 锁会显示「资源位于其他数据库」，不会给出表名。只有资产连接到资源所属数据库，且监控账号在该库具备元数据可见性时，才能解析到表和索引。是否调整资产或授权由用户决定，Toolkit 未做任何更改。
+
+`NOT_EXECUTED`：SQL Server 2022 真实阻塞 E2E，包括解析到具体库、表和索引，持有锁与等待锁，跨库或元数据不可见时的降级，以及同次采集的 HTML、JSON 与 CLI 一致性。
+
+## 84. SQL-TIMEOUT-CONFIG-002 — 全局诊断 SQL 超时配置与有效超时计算 — 2026-11-13
+
+**证据类型：** `ISOLATED_OFFLINE_TEST`（Windows 本机 `.venv`，Fake 驱动与单元测试；未连接任何数据库）。基线 HEAD `a84812c`，工作树含此前未提交的 P5 修改。
+
+**范围。** 依用户 2026-11-13 批准的 C-11：新增 `diagnostic_sql_timeout_seconds`（默认 30、范围 1..60，仅 `diagnostics:` 段）；有效超时 = min(脚本 timeout_seconds, 全局值[, 可选的 query_timeout/call_timeout 上限])；`SqlDeadline` 绝对期限基础实现（未接入 Fetch）。四个 Adapter 改用共享解析；本机 `config/runtime.yaml` 删除 10 秒 query_timeout/call_timeout（用户选择；该文件被 git 忽略，新部署由代码默认值 30 秒生效）。
+
+| 检查 | 结果 |
+|---|---|
+| `tests/test_sql_timeout.py`（新增） | 74 passed |
+| 四引擎 Adapter 超时接入测试（新增） | 12 passed |
+| 完整 pytest | 1604 passed，3 skipped |
+| Ruff | All checks passed |
+| MyPy strict（80 个源文件） | 无问题 |
+| `dba validate` | 4 个资产，119 个 SQL 脚本通过 |
+| `git diff --check` | 无空白错误 |
+
+**覆盖的断言。** 默认 30 秒；较短脚本限制保留；全局值为上限；配置的旧上限只能缩短；非法值（0、61、布尔、字符串、null、浮点）被拒绝；引擎段和 Inventory 不能重定义全局值；`diagnostics:` 段可单独或与 slow 阈值一起配置；代码默认设置下 119 个脚本有效超时均为 min(脚本, 30)；本机 `config/runtime.yaml`（被 `.gitignore` 忽略，不随仓库发布）经一次性加载核对，四引擎全局值均为 30 且无旧上限，该核对不属于自动化测试；Deadline 在 Execute 与后续 Fetch 间共享，不重新获得完整时长；SQL Server/Oracle 按脚本下发，PostgreSQL/MySQL 连接级值与审计 `timeout_seconds`、`effective_timeout_seconds` 一致。
+
+**测试调整。** `tests/test_sqlserver_top_sql_acceptance.py` 的设置替身由 `SimpleNamespace` 改为真实 `SQLServerSettings(query_timeout=10)`，因为验收脚本现在调用共享解析方法；超时值不变。
+
+**行为变化。** 默认部署下 SQL Server 与 Oracle 的 3 个 Top SQL 脚本（声明 15 秒）实际下发值由 10 秒变为 15 秒。PostgreSQL/MySQL 连接级值仍为 5 秒。
+
+`NOT_EXECUTED`：任何真实数据库执行；超时分类、Fetch 期限接入、PostgreSQL 网络保护、MySQL `max_execution_time` 与 `KILL QUERY`、数据库端取消验证（后续 `SQL-TIMEOUT-*` 任务）。
+
+**人工验收决定（2026-11-13）。** 用户正式接受 `SQL-TIMEOUT-CONFIG-002` 的上述实现与配置决定：全局默认 30 秒；有效超时取单脚本、全局及可选更严格上限中的最小值；SQL Server/Oracle Top SQL 保持 15 秒；不恢复本地 runtime.yaml 的 10 秒限制；PostgreSQL/MySQL 当前 5 秒限制暂时保留。CONFIG-002 状态依 Backlog 规范更新为 `DONE`，父任务 `SQL-TIMEOUT-001` 仍为 `IN_PROGRESS`。本人工验收只依据已记录的实现和历史证据，不表示本轮重新执行了 §84 中的测试；§84 的 `1604 passed, 3 skipped` 等结果继续标记为原有 `ISOLATED_OFFLINE_TEST` 证据。
+
+## 85. SQL-TIMEOUT-CLASSIFY-003 — 四种数据库错误与取消分类 — 2026-11-13
+
+**证据类型：** `ISOLATED_OFFLINE_TEST`（Windows 本地 `.venv`，Fake Drivers/合成异常；未连接真实数据库）。
+
+**实现范围。** 在现有 `DatabaseErrorDetail` / `ToolkitError.database_error` 中增量添加 `error_category` 和 `timeout` 证据对象；未创建并行错误体系，未修改 `SqlDeadline` 或全局有效超时算法。超时证据包含 Execute/Fetch 阶段、已应用/有效/脚本超时秒数、实际耗时、取消状态、连接处置、相对 SQL 脚本路径及适用的取消机制和原因。原有数据库类型、驱动、原生错误码、SQLSTATE、分类、消息、detail/hint/context 字段保留。相同的错误对象由 HTML、JSON、CLI 与 JSONL 路径呈现；固定机密与凭据继续脱敏，数据库驱动原始消息以清理后的形式保留。
+
+**分类规则。**
+
+- SQL Server：查询阶段 HYT00 → `TIMEOUT`，记录实际 Execute/Fetch 阶段及驱动报告；连接阶段 HYT01 → `TIMEOUT`，记录 `execution_phase=Connection`、连接超时机制，取消状态为 `NOT_APPLICABLE`。两者均不宣称已确认数据库停止；HY008 → `CANCEL_STATUS_UNKNOWN`；SQLSTATE 08 类 → `CONNECTION_LOST`；已知权限拒绝原生码 → `PERMISSION_DENIED`；其余查询错误 → `SQL_EXECUTION_ERROR`。
+- PostgreSQL：57014 始终表示服务端确认 query_canceled，但不单独说明原因。服务端原始诊断消息明确报告 `statement timeout` / `statement_timeout` 时，才归类为 `TIMEOUT` 并保留已确认取消；明确报告用户请求或恢复冲突时保留对应原因。其余情况保持 `CANCELLED_CONFIRMED`、原因未知并保留脱敏后的原始错误，不根据配置阈值和耗时推断来源。08 类 → `CONNECTION_LOST` + 取消未确认；客户端网络超时且无服务端 57014 时 → `TIMEOUT` + `CANCEL_STATUS_UNKNOWN`。
+- MySQL：3024 → `TIMEOUT` + 服务端 `max_execution_time` 确认；1317 → `CANCELLED_CONFIRMED`（服务端报告查询中断，取消来源未知；不归因于 Toolkit，也不声称执行了 KILL）；2013/2006 → `CONNECTION_LOST` + 取消状态未知；1205 → `TIMEOUT`；客户端 socket timeout → `TIMEOUT` + 服务端停止未确认。没有执行 KILL 或新增取消机制。
+- Oracle：DPY-4024 → `TIMEOUT` + `DRIVER_REPORTED`；DPY-4011/DPY-1001/驱动明确报告 session dead → `CONNECTION_LOST` + 取消未确认；ORA-01013 → `CANCELLED_CONFIRMED` 且取消来源未知；已知权限错误 → `PERMISSION_DENIED`；code=0 不会单独推导超时/取消。
+- `UnsupportedVersion` 映射为 `VERSION_UNSUPPORTED`；普通未识别数据库执行错误映射为 `SQL_EXECUTION_ERROR`。已应用适配器错误路径会记录连接是否已丢弃；关闭失败记为 `UNKNOWN`。保留当前适配器遇到查询错误时关闭连接的既有生命周期行为。
+
+**测试与验证。**
+
+| 检查 | 结果 |
+|---|---|
+| 初始分类测试轮次 | 34 passed；该结果早于本节末尾的最终验收前核对 |
+| 最终验收前针对性核对 | 49 passed；该结果早于本轮 PostgreSQL 来源判定修正 |
+| 全量 pytest（本轮最终验证） | **1650 passed，3 skipped，0 failed** |
+| 完整 pytest（此前实现检查点） | 1640 passed，3 skipped；保留为历史结果 |
+| Ruff（`dba`、`tests`） | All checks passed |
+| Strict MyPy | 80 个源文件，无问题 |
+| `dba validate` | 4 个资产、119 个 SQL 脚本通过 |
+| `git diff --check` | 通过；仅有 Git 既存 LF→CRLF 提示 |
+
+检查属于 Fake/合成离线验证，不是真实数据库端取消验证。原有 **1640 passed，3 skipped** 和先前 **49 passed** 均属于本轮最终验证之前的检查点；§84 的 **1604 passed，3 skipped** 仍是 CONFIG-002 的历史结果。此次最终复核发现 PostgreSQL 57014 曾在仅配置阈值与耗时达到时被推断为 `statement_timeout`；现已改为要求服务端诊断消息提供该原因证据，否则保留 `CANCELLED_CONFIRMED`、原因未知。最终全量 pytest **1650 passed，3 skipped**；Ruff（`dba`、`tests`）、Strict MyPy（80 个源文件）、`dba validate`（4 个资产、119 个 SQL 脚本）和 `git diff --check` 全部通过。没有连接数据库，系统测试 opt-in 已关闭；没有读取真实凭据、执行 GRANT/REVOKE/KILL、提交、推送或发布。此前工作区未提交内容均保留。
+
+**未实现与边界。** 在本节实现检查点，`SqlDeadline` Fetch 接入和 PostgreSQL 客户端网络保护仍属 `DEADLINE-004`；MySQL `max_execution_time`/受控 `KILL QUERY` 仍属 `MYSQL-005`；各引擎真实服务端停止确认仍属后续取消验证任务。HYT00 与 DPY-4024 记录为驱动报告；MySQL 2013、网络错误和 socket 超时均不证明数据库端查询停止。未做真实 E2E，标签为 `NOT_EXECUTED`。CLASSIFY-003 代码实现时在 Backlog 标为 `CODE_COMPLETE`；其后用户已正式验收，Backlog 现为 `DONE`。父任务 `SQL-TIMEOUT-001` 继续为 `IN_PROGRESS`。
+
+## 86. SQL-TIMEOUT-DEADLINE-004 — 四种数据库 Execute+Fetch 共享绝对 Deadline — 2026-11-13
+
+**证据类型：** `ISOLATED_OFFLINE_TEST`（受控单调时钟、Fake Drivers 与合成错误；未连接真实数据库）。
+
+**实现范围。** 在已经验收的 CONFIG-002 `SqlDeadline` 和 CLASSIFY-003 `database_error` 基础上增量接入 SQL Server、Oracle、PostgreSQL、MySQL 的单条诊断 SQL 执行流程。一条 SQL 从 Execute 开始到所有 Fetch 完成共用同一绝对 deadline；每次 Fetch 前检查剩余预算，不重新获得完整超时。Execute 后已耗尽时不 Fetch；Fetch 超时会通过现有 shared error 结构记录 `TIMEOUT`、阶段、有效/执行超时证据、取消状态未知和连接处置，并关闭/丢弃状态不确定的连接。未重构 Collector 或错误体系。
+
+**四库行为和边界。**
+
+- SQL Server：在新建 statement cursor 前应用本条 SQL 有效时间预算；Execute 和 Fetch 共享逻辑 deadline，Fetch 前检查剩余量。HYT00 仍按驱动报告处理；本地 deadline 耗尽不声称服务端已停止。ODBC 规范说明 SQLFetch 也可返回 HYT00，且该超时与 `SQL_ATTR_QUERY_TIMEOUT` 关联，故保留 Fetch 阶段的驱动超时分类。[SQLFetch Function — ODBC API Reference](https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlfetch-function?view=sql-server-ver17)
+- Oracle：Execute 前及每次 Fetch 前根据同一 deadline 的剩余毫秒数动态设置 `call_timeout`，避免多次 round trip 重置完整预算；本地 deadline 到期时关闭连接，取消状态保持未确认。
+- PostgreSQL：连接保留现有 `statement_timeout` 上限（取 REQUIRED 脚本配置的最严格值）；若单条 SQL 的有效 Deadline 更短，则执行前通过固定 `pg_catalog.set_config` 将服务端阈值收紧到同一个值，并用 Deadline 限制 psycopg 同步网络等待。没有实现协议级 CancelRequest；服务端返回 57014 才算服务端确认取消，本地等待到期则 `CANCEL_STATUS_UNKNOWN` 并丢弃连接。现有 5 秒连接级限制保留。
+- MySQL：对客户端 socket 读写按共享 deadline 重新设定剩余等待上限，Fetch 阶段通过同一个 deadline 检查；超时为客户端等待到期，不能证明 MySQL 停止查询，连接会关闭/丢弃。保留现有 5 秒连接级限制；未实现 `max_execution_time`、控制连接或 `KILL QUERY`，这些仍属于 MYSQL-005。
+
+**自动化测试覆盖。** 新增受控 fake-clock/fake-driver 测试，覆盖正常 Execute、Execute 消耗部分预算后 Fetch 仅使用余量、多次 Fetch 不重置、Execute 完成时 deadline 已耗尽、Fetch 和多批次累计耗时耗尽、脚本上限低于全局及全局低于脚本的有效值、四个 Adapter 的剩余时间应用和超时连接丢弃，以及超时后 HTML/JSON/CLI/JSONL 保留先前有效结果并一致输出分类/脱敏信息。没有用 sleep 作为唯一的驱动机制验证，也未连接真实数据库。
+
+| 检查 | 结果 |
+|---|---|
+| 全量 pytest | **1663 passed，3 skipped** |
+| Ruff (`dba tests`) | All checks passed |
+| Strict MyPy (`dba`) | 80 个源文件，无问题 |
+| `dba validate` | 4 个资产、119 个 SQL 脚本通过 |
+| `git diff --check` | 通过；Git 报告既有 LF→CRLF 规范化提示 |
+
+全量测试的 pytest 临时目录被限定在工作区下，避免既有 SQL Server acceptance 测试写入隔离环境不可写的系统 `%TEMP%`；在该配置下完整重跑通过。此次修改保留所有既有未提交内容，没有修改 Inventory、执行真实数据库连接、KILL、GRANT、REVOKE、提交、推送或发布。真实数据库执行和数据库端停止行为观测为 `NOT_EXECUTED`；Fake Driver 结果只证明离线逻辑和等待上限，不证明服务端停止。
+
+**遗留边界。** PostgreSQL 没有协议级 CancelRequest；MySQL 服务端 `max_execution_time`/受控 `KILL QUERY` 留给 MYSQL-005；四引擎真实服务端停止验证留给对应取消验证任务。若 MySQL 所用真实驱动不暴露可安全包裹的 socket/read 路径，deadline 保护会 fail closed 并返回错误，而不会静默执行无界等待。Collector 模块隔离及独立模块超时后重连仍属于后续任务。DEADLINE-004 在 Backlog 标记 `CODE_COMPLETE`，等待人工验收；`SQL-TIMEOUT-001` 父任务保持 `IN_PROGRESS`。
+
+## 87. SQL-TIMEOUT-MYSQL-005 — MySQL 服务端 SELECT 超时与 SHOW 取消边界
+
+用户接受 DEADLINE-004 的 PARTIAL 交付并授权本任务。DEADLINE-004 最终复核的历史证据为 1667 passed / 3 skipped，Oracle 的驱动调用累计上限、ODBC 的累计上限和物理连接丢弃仍有未验证边界。
+
+**SELECT。** 首次受审查 Preflight 读取 VERSION()、@@version_comment 和 CONNECTION_ID()，校验后把 ID 与当前 Adapter 连接对象绑定。通过账号安全检查后，识别到的 MySQL 5.7.8 至 5.7 系列末版、8.0 和 8.4 使用固定、参数化的 Adapter 内部 SESSION SET。旧版 5.7 和产品未知时仍用客户端保护，MariaDB 走现有拒绝路径。维持 Registry 的 SQL 检查和原脚本文本。服务端值按 SET 前所剩 Deadline 向下取整至整数毫秒，小于 1 ms 直接超时。SET 往返会进一步消耗客户端预算，发送 SELECT 前复核；SELECT 和全部 Fetch 仍共享原客户端 Deadline。服务端相对计时从语句执行开始，不能扣除 SET 本身的网络往返。
+
+**SHOW 与连接身份。** 四条 SHOW 保留客户端上限。KILL 仅以当前数字 ID 在服务器查找线程；连接断开后的 ID 复用可能发生于核验和发送之间，且同账号权限也可能覆盖其他会话。当前没有能把目标身份与 KILL 原子绑定的受审查机制，故不创建控制连接或提交取消。超时和连接丢失按 CANCEL_STATUS_UNKNOWN 处理并丢弃连接。3024 是服务端超限确认，1317 是服务端中断但来源未知，2006/2013 不能确认停止。CANCEL_REQUEST_ACCEPTED 和 CANCEL_FAILED 无执行路径，相关控制连接测试不适用。独立查询可通过新连接和完整 Preflight 执行；自动调度属于 ISOLATION-006。
+
+**证据。** ISOLATED_OFFLINE_TEST 覆盖版本门控、MariaDB 识别、ID 绑定及清理、毫秒取整、SET 耗尽预算、3024/1317/2006/2013、SHOW 超时不创建控制连接、重连后的独立查询，以及 HTML/JSON/CLI/JSONL 一致性和错误脱敏。真实 MySQL、控制连接实际授权、KILL 和服务端停止观测均为 NOT_EXECUTED。未执行 GRANT/REVOKE。
+
+最终全量 pytest **1682 passed，3 skipped**。Ruff、Strict MyPy（80 个源文件）、dba validate（4 个资产、119 个脚本）和 git diff --check 通过。
+
+## 88. Real database acceptance preflight — 2026-11-14
+
+MYSQL-005 and V091-P5-LOCK-OBJECT-SQLSERVER-001 remain NOT_EXECUTED for this run. The Codex-managed PowerShell Core process could not access the Windows host CIM provider. No asset lookup, Credential Session lookup, database connection, workload, permission change or cancellation was attempted. Existing historical evidence remains recorded above.
