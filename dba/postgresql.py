@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import selectors
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import TracebackType
@@ -15,7 +17,11 @@ from dba.adapters import Adapter
 from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.credentials import CredentialProvider, Mode, validate_monitoring_credential
-from dba.database_errors import normalize_postgresql_error, with_timeout_evidence
+from dba.database_errors import (
+    DatabaseErrorDetail,
+    normalize_postgresql_error,
+    with_timeout_evidence,
+)
 from dba.errors import (
     ToolkitError,
     client_sql_deadline_error,
@@ -32,6 +38,30 @@ POSTGRESQL_TOP_SQL_METRICS = frozenset({
     "total_exec_time", "mean_exec_time", "calls", "shared_blks_read",
     "shared_blks_hit", "temp_blks_written", "wal_bytes",
 })
+_SESSION_SETUP_RESERVE_MS = 250
+_SERVER_RESPONSE_MARGIN_MS = 250
+
+
+def _server_timeout_budget_error(
+    script: SqlScript, deadline: SqlDeadline, phase: str,
+) -> ToolkitError:
+    message = "Insufficient client deadline budget for PostgreSQL statement_timeout; SELECT was not sent."
+    detail = with_timeout_evidence(
+        DatabaseErrorDetail("postgresql", "psycopg", None, None, message, "TIMEOUT",
+                            error_category="TIMEOUT"),
+        execution_phase=phase,
+        timeout_seconds=deadline.timeout_seconds,
+        effective_timeout_seconds=deadline.timeout_seconds,
+        script_timeout_seconds=script.metadata.timeout_seconds,
+        elapsed_ms=int(deadline.elapsed() * 1000),
+        script_path=f"postgresql/{script.metadata.name}.sql",
+    )
+    assert detail.timeout is not None
+    detail = replace(detail, timeout=replace(
+        detail.timeout, cancellation_status="NOT_APPLICABLE",
+        mechanism=None, cancellation_reason=None,
+    ))
+    return ToolkitError("ServerTimeoutBudgetUnavailable", message, database_error=detail)
 
 
 class _DeadlineWaitMixin:
@@ -191,8 +221,8 @@ class PostgreSQLAdapter(Adapter):
         self._password = ""
         self._ready = False
         self._version = ""
-        self._statement_timeout = self.settings.effective_sql_timeout(MAX_SQL_TIMEOUT_SECONDS)
-        self._statement_timeout_cap = self._statement_timeout
+        self._statement_timeout_cap = self.settings.effective_sql_timeout(MAX_SQL_TIMEOUT_SECONDS)
+        self._server_statement_timeout_ms: int | None = None
         self.preflight_checks: dict[str, bool] = {}
 
     def _audit(self, script: str, started: float, error: ToolkitError | None,
@@ -215,10 +245,10 @@ class PostgreSQLAdapter(Adapter):
             scripts = [self.registry.get(name, DatabaseType.POSTGRESQL) for name in self.REQUIRED]
             for script in scripts:
                 self.registry.authorize(script, DatabaseType.POSTGRESQL)
-            # statement_timeout is connection-wide, so it cannot carry per-script limits.
-            self._statement_timeout = min(self.settings.effective_sql_timeout(script.metadata.timeout_seconds)
-                                          for script in scripts)
-            self._statement_timeout_cap = self._statement_timeout
+            self._statement_timeout_cap = min(
+                self.settings.effective_sql_timeout(script.metadata.timeout_seconds) for script in scripts
+            )
+            startup_timeout_ms = self._statement_timeout_cap * 1000
             phase = "Connection"
             driver = self._driver or load_driver()
             try:
@@ -234,11 +264,12 @@ class PostgreSQLAdapter(Adapter):
                 password=credential.password, connect_timeout=self.settings.connect_timeout,
                 sslmode=self.settings.sslmode, application_name="dba-toolkit",
                 options=(f"-c default_transaction_read_only=on "
-                         f"-c statement_timeout={self._statement_timeout * 1000}"),
+                         f"-c statement_timeout={startup_timeout_ms}"),
                 autocommit=True,
             )
             if not self._connection.autocommit:
                 raise ToolkitError("AutocommitRequired", "Driver did not enable autocommit.")
+            self._server_statement_timeout_ms = startup_timeout_ms
             self.preflight_checks["connect"] = True
             self._preflight()
             self._ready = True
@@ -282,6 +313,7 @@ class PostgreSQLAdapter(Adapter):
 
     def _close(self) -> bool:
         connection, self._connection = self._connection, None
+        self._server_statement_timeout_ms = None
         self._ready = False
         self._password = ""
         self._version = ""
@@ -357,6 +389,7 @@ class PostgreSQLAdapter(Adapter):
         script_name = "unregistered"
         execution_phase = "Execute"
         deadline: SqlDeadline | None = None
+        server_timeout_ms: int | None = None
         try:
             self.registry.authorize(script, DatabaseType.POSTGRESQL)
             authorized = True
@@ -369,15 +402,28 @@ class PostgreSQLAdapter(Adapter):
             )
             deadline = SqlDeadline.start(effective_timeout)
             setattr(self._connection, "_dba_sql_deadline", deadline)
-            if self._statement_timeout != deadline.timeout_seconds:
+            execution_phase = "SessionSetup"
+            # The server starts timing after dispatch. Reserve setup and response
+            # time inside the existing client Deadline, rounding the server cap down.
+            remaining_ms = math.floor(deadline.require_remaining(execution_phase) * 1000)
+            candidate_ms = remaining_ms - _SESSION_SETUP_RESERVE_MS - _SERVER_RESPONSE_MARGIN_MS
+            if candidate_ms <= 0:
+                raise _server_timeout_budget_error(script, deadline, execution_phase)
+            if self._server_statement_timeout_ms != candidate_ms:
                 timeout_cursor = self._connection.execute(
                     "SELECT pg_catalog.set_config('statement_timeout', %s, false)",
-                    (f"{deadline.timeout_seconds * 1000}ms",),
+                    (f"{candidate_ms}ms",),
                 )
                 timeout_cursor.close()
-                self._statement_timeout = deadline.timeout_seconds
+                self._server_statement_timeout_ms = candidate_ms
+            server_timeout_ms = candidate_ms
+            deadline.require_remaining(execution_phase)
+            execution_phase = "Execute"
             cursor = self._connection.cursor()
-            deadline.require_remaining("Execute")
+            remaining_ms = math.floor(deadline.require_remaining(execution_phase) * 1000)
+            # SET and cursor creation may consume the setup reserve.
+            if remaining_ms <= server_timeout_ms + _SERVER_RESPONSE_MARGIN_MS:
+                raise _server_timeout_budget_error(script, deadline, execution_phase)
             if parameters is None:
                 cursor.execute(script.text)
             else:
@@ -413,7 +459,7 @@ class PostgreSQLAdapter(Adapter):
                      if not authorized else _driver_error(
                          exc, "Query", self._password, top_sql=script_name == "top_sql",
                          execution_phase=execution_phase,
-                         timeout_seconds=deadline.timeout_seconds if deadline else self._statement_timeout,
+                         timeout_seconds=deadline.timeout_seconds if deadline else self._statement_timeout_cap,
                          effective_timeout_seconds=(deadline.timeout_seconds if deadline else
                                                      self.settings.effective_sql_timeout(
                                                          script.metadata.timeout_seconds)),
@@ -424,7 +470,7 @@ class PostgreSQLAdapter(Adapter):
             error = _driver_error(
                 exc, "Query", self._password, top_sql=script_name == "top_sql",
                 execution_phase=execution_phase,
-                timeout_seconds=deadline.timeout_seconds if deadline else self._statement_timeout,
+                timeout_seconds=deadline.timeout_seconds if deadline else self._statement_timeout_cap,
                 effective_timeout_seconds=(deadline.timeout_seconds if deadline else
                                            self.settings.effective_sql_timeout(
                                                script.metadata.timeout_seconds)),
@@ -450,7 +496,8 @@ class PostgreSQLAdapter(Adapter):
                                        "result_bytes": result_bytes}
             if authorized:
                 details.update({"sql_sha256": hashlib.sha256(script.text.encode()).hexdigest(),
-                                "timeout_seconds": deadline.timeout_seconds if deadline else self._statement_timeout,
+                                "timeout_seconds": deadline.timeout_seconds if deadline else self._statement_timeout_cap,
+                                "server_statement_timeout_ms": server_timeout_ms,
                                 "effective_timeout_seconds": (deadline.timeout_seconds if deadline else
                                                                self.settings.effective_sql_timeout(
                                                                    script.metadata.timeout_seconds)),

@@ -4,17 +4,110 @@
 
 ```text
 CURRENT_PHASE: Long-term / Safety — global diagnostic SQL timeout
-CURRENT_TASK: SQL-TIMEOUT-MYSQL-005
+CURRENT_TASK: SQL-TIMEOUT-CANCEL-VERIFY-009
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.1
-BASE_HEAD_FOR_CURRENT_CHECKPOINT: cdd60198666b303861cc368007f3192f62b560f1
-CURRENT_TASK_DELIVERY: MYSQL-005 partial delivery remains BLOCKED in Backlog. SELECT session timeout passed offline review. SHOW cancellation withheld because MySQL cannot atomically verify the recorded session identity when applying KILL QUERY. See Acceptance §87.
+BASE_HEAD_FOR_CURRENT_CHECKPOINT: e41fbb2b867d4cf08fd652b95cf3a91c19f8f86c
+CURRENT_TASK_DELIVERY: Acceptance §112 records the four-engine V0.9.1 source audit and scoped timeout evidence. Oracle client-side reliability is verified for the lab scenarios in §103. Oracle Net recovery research is non-blocking. Oracle server-side stop remains unconfirmed.
 LAST_COMPLETED_TASK: SQL-TIMEOUT-DEADLINE-004 — user accepted the PARTIAL delivery. CONFIG-002 and CLASSIFY-003 remain accepted.
-NEXT_READY_TASK: SQL-TIMEOUT-ISOLATION-006 follows in Backlog, pending user authorization.
-WAITING_FOR_USER_REVIEW: YES — review MYSQL-005 partial delivery.
-WAITING_FOR_USER_ACTION: Human review of MYSQL-005. Real MySQL verification belongs to CANCEL-VERIFY-009.
+NEXT_READY_TASK: Review the four-engine closeout in Acceptance §112. Follow the Backlog dependency order when the next task is authorized.
+WAITING_FOR_USER_REVIEW: YES — V0.9.1 source and acceptance closeout.
+WAITING_FOR_USER_ACTION: Review the scoped evidence and remaining per-engine gaps.
 FOLLOWING_ORDER: Preserve all pre-existing Oracle, SQL Registry, Top SQL, P5, release artifacts, untracked files, and current worktree changes. SQL Server Top SQL integration remains DONE for the user-accepted scope in Acceptance §63; other task states remain as recorded in Backlog.
 ```
+
+The independent Oracle verifier supports separate timeout case reports and outputs `CONNECTION_RECOVERY_VERIFIED`. Both supplied Windows reports were reviewed in Acceptance §103. The later PING experiments are acceptance-only research. No additional Oracle Net protocol work is needed for the V0.9.1 mainline.
+
+### Oracle observer scheduling and crossing-sample attribution
+
+The direct host report `oracle-timeout-observe-fulltext-20261116-205137-866` had an approximately 0.905 ms Execute. The first poll after READY straddled Execute and target completion and still showed the PREV baseline. The next three samples agreed on the new PREV identity and matched full cursor text. The archived verdict remains UNKNOWN.
+
+The worker now waits for Execute start and gives the target up to 10 ms to finish before polling. Target completion wakes the first poll immediately. A crossing or tied sample remains UNKNOWN and cannot prove either attribution. Adverse observations still block attribution. At least two later, nonoverlapping samples must show the same fresh complete PREV key and exact unique cursor for COMPLETED_BEFORE_SAMPLE. The offline replay isolates the three post-call samples. See Acceptance §108.
+
+### Oracle observer exact full-text and window correction
+
+The archived direct host report `oracle-timeout-observe-timing-20261116-200214-789` passed READY and normal collection. Its target SQL_FULLTEXT fingerprint matched driver_strip, while SQL_TEXT replaced the LF of an internal CRLF with a space at byte 28. The pre-fix comparison still rejected the cursor. The 0.805 ms Execute lay entirely inside an observer sample that started about 2.205 ms before Execute and finished 21.770 ms after its start, so that sample cannot establish ACTIVE or an unambiguous lifecycle.
+
+The observer uses a complete exact SQL_FULLTEXT value when available and verifies CLOB size against the bounded read, even when the short SQL_TEXT already matches. Truncated, failed and over-limit reads remain unverified. Exact SQL_ID, child, container, uniqueness and session/execution matching still apply. See Acceptance §107 for the initial full-text and boundary correction and §108 for the later attribution rules.
+
+### Oracle observer timing and previous execution
+
+The host report `oracle-timeout-observe-direct-20261116-193624-410` completed the 101-row control in about 3.361 ms and recorded the only ACTIVE sample, Execute, and completion in the same monotonic tick. Current child and execution fields were missing. The subsequent PREV execution was visible but its child number and actual cursor text were unrecorded. The diagnostic report `reports/oracle-observer-timing-diagnosis-20261116.md` documents these limits.
+
+The observer now orders all its own events with perf_counter_ns and a sequence counter, and publishes declared and measured clock resolution information. The worker polls before target Execute and releases the READY barrier only after a valid, tagged baseline. A unavailable observer blocks the opt-in target probe. ACTIVE_VERIFIED requires the entire sample window strictly within actual Execute. COMPLETED_BEFORE_SAMPLE requires successful probe completion, the unchanged tagged identity and a new, stable PREV execution key including PREV_CHILD_NUMBER, with a unique exact cursor and no intervening SQL evidence. The two verdicts do not establish service-side cancellation.
+
+The observer reports Registry, driver-stripped and server text fingerprints with UTF-8 byte offsets and escaped whitespace around differences. Other characters are masked. CLOB text is fetched only for a relevant child under a bounded read; a truncated prefix cannot establish equality without complete exact full text. This checkpoint is offline. Repeat the authorized-host direct normal probe first.
+
+### Automatic Oracle session and cursor correlation
+
+Each observed probe sets a unique CLIENT_IDENTIFIER through the Thin driver property. The existing reviewed target identity query publishes the tag on a round trip before observation starts. Initial lookup uses the tag and confirms the target instance, SID and AUDSID, then pins the serial number, container and service. Later samples include the pinned SID as an independent arm to detect a replaced or retagged session. A tag is cleared on a surviving target connection and a discarded connection is not reused.
+
+The independent query returns candidate children for the current SQL_ID in one sample, up to a safety bound of 128 candidates plus an overflow row. The report shows child, container, plan hash and exact SQL comparison outcomes. SQL comparison mirrors python-oracledb 3.4.2 outer whitespace stripping and retains internal CRLF. SID reuse, a tag mismatch, a changed execution, or ambiguous candidates produce UNKNOWN with a reason. SQL text stays out of the report. The view permissions are unchanged and the corrected matching has not been verified on the database.
+
+### Oracle V$SESSION prototype
+
+The opt-in observer obtains a direct connection using the verified test Inventory and the existing credential provider. A worker binds the target SID and checks its audit session and instance before fixing the serial number, PDB and service. It polls every 150 ms, with a 7-second sampling deadline and a 500 ms driver call timeout on the observer. The thread owns connection cleanup. A bounded wait records UNKNOWN if the worker has not exited. The driver call timeout applies to round trips, so it is not a hard wall-clock bound on a stuck native call. Observer failures are carried separately from the target result.
+
+The report stores a sequence and monotonic start/completion timestamps per sample, the target/session execution fields, stage markers, and state transitions. A sample that straddles the driver exception cannot establish activity after the exception. The observer corroborates the current cursor against the exact reviewed statement through V$SQL and requires a fresh full execution key, then refuses to attach a different execution or a replacement session to that lifecycle. Only the match flag is returned. The SQL bind and raw exception messages do not enter the observation report. The existing permissions guide lists both views. ORA-00942/01031 triggers separate bounded read probes to identify whether either documented object is unavailable. The deployed grants and the actual view columns remain unverified in this checkpoint. No SQL Monitor access is used.
+
+Long-workload candidates, for review only:
+
+- A fixed, small, serial SELECT over DUAL with bounded iterations and one aggregate result is low impact and can exercise a normal completion control. Its elapsed time is hardware dependent. If a pre-agreed small iteration limit does not produce observable activity across the timeout window, record the gap rather than scale up substantially.
+- Oracle documents DBMS_SESSION.SLEEP as a bounded session wait with little CPU demand. It is a PL/SQL procedure, not a plain SELECT, and observing the wait would not establish the behavior of a long-running SELECT or a Fetch. It is outside the approved prototype. Consider it only as a separately reviewed lab control with verified existing access and a fixed wait.
+- If neither candidate satisfies the time and resource constraints, leave the long-SQL experiment pending. Preserve the normal control, and use a separate timeout run with one target, one observer, the same reviewed workload, independent correlation and explicit wake-up/cleanup bounds. V$SESSION state is lifecycle evidence without a terminal cancellation cause.
+
+See [Oracle DBMS_SESSION.SLEEP](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html) and [V$SESSION](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/V-SESSION.html).
+
+### Prior Oracle server-side stop design
+
+- Use a direct, independent, read-only connection to the same test instance and PDB. Confirm instance/container scope and bind the target session using instance, CON_ID, SID, SERIAL# and AUDSID before the test. Match the reviewed statement and a fresh execution by SQL_ID, SQL_EXEC_ID and SQL_EXEC_START. Retain the same execution key through Execute and Fetch. A unique, approved test-only SQL marker may disambiguate the statement. Reused SID, missing keys, competing candidates and cross-container ambiguity render the association UNKNOWN.
+- Sample only the bound target with a bounded polling window before, during and after the timeout/recovery interval. Record observation time, current/previous execution keys and wait state. Matching current execution is evidence of presence, with client-idle waits distinguished from server work. The same key moving to PREV_* is evidence of a transition, without terminal cause. A missing session after a visibility check is SESSION_GONE, and denied, unavailable or ambiguous observations remain UNKNOWN. Keep these observations separate from the server terminal status and cause.
+- Prefer V$SESSION for correlation. Consider V$SQL_MONITOR only after checking edition, feature availability, licensing and effective access. Match its terminal row by the execution key and SID/SESSION_SERIAL# in the same instance/container. Successful completion or an early-fetch terminal row does not establish timeout-driven cancellation. For a cancellation claim require an explicit server-side cancellation outcome (for example DONE (ERROR) with ORA-01013) on the correlated execution, timing consistent with the tested cancellation, and no competing cancel source. Missing rows, a generic error, or a timeout after the server already produced the response do not qualify. Use a normal-completion control and review a bounded workload that is independently observable while active before implementing a cancellation experiment. The current response-delay fixture alone may finish server work before the client times out.
+- Permission difference: the guide already calls for direct SELECT on SYS.V_$SESSION and SYS.V_$SQL. Existing Preflight establishes the account safety classification, and the supplied observer reports establish a direct independent session. The archived outputs do not list the actual direct grants or demonstrate either monitoring-view query. After review, on the authorized host, inspect only the relevant USER_TAB_PRIVS_RECD rows and run scoped SELECT probes on the same PDB, including a known test-session visibility control. V_$SQL_MONITOR is absent from the documented Oracle baseline. If its read is denied and it is both available and necessary, submit a separate object-level SELECT proposal for that view only. No new permission is proposed for execution in this checkpoint. No implementation or database probe was performed.
+
+Oracle references: [V$SESSION](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/V-SESSION.html), [V$SQL_MONITOR](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/V-SQL_MONITOR.html), [monitoring eligibility](https://docs.oracle.com/en/database/oracle/oracle-database/26/tgsql/monitoring-database-operations.html), and [edition and licensing](https://docs.oracle.com/en/database/oracle/oracle-database/26/dblic/Licensing-Information.html).
+
+### Oracle Thin proxy timeout recovery and controlled-release follow-up — 2026-11-15
+
+Reviewed the supplied `oracle-timeout-proxy-20261115-202942-639` report. Both cases returned structured DPY-4011 / CONNECTION_LOST, not a confirmed call timeout; the proxy held 462 Execute and 96 Fetch response bytes and released them in discard mode after the driver operation error. Each case also observed 11 client-to-server bytes around the 2-second call-timeout boundary. Fetch evidence recorded successful Execute, 100 returned rows, Fetch call 101, and nonzero client/server wire bytes. The byte content was not decoded, so its Oracle Net meaning remains unknown. Both cases separately passed adapter detach/close, new-session full Preflight, independent SELECT, baseline retention and four-format parity. Server stop remains unconfirmed.
+
+Added an opt-in controlled release that forwards the held response after at least one post-hold client byte and a 2.1-second minimum, with a 3.5-second maximum gate lifetime. It only counts bytes and does not infer a cancel request. The new response-release outcome has offline coverage. `ISOLATED_OFFLINE_TEST`: 113 targeted passed; full pytest 1789 passed / 3 skipped with process-local Temp under `.tmp`; Ruff, Strict MyPy (82 source files), validate (4 assets / 119 SQL scripts), and diff check passed.
+
+The current execution shell is PowerShell Core 7.6.9 from the Codex runtime package, not authorized Windows PowerShell Desktop, so the controlled-release `WINDOWS_LOCAL_REAL_E2E` is `NOT_EXECUTED`. Task remains E2E_PENDING and the checkpoint stays PARTIAL.
+
+### Oracle Thin TCP-delay acceptance infrastructure — 2026-11-15
+
+Added the standard-library loopback proxy and the opt-in `--tcp-delay-proxy` verifier path. The gate is disarmed during authentication, Preflight and baseline collection; Execute and Fetch have separate gate plans. Fetch requires successful Execute, 100 consumed one-row results and gate arming immediately before Fetch call 101, plus observed client/server bytes, a held response and a structured driver call-timeout result. The local 100 ms quiescence window is recorded as proxy-socket evidence only; it does not prove no future response or server work. Proxy timeouts never set `SERVER_QUERY_STOP_CONFIRMED`.
+
+`ISOLATED_OFFLINE_TEST`: 109 targeted tests passed; full pytest 1785 passed / 3 skipped after placing process-local temp files under `.tmp`; Ruff, Strict MyPy (82 source files), `dba validate` (4 assets / 119 scripts) and `git diff --check` passed. The initial full run had one sandbox-temp permission failure in an unrelated SQL Server acceptance test; the rerun passed without changing that test. Oracle `WINDOWS_LOCAL_REAL_E2E` remains `NOT_EXECUTED`. Backlog task state remains E2E_PENDING; stop for human review.
+
+### Oracle Thin timeout error classification correction — 2026-11-15
+
+The Oracle normalizer now classifies the python-oracledb 3.4.2 structured DPY-4024 / DPY-4011 fields and direct DPI-1067 / DPI-1080 code aliases. `is_session_dead=true` produces connection loss; call timeout remains `DRIVER_REPORTED`, not server cancellation. The accepted Adapter cleanup still discards the connection after query errors and clears incomplete rows. The Adapter, Inventory, runtime configuration and SQL were not changed.
+
+`ISOLATED_OFFLINE_TEST`: focused Oracle/timeout suites **94 passed**; full pytest **1770 passed, 3 skipped**. The final run used project-local Temp and basetemp after an initial run exposed a sandbox Temp permission failure and a real-clock-sensitive timeout assertion. Ruff, Strict MyPy (81 source files), `dba validate` (4 assets / 119 SQL scripts) and `git diff --check` passed. Oracle `WINDOWS_LOCAL_REAL_E2E` remains `NOT_EXECUTED`; timeout probes remain BLOCKED as recorded in Acceptance §98. Backlog states are unchanged.
+
+### SQL-TIMEOUT-CANCEL-VERIFY-009 — MySQL SESSION/HINT evidence and Fetch tooling — 2026-11-14
+
+The user-provided later real run recorded SESSION `max_execution_time=500 ms` under a 1,000 ms client deadline: native 3024 at 500 ms in Execute, 500 ms remaining, one SELECT, cancelled-confirmed, old connection discarded/socket closed, new connection ID 15 fully preflighted, independent query passed, previous data retained and all four outputs consistent. The 600 ms hint control returned 3024 at 610 ms, discarded the old connection, passed recovery on ID 16, and matched across four outputs. These user-provided results are subcase evidence, not a new live run in this coding turn.
+
+The Adapter retains its finite setup/response-margin policy; 250 ms is a race reduction, not a guarantee under arbitrary network delay. The independent observer in both supplied runs reported `CONNECTION_DISAPPEARED`, not `ENDED`, with null END_EVENT_ID; database-side session disappearance remains NOT_EXECUTED. Native 3024 and observer lifecycle evidence remain separate.
+
+The observer distinguishes `RUNNING`, `ENDED`, `CONNECTION_DISAPPEARED`, `CONNECTION_ID_REBOUND`, `HISTORY_NOT_VISIBLE` and `INSUFFICIENT`; absence from `events_statements_current` alone never means the query stopped. Same-event `END_EVENT_ID` is retained as observer lifecycle evidence. Native MySQL 3024 is recorded separately as direct server timeout evidence.
+
+Fetch now has a separate reviewed fixture and `enable_fetch_fixture_streaming()` adds only that exact fixture to the target Adapter instance's stream-name set after Registry authorization. It does not modify the formal Adapter default or any business Collector. Per-fetch trace records cursor type, same-deadline evidence, rows received and safe error class; incomplete failed results are expected to be empty. Fake Driver tests cover a partial row followed by Fetch-phase 3024 versus client socket timeout, connection discard, preserved earlier result, fresh Preflight and a follow-up read. This is `ISOLATED_OFFLINE_TEST`, not live Fetch verification.
+
+No new read permission was identified and `DATABASE_PERMISSIONS.md` was not changed. No live database, permission operation or KILL was used. Run the combined SESSION/HINT/Fetch acceptance from the authorized Windows PowerShell Desktop host only after human review. See Acceptance §92.
+
+### SQL-TIMEOUT-CANCEL-VERIFY-009 — post-run lifecycle and cleanup review — 2026-11-14
+
+The user supplied a later real MySQL 8.4.11 run: SESSION 500 ms and hint 610 ms returned native 3024; `SSCursor.execute` completed, one row was fetched, and a subsequent Fetch returned 3024. The incomplete result was discarded, the Adapter detached and Driver Socket closed, new Preflight passed, and JSON/JSONL/HTML/CLI agreed. These results are recorded as MySQL case evidence in Acceptance §93; they were not rerun during this review.
+
+The SESSION adapter budget formula and post-SET check match the supplied 500 ms result. The fixed 250 ms setup and response guards do not bound arbitrary network latency; no code change was needed. PyMySQL 2.2.8 source review confirms a server 3024 error packet clears the unbuffered-result active flag. The Adapter then closes the physical connection before closing SSCursor; its connection reference/readiness are cleared, and it has no pool from which to reuse the old connection. The new fetch regression explicitly confirms `PreflightRequired` on the stale Adapter before reconnecting.
+
+The observer reports `CONNECTION_DISAPPEARED` because the Adapter closes the target client session after 3024; MySQL discards per-thread `events_statements_history` rows when a thread ends, so the event's final ID may no longer be readable. A null END_EVENT_ID is retained as insufficient lifecycle evidence and does not override direct 3024. The old report's `database_session_disappearance=NOT_EXECUTED` was a hard-coded verifier field, although the observer did read `threads`; the verifier now performs a distinct post-result read-only `threads` probe and records absent/present/rebound/unknown while always setting `query_stop_confirmed=false` for that probe. No additional permission is requested. The new probe has offline controlled tests but has not been rerun on the authorized host. Keep the task open and stop for human review; no KILL, DB connection, commit or push occurred.
+
+`ISOLATED_OFFLINE_TEST`: focused MySQL Adapter/acceptance suite 125 passed; full pytest 1740 passed / 3 skipped; Ruff passed; strict MyPy passed for 81 source files; `dba validate` passed for 4 assets and 119 SQL scripts; `git diff --check` passed. These offline results do not validate the newly added observer against the live MySQL asset.
 
 ### SQL-TIMEOUT-DEADLINE-004 — absolute Execute+Fetch deadline — 2026-11-13
 

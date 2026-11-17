@@ -160,7 +160,7 @@ def adapter_for_test(*, settings: OracleSettings | None = None) -> tuple[OracleA
     (OracleSettings(diagnostic_sql_timeout_seconds=20, call_timeout=6), 6000, 6000),
 ])
 def test_oracle_call_timeout_uses_global_effective_timeout(
-    settings: OracleSettings, connect_ms: int, collector_ms: int,
+    settings: OracleSettings, connect_ms: int, collector_ms: int, sql_deadline_clock: Any,
 ) -> None:
     adapter, driver = adapter_for_test(settings=settings)
     assert settings.effective_sql_timeout(60) * 1000 == connect_ms

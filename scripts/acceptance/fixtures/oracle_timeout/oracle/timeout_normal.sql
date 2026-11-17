@@ -1,0 +1,4 @@
+SELECT LEVEL AS probe_value
+FROM DUAL
+CONNECT BY LEVEL <= 101
+ORDER BY probe_value

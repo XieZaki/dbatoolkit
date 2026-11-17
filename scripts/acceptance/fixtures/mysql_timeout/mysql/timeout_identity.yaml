@@ -1,0 +1,8 @@
+name: timeout_identity
+database_type: mysql
+risk: READ_ONLY
+reviewed: true
+timeout_seconds: 4
+max_rows: 2
+max_result_bytes: 1024
+description: Read the current acceptance connection identity and applied SESSION limit.

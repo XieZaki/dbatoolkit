@@ -73,7 +73,7 @@ class FakeCursor:
 
 class FakeConnection:
     def __init__(self, scripts: dict[str, str]) -> None:
-        self.scripts = scripts
+        self.scripts = {**scripts, "SELECT pg_catalog.set_config('statement_timeout', %s, false)": "set_config"}
         self.autocommit = True
         self.closed = False
         self.rollbacks = 0
@@ -89,6 +89,11 @@ class FakeConnection:
     def cursor(self) -> FakeCursor:
         cursor = FakeCursor(self)
         self.cursors.append(cursor)
+        return cursor
+
+    def execute(self, sql: str, params: Any = None) -> FakeCursor:
+        cursor = self.cursor()
+        cursor.execute(sql, params)
         return cursor
 
     def rollback(self) -> None:
@@ -166,6 +171,67 @@ def test_statement_timeout_uses_global_effective_timeout_and_audits_enforced_val
     preflight = next(details for script, details in audits if script == "preflight")
     assert preflight["timeout_seconds"] == statement_ms // 1000
     assert preflight["effective_timeout_seconds"] == settings.effective_sql_timeout(5)
+
+
+@pytest.mark.parametrize(("before_setup", "setup_elapsed", "expected_ms", "error_type", "phase"), [
+    (0.0, 0.0, 500, None, None),
+    (0.0004, 0.120, 499, None, None),
+    (0.4996, 0.0, None, "ServerTimeoutBudgetUnavailable", "SessionSetup"),
+    (0.4986, 0.0, 1, None, None),
+    (0.0, 0.250, 500, "ServerTimeoutBudgetUnavailable", "Execute"),
+    (0.0, 1.001, 500, "SessionSetupTimeout", "SessionSetup"),
+])
+def test_statement_timeout_reserves_budget_inside_original_deadline(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any,
+    before_setup: float, setup_elapsed: float, expected_ms: int | None,
+    error_type: str | None, phase: str | None,
+) -> None:
+    target, driver = adapter(settings=PostgreSQLSettings(query_timeout=1))
+    with target:
+        connection = driver.connection
+        connection.executed.clear()
+        connection.bound_parameters.clear()
+        observed: list[tuple[str, SqlDeadline]] = []
+        original_start = SqlDeadline.start
+        original_execute = FakeCursor.execute
+
+        def start(seconds: int) -> SqlDeadline:
+            deadline = original_start(seconds)
+            sql_deadline_clock.advance(before_setup)
+            return deadline
+
+        def execute(cursor: FakeCursor, sql: str, params: Any = None) -> None:
+            original_execute(cursor, sql, params)
+            name = connection.executed[-1]
+            observed.append((name, getattr(connection, "_dba_sql_deadline")))
+            if name == "set_config":
+                sql_deadline_clock.advance(setup_elapsed)
+
+        # Force a fresh SET so both setup and its elapsed time are exercised.
+        target._server_statement_timeout_ms = 1000
+        monkeypatch.setattr(SqlDeadline, "start", staticmethod(start))
+        monkeypatch.setattr(FakeCursor, "execute", execute)
+        sample = target.execute_readonly(target.registry.get("server_info", DatabaseType.POSTGRESQL))
+
+        assert connection.bound_parameters == (
+            ([] if expected_ms is None else [("set_config", (f"{expected_ms}ms",))])
+            + ([("server_info", None)] if error_type is None else [])
+        )
+        assert sample.error_type == error_type
+        if error_type is None:
+            assert sample.success and not connection.closed
+            assert observed[0][1] is observed[1][1]
+            assert observed[0][1].timeout_seconds == 1
+        else:
+            assert not sample.success and not sample.rows
+            assert sample.database_error is not None
+            timeout = sample.database_error["timeout"]
+            assert timeout["execution_phase"] == phase
+            assert timeout["connection_status"] == "DISCARDED"
+            assert timeout["cancellation_status"] == (
+                "CANCEL_STATUS_UNKNOWN" if error_type == "SessionSetupTimeout" else "NOT_APPLICABLE"
+            )
+            assert connection.closed and target._connection is None
 
 
 def test_postgresql_execute_wait_receives_current_absolute_budget(monkeypatch: pytest.MonkeyPatch) -> None:

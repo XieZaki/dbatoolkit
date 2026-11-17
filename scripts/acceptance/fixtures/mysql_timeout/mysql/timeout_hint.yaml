@@ -1,0 +1,8 @@
+name: timeout_hint
+database_type: mysql
+risk: READ_ONLY
+reviewed: true
+timeout_seconds: 4
+max_rows: 2
+max_result_bytes: 1024
+description: Independent server error 3024 positive control with a bounded wait.

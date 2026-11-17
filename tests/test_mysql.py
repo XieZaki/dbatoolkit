@@ -1,4 +1,5 @@
 import json
+import math
 import socket
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -233,26 +234,43 @@ def test_mysql_show_timeout_skips_control_connection_and_allows_fresh_diagnostic
         assert driver.connect_count == 2
 
 
-@pytest.mark.parametrize("spent,expected_ms", [(1.25, 1750), (2.9995, None)])
-def test_mysql_server_limit_uses_remaining_whole_milliseconds(
-    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any, spent: float, expected_ms: int | None,
+@pytest.mark.parametrize(("spent", "expected_ms"), [
+    (1.25, 1250),       # floor((3000 - 1250) - 250 setup - 250 response)
+    (0.0002, 2499),     # millisecond conversion floors, never rounds up
+])
+def test_mysql_server_limit_reserves_setup_and_response_budget(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any, spent: float, expected_ms: int,
 ) -> None:
     target, driver = adapter(settings=MySQLSettings(diagnostic_sql_timeout_seconds=3))
     with target:
         driver.connection.server_limits.clear()
         cursor = FakeConnection.cursor
+        initial_cursor_count = len(driver.connection.cursors)
+        delays = 0
 
-        def slow_cursor(connection: FakeConnection, cursor_class: Any = None) -> FakeCursor:
-            sql_deadline_clock.advance(spent)
-            return cursor(connection, cursor_class)
+        def slow_session_cursor(connection: FakeConnection, cursor_class: Any = None) -> FakeCursor:
+            nonlocal delays
+            result = cursor(connection, cursor_class)
+            if len(connection.cursors) == initial_cursor_count + 1:
+                delays += 1
+                sql_deadline_clock.advance(spent)
+            return result
 
-        monkeypatch.setattr(FakeConnection, "cursor", slow_cursor)
+        monkeypatch.setattr(FakeConnection, "cursor", slow_session_cursor)
+        audits: list[dict[str, Any]] = []
+        monkeypatch.setattr(target, "_audit", lambda _name, _started, _error, details=None:
+                            audits.append(details or {}))
         outcome = target.execute_readonly(target.registry.get("active_requests", DatabaseType.MYSQL))
-    # A second cursor allocation may also consume time before the SELECT starts.
-    assert driver.connection.server_limits == ([] if expected_ms is None else [expected_ms])
-    if expected_ms is None:
-        assert outcome.error_type == "ExecuteTimeout"
-        assert "active_requests" not in driver.connection.executed
+    assert outcome.success
+    assert delays == 1
+    assert driver.connection.server_limits == [expected_ms]
+    assert "active_requests" in driver.connection.executed
+    audit = audits[-1]
+    assert audit["client_remaining_before_session_ms"] == math.floor((3 - spent) * 1000)
+    assert audit["server_execution_limit_ms"] == expected_ms
+    assert audit["session_setup_reserve_ms"] == 250
+    assert audit["server_timeout_response_margin_ms"] == 250
+    assert audit["client_remaining_before_execute_ms"] > expected_ms + 250
 
 
 def test_mysql_setup_cannot_start_select_after_deadline(
@@ -269,8 +287,62 @@ def test_mysql_setup_cannot_start_select_after_deadline(
 
         monkeypatch.setattr(FakeCursor, "execute", slow_setup)
         failure = target.execute_readonly(target.registry.get("active_requests", DatabaseType.MYSQL))
-    assert failure.error_type == "ExecuteTimeout"
-    assert driver.connection.server_limits[-1] == 3000
+    assert failure.error_type == "ServerTimeoutBudgetUnavailable"
+    assert failure.database_error is not None
+    assert failure.database_error["timeout"]["cancellation_status"] == "NOT_APPLICABLE"
+    assert driver.connection.server_limits[-1] == 2500
+    assert "active_requests" not in driver.connection.executed
+    assert driver.connection.closed
+
+
+@pytest.mark.parametrize(("setup_delay", "expected_success"), [(0.1, True), (0.3, False)])
+def test_mysql_set_round_trip_consumes_reserved_budget(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any,
+    setup_delay: float, expected_success: bool,
+) -> None:
+    target, driver = adapter(settings=MySQLSettings(diagnostic_sql_timeout_seconds=3))
+    target.connect()
+    execute = FakeCursor.execute
+
+    def slow_session_set(cursor: FakeCursor, sql: str, parameters: tuple[int, ...] | None = None) -> None:
+        execute(cursor, sql, parameters)
+        if sql == "SET SESSION max_execution_time = %s":
+            sql_deadline_clock.advance(setup_delay)
+
+    monkeypatch.setattr(FakeCursor, "execute", slow_session_set)
+    failure = target.execute_readonly(target.registry.get("active_requests", DatabaseType.MYSQL))
+    assert driver.connection.server_limits == [2500]
+    if expected_success:
+        assert failure.success
+        assert "active_requests" in driver.connection.executed
+        target.disconnect()
+    else:
+        assert failure.error_type == "ServerTimeoutBudgetUnavailable"
+        assert failure.database_error is not None
+        assert failure.database_error["error_category"] == "TIMEOUT"
+        assert failure.database_error["timeout"]["cancellation_status"] == "NOT_APPLICABLE"
+        assert "active_requests" not in driver.connection.executed
+        assert driver.connection.closed
+
+
+def test_mysql_tiny_remaining_budget_does_not_set_zero_or_send_select(
+    monkeypatch: pytest.MonkeyPatch, sql_deadline_clock: Any,
+) -> None:
+    target, driver = adapter(settings=MySQLSettings(diagnostic_sql_timeout_seconds=1))
+    target.connect()
+    cursor = FakeConnection.cursor
+    initial_cursor_count = len(driver.connection.cursors)
+
+    def consume_before_setup(connection: FakeConnection, cursor_class: Any = None) -> FakeCursor:
+        result = cursor(connection, cursor_class)
+        if len(connection.cursors) == initial_cursor_count + 1:
+            sql_deadline_clock.advance(0.501)
+        return result
+
+    monkeypatch.setattr(FakeConnection, "cursor", consume_before_setup)
+    failure = target.execute_readonly(target.registry.get("active_requests", DatabaseType.MYSQL))
+    assert failure.error_type == "ServerTimeoutBudgetUnavailable"
+    assert driver.connection.server_limits == []
     assert "active_requests" not in driver.connection.executed
     assert driver.connection.closed
 

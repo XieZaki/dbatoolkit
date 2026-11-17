@@ -1,0 +1,8 @@
+name: timeout_fetch
+database_type: mysql
+risk: READ_ONLY
+reviewed: true
+timeout_seconds: 2
+max_rows: 4
+max_result_bytes: 1024
+description: Bounded read-only streaming result; the later row sleeps for the Fetch timeout check.

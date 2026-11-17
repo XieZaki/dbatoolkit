@@ -1,0 +1,8 @@
+name: timeout_baseline
+database_type: oracle
+risk: READ_ONLY
+timeout_seconds: 2
+max_rows: 2
+max_result_bytes: 4096
+reviewed: true
+description: Independent one-row Oracle acceptance baseline.

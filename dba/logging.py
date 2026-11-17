@@ -121,6 +121,8 @@ class SafeFormatter(logging.Formatter):
                 "replication_highest_severity",
             )
         }
+        if "server_statement_timeout_ms" in event:
+            data["server_statement_timeout_ms"] = event["server_statement_timeout_ms"]
         data["time"] = self.formatTime(record, "%Y-%m-%dT%H:%M:%S")
         return json.dumps(redact(data), ensure_ascii=False)
 

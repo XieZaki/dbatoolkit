@@ -144,7 +144,7 @@ def _cancellation_context(
             return "CANCELLED_CONFIRMED", "MYSQL_MAX_EXECUTION_TIME", "max_execution_time"
         if detail.database_type == "mysql" and code == "1205":
             return "CANCELLED_CONFIRMED", "MYSQL_LOCK_WAIT_TIMEOUT", "innodb_lock_wait_timeout"
-        if detail.database_type == "oracle" and code == "DPY-4024":
+        if detail.database_type == "oracle" and code in {"DPY-4024", "DPI-1067"}:
             return "DRIVER_REPORTED", "ORACLE_CALL_TIMEOUT", "driver_reported_call_timeout"
         return "CANCEL_STATUS_UNKNOWN", "CLIENT_WAIT_TIMEOUT", "client_wait_stopped_database_stop_unconfirmed"
     return "NOT_APPLICABLE", None, None
@@ -160,15 +160,15 @@ def with_timeout_evidence(
     elapsed_ms: int | None,
     script_path: str | None,
 ) -> DatabaseErrorDetail:
-    pg_message = " ".join((detail.message, detail.detail or "", detail.hint or "",
-                            detail.context or "")).casefold()
+    pg_primary = detail.message.casefold().strip()
     if (
         detail.database_type == "postgresql"
         and detail.sqlstate == "57014"
         and detail.error_category == "CANCELLED_CONFIRMED"
-        and ("statement timeout" in pg_message or "statement_timeout" in pg_message)
-        and "user request" not in pg_message
-        and "recovery conflict" not in pg_message
+        and (
+            pg_primary.rstrip(".") in {"statement timeout", "statement_timeout"}
+            or re.match(r"cancel(?:l)?ing statement due to statement[ _]timeout(?:$|[.;,])", pg_primary)
+        )
     ):
         detail = replace(
             detail,
@@ -337,10 +337,11 @@ def normalize_oracle_error(exc: Exception, secrets: tuple[str, ...] = ()) -> Dat
     code = code_match.group(0).upper() if code_match else None
     if code is None and type(code_value) is int and 0 < code_value <= 99999:
         code = f"ORA-{code_value:05d}"
-    if code == "DPY-4024" or isinstance(exc, TimeoutError):
-        classification = "TIMEOUT"
-    elif code in {"DPY-4011", "DPY-1001"} or getattr(vendor, "is_session_dead", False) is True:
+    session_dead = getattr(vendor, "is_session_dead", False) is True
+    if session_dead or code in {"DPY-4011", "DPI-1080", "DPY-1001"}:
         classification = "CONNECTION_LOST"
+    elif code in {"DPY-4024", "DPI-1067"} or isinstance(exc, TimeoutError):
+        classification = "TIMEOUT"
     elif code in {"ORA-12170", "ORA-12535", "ORA-03136"}:
         classification = "TIMEOUT"
     elif code == "ORA-01013":

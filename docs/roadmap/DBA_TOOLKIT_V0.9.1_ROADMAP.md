@@ -256,6 +256,8 @@ Core diagnosis contracts from earlier phases are stable. The final report remain
 
 ## 12. Long-term backlog outside Phase 0–5
 
+Oracle Net recovery traces and PING relay experiments remain optional acceptance research outside the V0.9.1 mainline. Oracle product reliability covers bounded connection establishment, Execute and Fetch timeout handling, unsafe connection discard and fresh Preflight. Server-side query stop remains a distinct evidence requirement under `SQL-TIMEOUT-CANCEL-VERIFY-009`.
+
 - MongoDB 4.0+ and Redis 4.0+ diagnostic design after the four primary databases are stable; both are product targets but current diagnostic implementation remains absent.
 - Independent `pt-query-digest` and `pgBadger` offline-log PoCs after license, packaging, privacy, and bounded-output review.
 - Representative old-version E2E matrix where safe images/licenses/environments exist.

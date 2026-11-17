@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -271,6 +272,18 @@ def test_oracle_dpy_1001_is_connection_loss() -> None:
     assert detail.timeout.cancellation_status == "CANCEL_STATUS_UNKNOWN"
     assert detail.timeout.cancellation_reason == "database_stop_unconfirmed"
     assert SECRET not in repr(detail.to_dict())
+
+
+def test_postgresql_57014_timeout_mention_in_hint_does_not_confirm_cause() -> None:
+    detail = normalize_postgresql_error(_error("postgresql", "57014", "query canceled"))
+    detail = replace(detail, hint="Review the statement_timeout setting")
+    result = with_timeout_evidence(
+        detail, execution_phase="Execute", timeout_seconds=1, effective_timeout_seconds=1,
+        script_timeout_seconds=1, elapsed_ms=1000, script_path="postgresql/timeout_execute.sql",
+    )
+    assert result.error_category == "CANCELLED_CONFIRMED"
+    assert result.timeout is not None
+    assert result.timeout.mechanism == "POSTGRESQL_QUERY_CANCEL"
 
 
 def test_connection_disposition_updates_only_the_existing_timeout_payload() -> None:

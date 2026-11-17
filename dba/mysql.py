@@ -39,6 +39,12 @@ MYSQL_TOP_SQL_METRICS = frozenset({
 })
 
 _SET_EXECUTION_LIMIT = "SET SESSION max_execution_time = %s"
+# The service-side limit is deliberately shorter than the absolute client
+# deadline. Reserve time for the SET round trip, then preserve a second window
+# for the server timeout response to reach the client. The post-SET check below
+# verifies the first reserve against the actual elapsed time.
+_MYSQL_SESSION_SETUP_RESERVE_MS = 250
+_MYSQL_SERVER_RESPONSE_MARGIN_MS = 250
 _SHOW_SCRIPTS = frozenset({
     "disk_binlogs", "monitor_grants", "replication_status", "replication_status_legacy",
 })
@@ -222,6 +228,41 @@ def _driver_error(
                if detail is not None else
                f"{phase} failed; check connectivity and monitoring account.")
     return ToolkitError(error_type, message, database_error=detail)
+
+
+def _server_timeout_budget_error(
+    *, script: SqlScript, timeout_seconds: int, elapsed_ms: int,
+    execution_phase: str = "SessionSetup",
+) -> ToolkitError:
+    detail = DatabaseErrorDetail(
+        database_type="mysql",
+        driver="PyMySQL",
+        vendor_code=None,
+        sqlstate=None,
+        message="Insufficient client deadline budget to reserve a server-first timeout.",
+        classification="TIMEOUT",
+        error_category="TIMEOUT",
+    )
+    detail = with_timeout_evidence(
+        detail,
+        execution_phase=execution_phase,
+        timeout_seconds=timeout_seconds,
+        effective_timeout_seconds=timeout_seconds,
+        script_timeout_seconds=script.metadata.timeout_seconds,
+        elapsed_ms=elapsed_ms,
+        script_path=f"{script.metadata.database_type.value}/{script.metadata.name}.sql",
+    )
+    assert detail.timeout is not None
+    detail = replace(detail, timeout=replace(
+        detail.timeout,
+        cancellation_status="NOT_APPLICABLE",
+        cancellation_reason="server_first_timeout_budget_unavailable_query_not_sent",
+    ))
+    return ToolkitError(
+        "ServerTimeoutBudgetUnavailable",
+        "Insufficient client deadline budget; diagnostic SELECT was not sent.",
+        database_error=detail,
+    )
 
 
 class MySQLAdapter(Adapter):
@@ -530,6 +571,7 @@ class MySQLAdapter(Adapter):
         deadline: SqlDeadline | None = None
         statement_started = False
         server_limit_ms: int | None = None
+        timeout_audit: dict[str, Any] = {}
         try:
             self.registry.authorize(script, DatabaseType.MYSQL)
             authorized = True
@@ -560,22 +602,70 @@ class MySQLAdapter(Adapter):
             if self._deadline_socket is not None:
                 self._deadline_socket.set_deadline(deadline, "Execute")
             if self._server_execution_limit and script_name not in _SHOW_SCRIPTS:
+                execution_phase = "SessionSetup"
+                if self._deadline_socket is not None:
+                    self._deadline_socket.set_deadline(deadline, execution_phase)
                 setup = self._connection.cursor()
+                session_started = deadline.elapsed()
                 try:
-                    # SET itself spends part of the client deadline. The client
-                    # still enforces the original deadline after SET returns.
-                    server_limit_ms = math.floor(deadline.require_remaining("Execute") * 1000)
-                    if server_limit_ms < 1:
-                        raise SqlDeadlineExpired("Execute")
+                    # Include even local cursor setup before choosing the cap.
+                    # SET's own network round trip is covered by a separate
+                    # reserve and checked again immediately before SELECT.
+                    client_remaining_before_set_ms = math.floor(deadline.remaining() * 1000)
+                    candidate_limit_ms = (client_remaining_before_set_ms
+                                          - _MYSQL_SESSION_SETUP_RESERVE_MS
+                                          - _MYSQL_SERVER_RESPONSE_MARGIN_MS)
+                    timeout_audit.update({
+                        "execution_phase": execution_phase,
+                        "client_remaining_before_session_ms": client_remaining_before_set_ms,
+                        "session_setup_reserve_ms": _MYSQL_SESSION_SETUP_RESERVE_MS,
+                        "server_timeout_response_margin_ms": _MYSQL_SERVER_RESPONSE_MARGIN_MS,
+                        "server_limit_candidate_ms": candidate_limit_ms,
+                    })
+                    if client_remaining_before_set_ms <= 0:
+                        raise SqlDeadlineExpired("SessionSetup")
+                    if candidate_limit_ms < 1:
+                        timeout_audit["server_execution_limit_ms"] = None
+                        raise _server_timeout_budget_error(
+                            script=script, timeout_seconds=deadline.timeout_seconds,
+                            elapsed_ms=int(deadline.elapsed() * 1000),
+                        )
+                    server_limit_ms = candidate_limit_ms
+                    timeout_audit["server_execution_limit_ms"] = server_limit_ms
                     setup.execute(_SET_EXECUTION_LIMIT, (server_limit_ms,))
                 finally:
+                    timeout_audit["session_setup_elapsed_ms"] = math.floor(
+                        (deadline.elapsed() - session_started) * 1000
+                    )
                     setup.close()
+            execution_phase = "Execute"
+            if self._deadline_socket is not None:
+                self._deadline_socket.set_deadline(deadline, execution_phase)
+            if server_limit_ms is not None:
+                timeout_audit["execution_phase"] = execution_phase
             streaming = script.metadata.name in self.STREAMING_SCRIPTS
             if streaming and self._streaming_cursor is not None:
                 cursor = self._connection.cursor(self._streaming_cursor)
             else:
                 cursor = self._connection.cursor()
-            deadline.require_remaining("Execute")
+            if server_limit_ms is not None:
+                # Include SET's actual round trip and cursor allocation. The
+                # positive response margin makes the server cap strictly
+                # earlier than the remaining absolute client deadline.
+                client_remaining_before_execute_ms = math.floor(deadline.remaining() * 1000)
+                timeout_audit.update({
+                    "execution_phase": "Execute",
+                    "client_remaining_before_execute_ms": client_remaining_before_execute_ms,
+                })
+                if client_remaining_before_execute_ms <= (
+                    server_limit_ms + _MYSQL_SERVER_RESPONSE_MARGIN_MS
+                ):
+                    raise _server_timeout_budget_error(
+                        script=script, timeout_seconds=deadline.timeout_seconds,
+                        elapsed_ms=int(deadline.elapsed() * 1000), execution_phase="Execute",
+                    )
+            else:
+                deadline.require_remaining("Execute")
             statement_started = True
             if parameters is None:
                 cursor.execute(script.text)
@@ -685,6 +775,8 @@ class MySQLAdapter(Adapter):
                 self._close()
             details: dict[str, Any] = {"row_count": len(rows), "truncated": truncated,
                                        "result_bytes": result_bytes}
+            details.update(timeout_audit)
+            details["execution_phase"] = execution_phase
             if authorized:
                 details.update({"sql_sha256": hashlib.sha256(script.text.encode()).hexdigest(),
                                 "timeout_seconds": deadline.timeout_seconds if deadline else self._read_timeout,
@@ -693,8 +785,6 @@ class MySQLAdapter(Adapter):
                                     deadline.timeout_seconds,
                                 "max_rows": script.metadata.max_rows})
                 details["max_result_bytes"] = script.metadata.max_result_bytes
-                if server_limit_ms is not None:
-                    details["server_execution_limit_ms"] = server_limit_ms
             self._audit(script_name, started, error, details)
         return CollectorResult(self.instance.id, script_name, started_at,
                                datetime.now(timezone.utc), (time.monotonic() - started) * 1000,

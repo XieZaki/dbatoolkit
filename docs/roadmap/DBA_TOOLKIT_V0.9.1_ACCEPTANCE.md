@@ -2529,3 +2529,538 @@ $blocked
 ## 88. Real database acceptance preflight — 2026-11-14
 
 MYSQL-005 and V091-P5-LOCK-OBJECT-SQLSERVER-001 remain NOT_EXECUTED for this run. The Codex-managed PowerShell Core process could not access the Windows host CIM provider. No asset lookup, Credential Session lookup, database connection, workload, permission change or cancellation was attempted. Existing historical evidence remains recorded above.
+
+## 89. MySQL 8.4.11 timeout acceptance tooling — 2026-11-14
+
+Scope: SQL-TIMEOUT-CANCEL-VERIFY-009, MySQL tooling only, on baseline e41fbb2b867d4cf08fd652b95cf3a91c19f8f86c. Real MySQL execution is NOT_EXECUTED. MYSQL-005 SHOW cancellation is still BLOCKED. This checkpoint does not close MySQL runtime acceptance or any other engine cell.
+
+The standalone verifier requires the native Windows PowerShell Desktop parent, host CIM access, the repository virtual environment, the designated single test Inventory and the existing credential session. A temporary Registry overlays three reviewed, bounded test-only SELECT pairs onto copies of the formal MySQL scripts. The production Adapter executes the no-hint SESSION scenario and a separate 3024 hint positive control when feasible. The harness records client execute and socket-send boundaries, remaining budget and the value sent to SET. The observer correlates the exact fixture text and native connection/thread/event IDs, requiring an active observation and an explicit ended observation of the same event. Missing visibility, consumers or permissions remain insufficient evidence. history_long is optional. No new read grants were found necessary by this offline review; live access is unverified.
+
+The existing Adapter selects streaming by formal script name. Fixture-based live Fetch coverage is BLOCKED. The verifier checks detach, driver socket state, one SELECT attempt, explicit reconnect through production preflight, a fresh identity query and retained prior evidence. The four output formats derive from the same CollectorResult and its original safe audit event. The result does not infer server session disappearance from driver cleanup. A client timeout, a successful hint control, and a confirmed SESSION 3024 are separate outcomes.
+
+ISOLATED_OFFLINE_TEST: 1691 passed and 3 skipped in the full suite, with 124 targeted tests passed, including asset gates, Registry and fixture integrity, fake-driver SESSION and 3024 behavior, controlled timing, Execute/Fetch classification, observer identity and permission negatives, recovery, output parity and redaction. Ruff passed for dba, tests and the verifier. Strict MyPy passed for 81 source files. dba validate passed for 4 assets and 119 formal scripts. git diff --check passed.
+
+### Revision v2 — 2026-11-14
+
+The verifier preserves the Inventory database and defaults an omitted value to `information_schema`. It checks the Adapter's current-user and role evidence and accepts only reviewed read-only grants from the account's `SHOW GRANTS` result. The existing credential session supplies the Inventory-selected credential.
+
+The unchanged test Registry fixtures exercise a one-second SESSION limit without a hint and a separate 600 ms hint under a four-second script limit. The verifier records the SET result, the monotonic Deadline shared by SET and SELECT, the sent limit, remaining budget, and the time the SELECT write completed. A socket expiration, local Deadline expiration, connection loss, and native 3024 have separate results. SET can consume the budget before SELECT starts. A native 3024 and independent event proof can verify one SESSION run. The summary retains the production race as PARTIAL when the CLIENT_MAY_EXPIRE_FIRST timing comparison applies, even if the separate hint control verifies.
+
+The observer checks `threads`, `events_statements_current`, `events_statements_history`, `setup_consumers`, and `setup_instruments` in Performance Schema. It binds the target CONNECTION_ID to its THREAD_ID and requires an active exact-text event and a valid END_EVENT_ID for that same thread and event. Accessible `events_statements_history_long` can retain the proof after disconnect. When end evidence is missing, the stop result is UNKNOWN. A denied required read reports the object and sanitized native error. Actual grants remain unverified, so the optional permissions patch was excluded and the deployment permission guide is unchanged.
+
+The serial target runs on the production Adapter. The verifier checks one SELECT attempt, local connection detach, the driver socket state and fresh successful Preflight audit entries before an independent identity query on the replacement connection. Database session disappearance is NOT_EXECUTED. The four output formats use one result and its sanitized audit event. Live streaming Fetch is BLOCKED because the reviewed timeout fixtures cannot enter the production streaming cursor path. MySQL 8.4.11 live E2E remains NOT_EXECUTED.
+
+ISOLATED_OFFLINE_TEST for revision v2: 38 acceptance-tool tests passed, 115 MySQL and error-classification regression tests passed, and full pytest reported 1720 passed and 3 skipped. Ruff passed for `dba tests scripts`. Strict MyPy passed for 81 source files, including the verifier. `dba validate` passed for 4 assets and 119 formal SQL scripts. `git diff --check` passed.
+
+## 90. MySQL acceptance verifier CredentialRejected diagnosis — 2026-11-14
+
+The earlier verifier created a session-only provider. It called `CredentialSessionClient.get(alias)` against the default Encrypted Local Store binding and did not query Windows Credential Manager. When that lookup returned no credential, the verifier raised `GateError("Inventory-selected credential is unavailable")`. `MySQLAdapter.connect()` at the credential acquisition/validation block then caught every provider exception and replaced it with `ToolkitError("CredentialRejected", "Monitoring credential unavailable or prohibited.") from None`. This discarded the original exception. Since the previous invocation did not record that inner exception, its exact runtime branch cannot be recovered. The given successful `test-connection` result is consistent with its resolver finding the alias in Windows Credential Manager before checking the Session.
+
+`dba test-connection` constructs the existing `CredentialResolver` in `auto` mode, which checks Windows Credential Manager first, then an active Session bound to the selected encrypted Store, then an existing encrypted file Store. It resolves the Inventory alias once, assigns a cached provider, and lets the Adapter apply its normal monitoring account validation. An `UNLOCKED` Session only establishes Session availability; the alias must also be present under the exact Store path/backend binding. Runtime readiness labels for Windows Credential Manager and Encrypted Local Store describe distinct providers and may both be ready.
+
+The verifier now uses that resolver and order, with the same default `auto` mode and matching optional `--credential-backend` / `--credential-store-path` selection. It resolves once and shares the cached credential with target and observer Adapters. Interactive enrollment is disabled for this automated tool. A resolver failure is reported at the credential stage by its safe Toolkit error type before Adapter initialization. Database error payloads, when present, continue through the existing sanitized Adapter payload path. The read-only account and server-version gates are unchanged.
+
+ISOLATED_OFFLINE_TEST: regression tests cover an unlocked Session alongside a credential available from the Inventory-selected alias in Windows Credential Manager, a credential returned from a path-bound unlocked Session, absence from all selected sources without prompting, and reuse of one resolved credential object by both adapters. Targeted acceptance tests: 41 passed. Full pytest: 1723 passed, 3 skipped. Ruff passed for `dba tests scripts`. Strict MyPy passed for 81 source files. `dba validate` passed for 4 assets and 119 formal SQL scripts. `git diff --check` passed. No real database connection or permission operation was performed.
+
+After separate authorization, run in native Windows PowerShell Desktop with the existing credential session unlocked and a new directory under `reports`.
+
+```powershell
+Set-Location -LiteralPath 'D:\DBA\DBAToolKit'
+.\.venv\Scripts\python.exe -m scripts.acceptance.verify_mysql_timeout `
+  --inventory .\config\inventory\mysql\mysql.test.yaml `
+  --output .\reports\mysql-timeout-8411-review-v2
+```
+
+## 91. MySQL SESSION server-timeout race and observer follow-up — 2026-11-14
+
+Scope: `SQL-TIMEOUT-CANCEL-VERIFY-009`, MySQL Adapter SESSION timeout budgeting and the acceptance tool's Performance Schema observer. Baseline HEAD remains `e41fbb2b867d4cf08fd652b95cf3a91c19f8f86c`. No real database operation was performed during this follow-up.
+
+### User-provided first real run (`WINDOWS_LOCAL_REAL_E2E`)
+
+- SESSION case: `max_execution_time=1000 ms` and client Deadline `1000 ms`; client `ExecuteTimeout` arrived first, `vendor_code` was empty, cancellation was `CANCEL_STATUS_UNKNOWN`, observer stop evidence was `UNKNOWN`, and `END_EVENT_ID` was null. This did not verify server-first stopping.
+- Independent hint control: `MAX_EXECUTION_TIME(600)` returned native MySQL error `3024` after 625 ms; cancellation was `CANCELLED_CONFIRMED`; the old connection was discarded and a fresh connection completed Preflight. This verified the hint control only, not the SESSION case.
+
+These are user-provided results from the earlier Windows run. They were not rerun or independently reproduced in this offline session.
+
+### Implementation and observer evidence
+
+The Adapter retains the existing per-statement absolute `SqlDeadline`. After creating the SESSION setup cursor it floors the actual remaining budget in milliseconds, then computes:
+
+```text
+candidate_server_limit_ms = client_remaining_before_SET_ms
+                            - 250 ms SET reserve
+                            - 250 ms server-response margin
+```
+
+It never sends a value below 1 ms or zero. It records the candidate and sent value separately. After `SET SESSION` returns and the SELECT cursor is created, it checks the same Deadline again and sends the SELECT only when `client_remaining_before_execute_ms > server_limit_ms + 250 ms`. If that reserve is unavailable, it returns a TIMEOUT result with cancellation `NOT_APPLICABLE` because the diagnostic SELECT was not sent, and discards the connection. A Deadline/socket timeout during an operation remains `CANCEL_STATUS_UNKNOWN`; client waiting is not reported as server cancellation. Audit fields include the pre-SET and pre-Execute remaining budgets, candidate/sent server cap, both reserves, SET elapsed time, and execution phase.
+
+The 250 ms reserves are a finite race-reduction policy, not a mathematical guarantee under arbitrary network delay. The acceptance tool checks the recorded pre-Execute and post-send margins; only a server `3024` or valid lifecycle evidence can confirm server-side stop.
+
+The observer is bound to the target's recorded `CONNECTION_ID` and its preflight `THREAD_ID`. Its independent lifecycle status now distinguishes `RUNNING`, `ENDED`, `CONNECTION_DISAPPEARED`, `CONNECTION_ID_REBOUND`, `HISTORY_NOT_VISIBLE`, and `INSUFFICIENT`. Only an exact fixture event first observed active and later found with a valid `END_EVENT_ID` for the same `(THREAD_ID, EVENT_ID)` is `ENDED`. Current-event disappearance by itself is not treated as an end. The result's native 3024 evidence is stored separately as `server_error_evidence`; it does not overwrite the observer lifecycle result. No new database read permission was identified, so `DATABASE_PERMISSIONS.md` was not changed.
+
+### `ISOLATED_OFFLINE_TEST`
+
+- Focused MySQL Adapter and acceptance-tool tests: **116 passed**.
+- Full pytest: the first attempt reached 1730 passed / 3 skipped before an unrelated SQL Server acceptance test failed to write under the sandbox-managed default Windows Temp directory. Rerun with process-scoped `TEMP` and `TMP` pointing to the repository `.tmp`: **1731 passed, 3 skipped**.
+- Full `ruff check dba tests scripts`: passed.
+- Strict configured MyPy: `mypy dba` passed for 80 source files; the explicit-package run including the acceptance verifier passed for 81 source files. A supplemental ad hoc run that also type-checks test modules reported 36 diagnostics in the test files (test import resolution, exports and test-double typing); tests are not included in the repository's configured `mypy dba` gate, and no source/script diagnostics were reported.
+- `dba validate`: passed for 4 assets and 119 SQL scripts.
+- `git diff --check`: passed; Git emitted only its existing LF-to-CRLF working-copy advisories for `dba/mysql.py` and `tests/test_mysql.py`.
+
+### Remaining evidence
+
+Current-HEAD MySQL 8.4.11 real rerun is `NOT_EXECUTED`; the user-provided first run remains the only `WINDOWS_LOCAL_REAL_E2E` evidence. The SESSION case must be rerun to verify native 3024 and the newly recorded margin. Streaming Fetch remains blocked because the existing Adapter chooses streaming cursors from formal script names, so the test fixture cannot exercise that path without a separate scoped change. No real database, GRANT, REVOKE, KILL, commit, or push occurred. Stop for human acceptance.
+
+## 92. MySQL 8.4.11 SESSION/HINT verification and Fetch acceptance path — 2026-11-14
+
+Scope: `SQL-TIMEOUT-CANCEL-VERIFY-009`, based on user-provided MySQL Community 8.4.11 real-run evidence. Results below were supplied by the user and were not rerun in this offline development turn.
+
+### User-provided `WINDOWS_LOCAL_REAL_E2E` results
+
+| Case | Result | Connection / recovery | Output parity |
+|---|---|---|---|
+| SESSION `max_execution_time` | `SERVER_3024`; native code 3024; Execute; client Deadline 1000 ms; server limit 500 ms; elapsed 500 ms; 500 ms client budget remained on server response; `CANCELLED_CONFIRMED`; one SELECT; SESSION timing and audit value matched | Old connection `DISCARDED`; Adapter detached it and Driver Socket closed; new connection ID 15 passed full Preflight and an independent read-only query; earlier successful collection retained | HTML, JSON, CLI, JSONL consistent |
+| Hint positive control | `MAX_EXECUTION_TIME(600)` returned native 3024 after 610 ms in Execute; `CANCELLED_CONFIRMED` | Old connection `DISCARDED`; new connection ID 16 passed Preflight and an independent read-only query | All four outputs consistent |
+
+Both independent observer runs reported `CONNECTION_DISAPPEARED`, not `ENDED`; `end_event_id` remained null. Database-side session disappearance confirmation is `NOT_EXECUTED`. The native 3024 response is direct server timeout evidence, kept separate from the observer's incomplete event-lifecycle evidence. This record does not claim a complete Performance Schema event lifecycle.
+
+The run recorded `adapter_modified_for_timeout_race=true` and `session_timeout_race=KNOWN_LIMITATION_IN_PRODUCTION_ADAPTER`. The 250 ms setup/response margins reduce the race but cannot guarantee server-first behavior under arbitrary network delay. Fetch remains unverified until a real streaming Fetch run; SHOW automatic cancellation remains `BLOCKED`. `SQL-TIMEOUT-MYSQL-005` is not DONE and this evidence does not close the umbrella `SQL-TIMEOUT-CANCEL-VERIFY-009`.
+
+### Fetch acceptance entry point
+
+Static review confirmed that the production Adapter selects PyMySQL `SSCursor` only when a script name is in `MySQLAdapter.STREAMING_SCRIPTS`; `dba/mysql_slow.py` invokes the existing formal Collector/Registry path, and the formal streaming names remain unchanged. The earlier acceptance fixtures were outside that name set, so they always received buffered cursors. The acceptance harness now adds only the reviewed `timeout_fetch` name to the target Adapter instance's set after Registry re-authorization. The class-level default, existing Collectors, formal SQL whitelist and normal report behavior are unchanged.
+
+The temporary Registry fixture is a reviewed, bounded, read-only `SELECT 1 ... UNION ALL SELECT 2 + SLEEP(3)`, with a 2-second script deadline and four-row bound. `TimedCursor` records the actual requested cursor class and each bounded `fetchmany(1)` call against the same socket-installed absolute `SqlDeadline`. The verifier requires at least one row to have reached the client before a later Fetch fails, then requires the failed `CollectorResult` to expose no partial rows, the uncertain streaming connection to be discarded, a fresh full Preflight, and a separate read-only recovery query. It records a native 3024/FETCH outcome separately from a client socket timeout with cancellation still unknown. The live Fetch behavior and whether this SELECT reliably yields its first row before the SLEEP row are not asserted without the authorized Windows run.
+
+### `ISOLATED_OFFLINE_TEST`
+
+- MySQL Adapter plus timeout acceptance verifier targeted tests: **119 passed** after the Fetch fixture and single-instance streaming opt-in were added.
+- The Fetch fake-driver test requests the installed PyMySQL `SSCursor` class, returns one row, then raises either native 3024 or a client socket timeout during a later `fetchmany`; it verifies distinct classifications, discarded connection, empty failed result, retained prior success and full Preflight on recovery.
+- Full pytest: **1734 passed, 3 skipped** (`TEMP`/`TMP` pointed to the repository `.tmp` directory).
+- Ruff (`ruff check dba tests scripts`): passed.
+- Strict MyPy (`mypy dba scripts/acceptance/verify_mysql_timeout.py`): 81 source files passed.
+- `dba validate`: 4 assets and 119 SQL scripts passed.
+- `git diff --check`: passed; Git printed its existing LF-to-CRLF advisory for the pre-existing modified `dba/mysql.py` and `tests/test_mysql.py`.
+
+### Next authorized-host command
+
+After human review, run from Windows PowerShell Desktop in the repository's `.venv`. The output directory must be new. This command performs the real MySQL cases; it was **not run in this development turn**:
+
+```powershell
+Set-Location -LiteralPath 'D:\DBA\DBAToolKit'
+$runId = Get-Date -Format 'yyyyMMdd-HHmmss'
+.\.venv\Scripts\python.exe -m scripts.acceptance.verify_mysql_timeout `
+  --inventory .\config\inventory\mysql\mysql.test.yaml `
+  --output ".\reports\mysql-timeout-8411-fetch-$runId"
+```
+
+No real database connection, permission change, KILL, DDL/DML, commit or push was performed for the Fetch entry-point work. No additional Performance Schema permission is requested; if the designated test account cannot observe its existing granted objects at runtime, the observer must remain insufficient/unknown rather than changing permissions.
+
+## 93. MySQL 8.4.11 Execute/Fetch results and cleanup review — 2026-11-14
+
+### User-provided `WINDOWS_LOCAL_REAL_E2E` results
+
+This evidence was provided by the user for the current MySQL 8.4.11 run; it was not executed or reproduced during this source review.
+
+- SESSION: native MySQL error `3024` arrived after `500 ms`.
+- Hint control: native MySQL error `3024` arrived after `610 ms`.
+- Fetch: PyMySQL `SSCursor` Execute completed successfully; Fetch returned one row, and a later Fetch received native error `3024`.
+- The incomplete result was discarded. The Adapter detached the old connection and the Driver Socket closed. A new connection completed Preflight.
+- JSON, JSONL, HTML and CLI output were consistent.
+
+The prior supplied observer payload still records `CONNECTION_DISAPPEARED`, `END_EVENT_ID=null`, and `database_session_disappearance=NOT_EXECUTED` (Acceptance §92). The current result summary did not provide a refreshed observer lifecycle payload. These fields are not replaced by the direct 3024 results: the server error confirms MySQL reported a statement timeout; it does not establish a complete Performance Schema event lifecycle.
+
+### Code-path review and limited reporting correction
+
+The production Adapter's SESSION path computes `floor(remaining_before_SET_ms) - 250 ms setup reserve - 250 ms response margin`; it refuses non-positive server caps and checks the original Deadline again after SET and cursor allocation. The real 500 ms result is consistent with this code path. The post-SET check prevents a delayed SET from sending a SELECT without the required remaining budget. The two 250 ms reserves are finite guards: a longer setup delay blocks the SELECT, while network/response delay after dispatch can still exceed the response margin. The real result validates this run, not an arbitrary-network guarantee. No Adapter logic change was needed.
+
+For PyMySQL 2.2.8, source review found that a server error packet received while fetching clears the unbuffered-result active flag before raising. The Adapter then calls connection close before `SSCursor.close()`. For the reported 3024 Fetch path, this avoids draining the rest of the result; the connection close sends best-effort QUIT and force-closes the underlying socket. The Adapter drops its connection reference and readiness state before closing; it has no connection pool, and `execute_readonly` rejects use before a fresh Preflight. If physical close cannot be confirmed, the shared error payload must retain connection state `UNKNOWN`; it is not safe to reuse.
+
+The observer reports `CONNECTION_DISAPPEARED` because after the target receives 3024 the Adapter closes the target session; the independent `threads WHERE PROCESSLIST_ID = ...` lookup then no longer finds that server thread. MySQL 8.4 documents that per-thread `events_statements_history` rows are discarded when their thread ends, while `events_statements_history_long` rows persist separately; `history_long` is optional and cannot be enabled by the verifier. Thus current-event disappearance plus absent thread does not produce the event's `END_EVENT_ID`. Neither state overrides the direct 3024 evidence. See the [Performance Schema event-table lifecycle](https://dev.mysql.com/doc/refman/8.4/en/performance-schema-event-tables.html) and [`events_statements_history` reference](https://dev.mysql.com/doc/refman/8.4/en/performance-schema-events-statements-history-table.html).
+
+Review found that `database_session_disappearance` was hard-coded to `NOT_EXECUTED` even though the lifecycle observer already makes a separate `threads` query. The acceptance harness now performs one additional bounded, read-only `threads` query after the target result and records `ABSENT`, `PRESENT`, `CONNECTION_ID_REBOUND` or `UNKNOWN`, plus whether the Adapter had detached at probe time. It explicitly emits `query_stop_confirmed=false`: a missing thread row is session-visibility evidence only, not proof that the server stopped because of the timeout. This uses the same already-checked `performance_schema.threads` SELECT; no permission change or additional grant is proposed. The earlier raw value remains preserved above.
+
+### `ISOLATED_OFFLINE_TEST`
+
+- Focused MySQL Adapter and acceptance tests: **125 passed**.
+- New controlled observer tests cover absent/present/rebound/multiple-row/error outcomes and verify that session absence never becomes query-stop confirmation.
+- Fetch regression checks confirm the old connection is unusable before re-preflight (`PreflightRequired`), the query was attempted once, the failure result stays empty, and successful pre-timeout evidence remains intact.
+- Full pytest: **1740 passed, 3 skipped** (`TEMP`/`TMP` set to a workspace-local temporary directory).
+- Ruff (`ruff check dba tests scripts`): passed.
+- Strict MyPy (`mypy dba scripts/acceptance/verify_mysql_timeout.py`): 81 source files passed.
+- `dba validate`: 4 assets and 119 SQL scripts passed.
+- `git diff --check`: passed; Git emitted only existing LF-to-CRLF working-copy advisories for prior modifications in `dba/mysql.py` and `tests/test_mysql.py`.
+
+No real database, KILL, DDL/DML, GRANT, REVOKE, commit or push was performed during this review. `SQL-TIMEOUT-CANCEL-VERIFY-009` remains open; `SQL-TIMEOUT-MYSQL-005` SHOW cancellation remains BLOCKED.
+
+## 94. MySQL 8.4.11 final host run and session visibility — 2026-11-14
+
+`WINDOWS_LOCAL_REAL_E2E` — new run on the authorized Windows PowerShell Desktop host with the project `.venv` and Credential Session `UNLOCKED`. The single enabled `mysql84` test Inventory matched the loopback target; the verifier accepted MySQL Community 8.4.11 and the non-privileged read-only account through its normal preflight. HEAD was `e41fbb2b867d4cf08fd652b95cf3a91c19f8f86c` with the existing working tree changes. Exit `0`, verifier `PASS`. Original artifacts are preserved in `reports/mysql-timeout-8411-final-20261114-223323/` (`summary.json` and four outputs per case).
+
+| Case | Server timeout and phase | Timing and result | Independent session visibility |
+|---|---|---|---|
+| SESSION | 3024 / TIMEOUT / Execute | SET succeeded with a 500 ms server limit under a 1000 ms client Deadline; trace recorded 1000 ms before/after SET at its clock resolution. SELECT shared the Deadline and received 3024 after 500 ms with 500 ms client budget remaining. SET/SELECT timing and audit limit checks passed. | `ABSENT`, after Adapter detach; `query_stop_confirmed=false` |
+| Hint | 3024 / TIMEOUT / Execute | 600 ms hint returned 3024 after approximately 609 ms; client budget remained. | `ABSENT`, after Adapter detach; `query_stop_confirmed=false` |
+| SSCursor Fetch | 3024 / TIMEOUT / Fetch | 1500 ms SESSION limit under a 2000 ms client Deadline. Execute succeeded and the first Fetch returned one row. A later Fetch received 3024; the failed result contained no rows. Case elapsed approximately 1515 ms, timeout payload 1500 ms. | `ABSENT`, after Adapter detach; `query_stop_confirmed=false` |
+
+All three cases recorded `CANCELLED_CONFIRMED` from native 3024 and `DISCARDED` with Adapter detach and closed driver socket. Each attempted the target SELECT once, retained the earlier successful result and passed recovery through fresh Preflight and the identity query. JSON, JSONL, HTML and CLI parity checks passed for all three, including error projection and credential alias redaction. A client-first timeout was not observed. The fixed response margin remains a guard against a timing race and does not bound arbitrary network latency.
+
+The lifecycle observer reported `CONNECTION_DISAPPEARED` in all three cases, with `END_EVENT_ID=null`. The distinct `threads` probe verified that the target session was not visible at probe time. Complete statement lifecycle evidence remains unavailable. SQL timeout is established by the server error, while a client-only timeout would leave server stop unconfirmed.
+
+The user-provided earlier real evidence remains in §§91–93. `ISOLATED_OFFLINE_TEST` results in §93 remain historical and were not rerun. Client-first timeout on this final run was not observed, and real tests of other engines or SHOW cancellation were `NOT_EXECUTED` in this checkpoint. Overall `SQL-TIMEOUT-CANCEL-VERIFY-009` stays `E2E_PENDING` for the remaining per-engine scope and incomplete lifecycle evidence. No permission, consumer, Adapter or Registry changes were made.
+
+## 95. PostgreSQL 16.15 standalone timeout acceptance tooling — 2026-11-15
+
+The user supplied the earlier authorized Windows connection precheck for the `pg16` test asset, PostgreSQL 16.15, psycopg 3.3.6, Windows Credential Manager and a non-privileged account. This is connection evidence. PostgreSQL timeout `WINDOWS_LOCAL_REAL_E2E` remains `NOT_EXECUTED` in this development checkpoint.
+
+The standalone verifier uses the CLI CredentialResolver and holds one resolved credential in process for target, observer and reconnect. It preserves the Inventory database. A temporary formal Registry copies the Adapter's REQUIRED files and adds four bounded, reviewed fixtures with pinned file digests. The observer uses only PID, backend start, state and wait event. Initial visibility and the matching backend start guard against false absence and PID reuse. An observer denial retains its sanitized SQLSTATE and does not imply query stop or trigger any grant.
+
+The verifier uses a two-second diagnostic ceiling in memory and a one-second timeout on the bounded three-second sleep fixture. The Adapter starts its client Deadline before its own session `set_config`. Server `statement_timeout` starts when PostgreSQL receives the statement. Equal nominal limits can therefore favor the client. The trace records the original Deadline, SET timing and returned setting, libpq dispatch timestamp and remaining budget, and result or exception. The dispatch timestamp does not measure server receipt. An English server diagnostic explicitly identifying statement timeout with `57014` can confirm that mechanism. Client Deadline, client socket timeout and connection loss leave server stop unconfirmed. No CancelRequest, permission change, Adapter change or Runtime YAML change is needed to run the tool.
+
+The verifier checks a complete normal result, failure cleanup, rejection before re-Preflight, a new backend and independent SELECT, preserved normal data, and four rendered outputs from the same timeout result. Network Fetch timeout remains `BLOCKED` because the Adapter uses a default psycopg client-buffered Cursor. The normal case still records local Fetch timing. Raw fixture SQL is excluded from tracing and observations.
+
+Authorized Windows PowerShell Desktop run command (from the repository root):
+
+```powershell
+$runId = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+$output = ".\reports\postgresql-timeout-1615-$runId"
+.\.venv\Scripts\python.exe -m scripts.acceptance.verify_postgresql_timeout `
+  --inventory .\config\inventory\postgressql\postgresql.test.yaml `
+  --output $output
+$runExit = $LASTEXITCODE
+"ExitCode = $runExit"
+"Output = $output"
+```
+
+The directory contains `summary.json`, the normal CollectorResult and, when Execute reaches an outcome, four timeout report formats. Exit `0` requires the confirmed server-timeout path, observed target activity and final session visibility, clean reconnect and report parity. Exit `1` preserves partial evidence, including a client-first outcome. Exit `2` records an incomplete run when the tool has created the output directory. For a reproducible client-first outcome, a possible follow-up for review is a strictly smaller per-statement server timeout with configuration and response time reserved inside the original Deadline. This checkpoint does not implement that change or establish that it is needed on the lab host.
+
+`ISOLATED_OFFLINE_TEST` — 82 focused PostgreSQL Adapter, classification and verifier tests passed. Full pytest with real system tests disabled and the short repo-local pytest base directory `.tmp/pgf` passed with **1750 passed, 3 skipped**. Two earlier full runs with different temporary directories each reported one failure in the existing Windows PowerShell portable-update rollback test (1749 passed, 3 skipped). Focused reruns of that test passed on both shell variants. The exact cause of the difference was not established and no updater code changed. Ruff passed for `dba tests scripts`, Strict MyPy passed for 81 files, `dba validate` passed for 4 assets and 119 formal SQL scripts, and `git diff --check` passed.
+
+## 96. PostgreSQL 16.15 equal-budget race and Adapter correction — 2026-11-15
+
+`WINDOWS_LOCAL_REAL_E2E` — original, pre-fix lab report: `reports/postgresql-timeout-1615-20261115-002519-457/summary.json`. Normal SELECT and Preflight passed. The server setting and client Deadline were both 1000 ms. The observer still saw activity at approximately 985 ms. Execute ended at the client deadline with no SQLSTATE and `CANCEL_STATUS_UNKNOWN`. The observer subsequently reported `ABSENT`; this records session visibility only. Driver close, Adapter detach, fresh Preflight and independent SELECT, prior data retention, and four-format parity passed. The run is `PARTIAL`; native 57014 from statement_timeout was not observed.
+
+The Adapter now computes the server threshold as floor of the remaining client milliseconds before SET minus 250 ms for setup and 250 ms for response. It applies only a positive value and checks the original Deadline again after SET and cursor creation. If the remaining budget cannot accommodate the server threshold plus the response reserve, it returns `ServerTimeoutBudgetUnavailable` and does not send the target SELECT. If the Deadline expires during SET, the resulting client timeout retains unknown cancellation and identifies the SessionSetup phase. The session value is cached per physical connection and the numeric server threshold is audited independently of the client Deadline. Execute and Fetch still share that same client Deadline.
+
+Native 57014 with an explicit primary statement-timeout message confirms the mechanism. A hint or context mentioning the setting cannot establish the cause. A client deadline alone leaves server cancellation unknown. The existing close/discard and fresh Preflight path applies without retrying the failed SQL.
+
+Post-fix lab timeout E2E is `NOT_EXECUTED`. The fixed margins reduce the documented race but cannot guarantee return of a server error under arbitrary network delay. Reuse the Windows PowerShell command from §95 with a new output directory. Network Fetch remains `BLOCKED`; no cursor routing or privileges changed.
+
+`ISOLATED_OFFLINE_TEST` — 119 focused tests passed across PostgreSQL Adapter, verifier, timeout classifications and report errors. The counting Fake Clock checks 500 ms, fractional rounding to 499 ms, a 1 ms minimum and refusal before SET or SELECT as budget is consumed. Full pytest: **1757 passed, 3 skipped**, with real system tests disabled. Ruff passed, Strict MyPy passed for 81 source files, `dba validate` passed for 4 assets and 119 formal SQL scripts, and `git diff --check` passed.
+
+## 97. PostgreSQL 16.15 server-side Execute timeout verification — 2026-11-15
+
+| Evidence | Result |
+|---|---|
+| Source | WINDOWS_LOCAL_REAL_E2E. Original user-provided report: reports/postgresql-timeout-1615-fixed-20261115-004245-409/summary.json. PostgreSQL 16.15, psycopg 3.3.6. |
+| Server-side Execute timeout | VERIFIED. The verifier reported PASS / SERVER_STATEMENT_TIMEOUT. PostgreSQL returned native SQLSTATE 57014 and the primary message “canceling statement due to statement timeout”. Category TIMEOUT, mechanism POSTGRESQL_STATEMENT_TIMEOUT, cancellation CANCELLED_CONFIRMED. |
+| Budget and timing | Server statement_timeout 500 ms, client Deadline 1000 ms. SET succeeded in approximately 16 ms, the single SELECT returned the server error in 500 ms, and the Collector recorded approximately 516 ms total. |
+| Result and recovery | Normal SELECT passed and its result was retained. The failed query returned zero rows. Old connection DISCARDED, Adapter detached and driver connection closed. The Adapter required Preflight before reuse. Fresh connection Preflight and independent SELECT passed. |
+| Report parity | JSON, JSONL, HTML and CLI checks all passed. |
+| Independent observation | Target activity was observed, followed by ABSENT. The report retains query_stop_confirmed=false. Independent statement lifecycle evidence is incomplete. Native 57014 and its primary message establish server-side timeout. |
+| Network Fetch timeout | BLOCKED. The default psycopg Cursor buffers the server result during Execute. |
+
+The pre-fix PARTIAL real run and its original report remain in §96. This verification covers PostgreSQL 16.15 server-side Execute timeout. SQL-TIMEOUT-CANCEL-VERIFY-009 remains E2E_PENDING for the remaining scope, and SQL-TIMEOUT-001 remains IN_PROGRESS.
+
+## 98. Oracle call timeout standalone verifier — 2026-11-15
+
+The designated Inventory is config/inventory/oracle/oracle.test.yaml, asset oraclefree at loopback port 1521 and service freepdb1. The installed python-oracledb 3.4.2 defaults to Thin in the project venv. Thick Oracle Client is not active. Earlier Oracle Free 26ai (23.26.3.0.0, with V$INSTANCE reporting 23.0.0.0.0) and NON_PRIVILEGED account evidence remains historical. Current server/version and account Preflight have not been independently sampled in this checkpoint. The older Oracle integration script issues workload UPDATEs, so it was not used for this verifier.
+
+The Oracle Adapter starts a monotonic SqlDeadline after Registry authorization. Before Execute and each bounded Fetch it sets call_timeout to ceil(remaining seconds × 1000), with a positive minimum of 1 ms. The same deadline is checked after each call. On expiry no further Fetch starts. The driver applies call_timeout within a round-trip and may make multiple round-trips inside one Execute or Fetch call, with one threshold for that call. Recovery work can add latency. A call can exceed the client deadline before control returns; the Adapter detects the overrun on return and discards the connection. This is a driver timeout, not a database statement_timeout or independent proof of server stop. See the [python-oracledb connection API](https://python-oracledb.readthedocs.io/en/v3.4.2/api_manual/connection.html#oracledb.Connection.call_timeout), [prefetch and array fetching](https://python-oracledb.readthedocs.io/en/v3.4.2/user_guide/tuning.html#tuning-fetch-performance) and [Oracle OCI call timeout](https://docs.oracle.com/en/database/oracle/oracle-database/21/lnoci/handle-and-descriptor-attributes.html).
+
+In Thick mode a call timeout with a usable session can carry DPI-1067; DPI-1080 indicates the session was lost. Oracle Client 18c+ is required for that setting in Thick mode. The installed 3.4.2 error wrapper maps these to DPY-4024 and DPY-4011 and retains the native codes in the message. Thin uses DPY-4024 for call timeout and can report DPY-4011 when the session is lost. Toolkit reports DPY-4024 as TIMEOUT / DRIVER_REPORTED and DPY-4011 as CONNECTION_LOST with cancellation unknown. Offline injection also identified a classification gap: bare DPI-1067 or DPI-1080 without a session-dead flag or driver mapping is classified as SQL_EXECUTION_ERROR. The verifier records codes separately without changing the production normalizer.
+
+The standalone verifier uses the production Adapter and Preflight and one resolved CLI credential for the target, observer and recovery. The temporary formal Registry stages required Oracle files and three small digest-pinned read-only fixtures. A one-row baseline and a 101-row probe test normal Execute and Fetch. The probe exceeds the Adapter's 100-row prefetch size without a heavy workload; the trace records driver call boundaries and timeout values, with estimated remaining time. It does not count wire round-trips. If an incidental probe failure occurs, the verifier saves trace and report evidence, checks that no retry occurred, and attempts to observe discard and reconnect through full Preflight under a new session identity. Four report formats are compared from the same failure result, and the earlier one-row result is retained.
+
+Forced live Execute and Fetch timeout are BLOCKED. Existing privileges and reviewed SQL do not provide a reliable, safely bounded delay. The tool does not call sleep packages, increase privileges, generate expensive Cartesian products or force a timeout. Observer identity is checked separately and independent server query lifecycle evidence remains NOT_EXECUTED. Internal multi-round-trip behavior and discard/recovery are covered by controlled-clock Fake Driver tests. Current WINDOWS_LOCAL_REAL_E2E is NOT_EXECUTED. The older live reports are preserved.
+
+Authorized Windows PowerShell Desktop command for the normal and multi-batch Fetch probes:
+
+~~~powershell
+Set-Location -LiteralPath 'D:\DBA\DBAToolKit'
+$runId = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+$output = ".\reports\oracle-timeout-$runId"
+.\.venv\Scripts\python.exe -m scripts.acceptance.verify_oracle_timeout --inventory .\config\inventory\oracle\oracle.test.yaml --output $output
+$runExit = $LASTEXITCODE
+"ExitCode = $runExit"
+"Output = $output"
+~~~
+
+Exit 1 is a completed PARTIAL report, including BLOCKED timeout scenarios. Exit 2 is an incomplete run. The parent remains IN_PROGRESS and SQL-TIMEOUT-CANCEL-VERIFY-009 remains E2E_PENDING.
+
+`ISOLATED_OFFLINE_TEST` — 91 focused Oracle verifier, Adapter and timeout classification tests passed. Full pytest passed **1767 tests with 3 skipped** and real system tests disabled. Ruff passed for `dba tests scripts`. Strict MyPy passed for 81 source files, `dba validate` passed for 4 assets and 119 formal SQL scripts, and `git diff --check` passed.
+
+## 99. Oracle Thin DPY/DPI timeout error classification follow-up — 2026-11-15
+
+Scope: corrective offline review of Oracle timeout/error normalization for `SQL-TIMEOUT-CANCEL-VERIFY-009`. No Oracle connection, credential lookup, SQL execution, permission operation, Adapter, Inventory, runtime configuration, or formal Registry SQL change was made.
+
+The project `.venv` contains python-oracledb 3.4.2 in Thin mode. Offline inspection of its actual `oracledb.errors._Error` object shows structured `full_code`, `code`, `is_session_dead`, `isrecoverable`, and `message` fields. For driver errors, `code` can be zero; classification therefore uses the structured `full_code` and the session-dead flag rather than treating code zero as a classification. In this driver build a DPY-4024 call timeout has `is_session_dead=false`; DPY-4011 has `is_session_dead=true`. Constructed error objects using DPI-1067 and DPI-1080 messages are wrapped as `full_code=DPY-4024` and `full_code=DPY-4011` respectively, while retaining the DPI text in the message. No Thick client was loaded or exercised.
+
+The shared normalizer now recognizes structured DPY-4024 and DPI-1067 as Oracle single-call `TIMEOUT` with `DRIVER_REPORTED` / `ORACLE_CALL_TIMEOUT`; it does not claim the server stopped the SQL. DPY-4011 and DPI-1080, plus a true `is_session_dead` field, classify as `CONNECTION_LOST` with `CANCEL_STATUS_UNKNOWN`. Connection-dead evidence takes precedence over a timeout alias. The Adapter’s own absolute `SqlDeadlineExpired` remains a separate client deadline path with unknown server-stop status. Execute versus Fetch continues to come from the Adapter’s current operation phase.
+
+On any query error the existing Adapter clears partial rows, closes and detaches the connection, and records `DISCARDED` only when close succeeds (otherwise `UNKNOWN`). Thus even DPY-4024’s reusable-session driver flag does not lead Toolkit to reuse the connection. DPY-4011 additionally reports the driver session-dead flag. This is verified with offline fakes only; physical connection behavior against Oracle remains unverified.
+
+`ISOLATED_OFFLINE_TEST`: the focused Oracle Adapter, Oracle acceptance verifier, and shared timeout-classification suite passed **94 tests**. The full suite passed **1770 tests, 3 skipped**. An initial full run exposed a real-clock-sensitive Oracle timeout assertion and a sandbox Temp permission failure in an unrelated SQL Server acceptance test; the Oracle assertion now injects the existing Fake Clock, and the final rerun placed process temporary files under the repository `.tmp` directory. Ruff passed for `dba tests scripts`; Strict MyPy passed for **81 source files**; `dba validate` passed for **4 assets and 119 SQL scripts**; `git diff --check` passed (Git printed existing LF/CRLF advisories only).
+
+`WINDOWS_LOCAL_REAL_E2E`: `NOT_EXECUTED`. The Oracle live timeout scenarios from §98 remain BLOCKED / NOT_EXECUTED; no Thin/Thick database behavior is upgraded to VERIFIED by these tests. `CLASSIFY-003` remains at its accepted status with this corrective offline regression recorded; `SQL-TIMEOUT-CANCEL-VERIFY-009` remains `E2E_PENDING` and parent `SQL-TIMEOUT-001` remains `IN_PROGRESS`.
+
+## 100. Oracle Thin loopback TCP-delay acceptance infrastructure — 2026-11-15
+
+Scope: implement an independent, standard-library TCP response-delay proxy and stage-gated Oracle acceptance path for python-oracledb Thin mode. No Oracle database connection, credential resolution, SQL, permission operation, formal Adapter/error-model/Registry/Inventory/runtime/fixture change, or server configuration change was performed in this task.
+
+`CODE_COMPLETE`: `scripts/acceptance/oracle_tcp_delay_proxy.py` binds only to `127.0.0.1`, accepts only a verified loopback upstream, relays opaque bytes in both directions, and never records payload. It supports a bounded server-to-client response gate for `Execute` and `Fetch`, a watchdog release, one active client at a time, monotonic byte/state events, exclusive trace creation, and cleanup reporting for sockets, worker thread, and listener port. A failed proxy remains `FAILED`; cleanup cannot turn it into a successful `CLOSED` state.
+
+The existing Oracle acceptance harness now has an opt-in `--tcp-delay-proxy` path. The target adapter is routed through the proxy only after its Inventory endpoint is checked; the independent observer remains direct. Authentication, Preflight, and the baseline query run with the gate disarmed. For Fetch, the harness arms only before `timeout_normal` Fetch call 101, after recording one successful Execute and 100 one-row Fetch calls. It also requires post-arm client-to-server bytes, server-to-client bytes, held response bytes, and a driver-reported call timeout before a timeout case can pass. The quiet-window evidence is explicitly limited to local proxy socket observations; it does not prove absence of future in-flight traffic or server work. `SERVER_QUERY_STOP_CONFIRMED` remains false for all proxy-induced timeouts.
+
+`ISOLATED_OFFLINE_TEST`: the proxy, harness, Oracle Adapter and timeout-classification targeted suites passed **109 tests**. The full suite passed **1785 tests, 3 skipped**. One initial full run hit a pre-existing SQL Server acceptance test failure because Python's temporary directory resolved outside the writable sandbox; rerunning the full suite with process-local `TEMP`/`TMP` and pytest basetemp under the repository `.tmp` passed. `ruff check dba tests scripts` passed. Strict MyPy passed for **82 source files**. `dba validate` passed for **4 assets and 119 SQL scripts**. `git diff --check` passed. No real system tests were enabled.
+
+`WINDOWS_LOCAL_REAL_E2E`: `NOT_EXECUTED`. The proxy has only been exercised with local socket peers and Fake Drivers. Whether Oracle Thin emits the expected Execute and later Fetch round-trips under this proxy, which DPY/DPI error is raised, and how the live Oracle session behaves remain unverified. No proxy-induced client timeout is evidence that Oracle stopped the SQL. The separate `DRIVER_REPORTED`, `CONNECTION_DISCARDED`, and `SERVER_QUERY_STOP_CONFIRMED` evidence fields must remain distinct in a live report. `SQL-TIMEOUT-CANCEL-VERIFY-009` remains `E2E_PENDING`; no parent task state changed.
+
+Authorized-host run command (requires the approved Windows PowerShell Desktop session, valid Credential Session, and revalidated `oraclefree` test Inventory asset):
+
+~~~powershell
+Set-Location -LiteralPath 'D:\DBA\DBAToolKit'
+$runId = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+$output = ".\reports\oracle-timeout-$runId"
+.\.venv\Scripts\python.exe -m scripts.acceptance.verify_oracle_timeout `
+  --inventory .\config\inventory\oracle\oracle.test.yaml `
+  --tcp-delay-proxy `
+  --output $output
+$runExit = $LASTEXITCODE
+"ExitCode = $runExit"
+"Output = $output"
+~~~
+
+Do not interpret a `PARTIAL` proxy report as server-side cancellation confirmation. Review `oracle_proxy_trace.json`, the case-level evidence, and separate live driver/connection fields before accepting either Execute or Fetch. The existing formal Oracle Adapter and its configured array/prefetch sizes were not changed.
+
+## 101. Oracle Thin proxy report review and bounded response-release follow-up — 2026-11-15
+
+The supplied prior `WINDOWS_LOCAL_REAL_E2E` report is `reports/oracle-timeout-proxy-20261115-202942-639/summary.json`; its overall status remains `PARTIAL`.
+
+Execute recorded `DPY-4011` / `CONNECTION_LOST`, `CANCEL_STATUS_UNKNOWN`, `call_timeout=2000 ms`, and 4109 ms elapsed. The proxy held 462 server-to-client bytes and forwarded none. It observed an additional 11 client-to-server bytes about 2000 ms after arming. At driver failure, the gate was released in `discard` mode (`driver-operation-error`); the trace records 473 total server response bytes discarded. The proxy did not block client-to-server traffic, but it withheld the server-to-client response stream through the driver failure. This is consistent with delayed timeout-recovery traffic contributing to the connection-loss result; the 11-byte message and its protocol meaning are unknown because payload is neither parsed nor recorded.
+
+Fetch recorded `DPY-4011` / `CONNECTION_LOST`, `CANCEL_STATUS_UNKNOWN`, and 4141 ms elapsed with a 2000 ms call timeout. The same trace establishes the Fetch network path: Execute completed, 100 one-row Fetch calls returned, the gate armed before Fetch call 101, and the gate recorded client-to-server bytes, 107 server-to-client bytes, 96 response bytes held, zero forwarded, and all 107 received bytes discarded after the operation error. The pre-gate quiet window is local Socket evidence only. It does not identify the Oracle Net messages or prove server-side SQL stop.
+
+Both cases recorded `DRIVER_REPORTED` as false for call-timeout confirmation because DPY-4011 is a connection-loss report, not DPY-4024/DPI-1067. Both cases separately confirmed `CONNECTION_DISCARDED`: Adapter detached, Driver close returned, and proxy connection closed. Recovery passed for both: full Preflight, new session identity, independent SELECT, earlier baseline retained, and JSON/JSONL/HTML/CLI parity all passed. `SERVER_QUERY_STOP_CONFIRMED` remained false.
+
+The acceptance path now also offers `--proxy-release-after-client-data`. In that experiment the proxy still forwards every client byte immediately and records only byte counts. After it holds a server response, it releases the held response in the forward direction once it observes at least one later client byte and the minimum hold reaches the configured 2-second SQL timeout plus 100 ms. A 3.5-second hard gate lifetime forwards the response if the byte trigger does not arrive. This allows the next run to test whether server return traffic was being withheld during Thin timeout recovery. It does not assert that the extra client bytes mean a cancellation request. If the driver later reports DPY-4024/DPI-1067, the proxy records the timeout even though the response was already released; DPY-4011 remains `CONNECTION_LOST`. In all outcomes `SERVER_QUERY_STOP_CONFIRMED` remains false.
+
+`ISOLATED_OFFLINE_TEST`: targeted Oracle proxy, acceptance harness, Adapter and classification suites passed **113 tests**. The full suite passed **1789 tests, 3 skipped** when process-local `TEMP`/`TMP` and pytest basetemp were directed to repository `.tmp`. The run without the process-local temp override reproduced one unrelated SQL Server acceptance-test sandbox permission failure; no such project test or source was changed. Ruff passed for `dba tests scripts`; Strict MyPy passed for **82 source files**; `dba validate` passed for **4 assets and 119 SQL scripts**; `git diff --check` passed.
+
+No new real Oracle test was run in this turn. The available shell is PowerShell Core 7.6.9 from the Codex runtime package, not the required authorized Windows PowerShell Desktop host. Thus the controlled-release behavior against Oracle is `NOT_EXECUTED`; this checkpoint remains `PARTIAL`, with no `VERIFIED` result and no task-state change. The next run must preserve the existing report and use a new output directory with both proxy flags:
+
+~~~powershell
+Set-Location -LiteralPath 'D:\DBA\DBAToolKit'
+$runId = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+$output = ".\reports\oracle-timeout-$runId"
+.\.venv\Scripts\python.exe -m scripts.acceptance.verify_oracle_timeout `
+  --inventory .\config\inventory\oracle\oracle.test.yaml `
+  --tcp-delay-proxy `
+  --proxy-release-after-client-data `
+  --output $output
+$runExit = $LASTEXITCODE
+"ExitCode = $runExit"
+"Output = $output"
+~~~
+
+## 102. Oracle Thin controlled response release and DPY-4024 — 2026-11-15
+
+The original Windows-host evidence is in `reports/oracle-timeout-release-20261115-215049-419/`. Oracle Free 23.26.3.0.0 and python-oracledb 3.4.2 Thin reported DPY-4024 in both phases, with driver limits of 2000 ms (Execute) and 1985 ms (Fetch), and 2235 ms collector elapsed in both. Fetch recorded a successful Execute, 100 consumed rows, and request and response traffic for Fetch call 101. Both cases discarded the connection and passed fresh Preflight and an independent SELECT. Server SQL stop remains unconfirmed.
+
+Both original gate predicates failed only because the zero-forwarding check used the cumulative count after arming. The trace records release, forwarding the 462-byte Execute or 96-byte Fetch held chunk, and the proxy recording DPY-4024, in that order at the same monotonic tick. Later sends account for the remaining 122 or 121 bytes in the respective totals of 584 and 217. The synchronous Thin driver handles the initial socket timeout before its recovery receive and raises DPY-4024 after that receive. See [python-oracledb 3.4.2 protocol source](https://github.com/oracle/python-oracledb/blob/v3.4.2/src/oracledb/impl/thin/protocol.pyx#L405-L424). The precise internal timeout instant and the meaning of the additional 11 client bytes are unobserved.
+
+The independent verifier now reports driver timeout and proxy gate verification separately. The proxy records send attempts before release, completed sends after release, and bytes flushed from the held chunk. The controlled policy requires its specified trigger and full held-chunk forwarding. The report records hold, release and driver exception observation times, an estimated driver timeout deadline, and explicit order for trace events even when timestamps tie. The estimate does not measure the internal socket timeout.
+
+`ISOLATED_OFFLINE_TEST`: 117 targeted tests passed, including before/after/tied or absent error observations, premature forwarding, incomplete forwarding and watchdog release. Ruff and Strict MyPy passed. No new Oracle run was performed. Keep the original report PARTIAL, `SERVER_QUERY_STOP_CONFIRMED=false`, and `SQL-TIMEOUT-CANCEL-VERIFY-009` open.
+
+## 103. Oracle Thin controlled release, separate Execute and Fetch runs — 2026-11-15
+
+`WINDOWS_LOCAL_REAL_E2E`, supplied reports reviewed in place. Both runs used the `oraclefree` lab, Oracle Free 23.26.3.0.0, python-oracledb 3.4.2 Thin, and a NON_PRIVILEGED monitoring account.
+
+| Selected case | Original report directory under `reports/` | Native error / driver limit / collector elapsed | Gate evidence | Other case |
+|---|---|---|---|---|
+| Execute | `oracle-timeout-release-r2-execute-20261115-223727-638` | DPY-4024 / 2000 ms / 2234 ms | 462 bytes held and flushed, zero before release, no overflow | Fetch NOT_EXECUTED |
+| Fetch | `oracle-timeout-release-r2-fetch-20261115-223742-084` | DPY-4024 / 2000 ms / 2233 ms | 96 bytes held and flushed, zero before release, no overflow. Execute succeeded, 100 rows were consumed, and Fetch call 101 produced request and response traffic. | Execute timeout NOT_EXECUTED |
+
+Each selected case is PASS, with `DRIVER_TIMEOUT_VERIFIED`, `PROXY_GATE_VERIFIED`, and `CONNECTION_RECOVERY_VERIFIED` all true. Both errors are TIMEOUT / ORACLE_CALL_TIMEOUT in the selected phase. The trace records release, forwarding of the held chunk, and then driver-error observation in order. Release and observation share a clock tick. Both runs discarded the old connection and incomplete result, performed no SQL retry, recovered through full Preflight on a new session, and passed the independent SELECT, baseline retention, four-format parity and proxy cleanup checks.
+
+The top-level PARTIAL applies to the complete acceptance scope. The unselected case is marked NOT_EXECUTED in each report and server stop remains unconfirmed. Oracle Thin client timeout, Execute, Fetch, proxy gate and connection recovery are VERIFIED for this lab. `SERVER_QUERY_STOP_CONFIRMED=false` in both original reports. The observer confirmed an independent session and did not record the target SQL lifecycle. `SQL-TIMEOUT-CANCEL-VERIFY-009` remains open. The earlier report in §102 and both separate-run reports are preserved.
+
+## 104. Oracle V$SESSION acceptance observer prototype
+
+`ISOLATED_OFFLINE_TEST`: `--observe-v-session` adds a separate direct observation worker to the independent acceptance verifier. Each selected probe has its own evidence in `session_observation`. Fake Driver, Fake Clock and integration cases cover binding the target, matching a fresh SQL execution, active/inactive transitions, SID reuse and disappearance, incomplete keys, another execution, permission and version errors, connection loss, sampling deadline, worker exit, post-error sample timing and redaction. All paths keep `query_stop_confirmed=false`. An initial test reproduced Windows CRLF in the temporary Registry read. The verifier now normalizes line endings only for the comparison against the fixed observer SQL, after normal Registry authorization.
+
+Final targeted pytest **134 passed**. Full pytest **1810 passed, 3 skipped** (POSIX permissions, unavailable Windows symlink privilege, and opt-in real system test). Ruff passed, Strict MyPy passed for **83 source files**, and `dba validate` passed for **4 assets / 119 formal SQL scripts**. `git diff --check` passed. Offline integration verifies observer failure isolation and omits raw error messages and binds from the observation report.
+
+`WINDOWS_LOCAL_REAL_E2E` for the observer is `NOT_EXECUTED`. No real database connection, credential resolution, grant or cancel operation occurred. Existing §103 client-side evidence is preserved. Deployed V_$SESSION and V_$SQL visibility and target execution sampling remain to be verified on the authorized Windows host. Server-side SQL stop remains NOT_CONFIRMED.
+
+## 105. Oracle observer automatic target tagging and exact child cursor checks — 2026-11-16
+
+`ISOLATED_OFFLINE_TEST`: for each opt-in probe the independent verifier sets a unique CLIENT_IDENTIFIER on the target Thin connection and completes the reviewed identity round trip before starting the direct observer. It binds the tag first, checks the existing target identity, and includes the pinned SID only in later samples to detect replacement or tag changes. The cursor sample retrieves candidates for the observed SQL_ID and checks child number, container and SQL text independently. The expected text uses the outer whitespace strip applied by python-oracledb 3.4.2, retaining all internal line endings. Ambiguity, SID reuse, tag mismatch, execution change and candidate overflow cannot promote an execution to an exact match. Reports store candidate metadata and comparison outcomes without SQL text.
+
+Targeted Oracle pytest passed **138 tests** covering the automatic tag and identity round trip ordering, independent observer preparation, SID reuse, duplicate tags, child and container differences, matching outer CRLF and rejecting internal CRLF differences, candidate ambiguity/overflow, and sampling around driver errors. Ruff passed. Strict MyPy passed for **83 source files**, and `dba validate` passed for **4 assets / 119 formal SQL scripts**. `git diff --check` passed.
+
+Corrected observer `WINDOWS_LOCAL_REAL_E2E`: `NOT_EXECUTED`. First run the direct normal fixture with `--observe-v-session` and review `session_observation.normal`. The run should show PREPARED with complete tagged session identity and record per-candidate results if the current SQL is sampled. A fast query may finish before a complete ACTIVE sample. Existing Windows reports are unchanged. `SERVER_QUERY_STOP_CONFIRMED=false` and the verification task remains open.
+
+## 106. Oracle observer READY, timing and previous execution evidence
+
+Historical host report `oracle-timeout-observe-direct-20261116-193624-410` completed the normal control with 101 rows. The ACTIVE sample and Execute/collector markers shared a monotonic tick. The sample lacked a complete current execution key. Later PREV snapshots did not include PREV_CHILD_NUMBER or exact server cursor text. The historical report remains unchanged.
+
+The independent observer now uses perf_counter_ns and event sequences for thread, readiness, actual Execute, completion and sample boundaries. It reports both clocks' declared resolutions and measured minimum positive transitions. It blocks opted-in Execute until a valid tagged baseline releases READY. Only samples wholly inside Execute with the existing exact match checks can produce ACTIVE_VERIFIED. After a successful call, a strictly later stable, new PREV key with the actual PREV_CHILD_NUMBER and a unique exact cursor can produce COMPLETED_BEFORE_SAMPLE. Observed intervening SQL, missing identity, boundary ties and ambiguity prevent promotion. Neither verdict confirms server cancellation.
+
+Registry, driver-stripped and server SQL fingerprints report character and UTF-8 byte counts, SHA-256 and the first differing byte offset. Difference context exposes whitespace escapes and masks other bytes. The observer uses a bounded relevant-child CLOB read when full text is needed. A SQL_TEXT prefix alone cannot establish equality.
+
+`ISOLATED_OFFLINE_TEST`: targeted Oracle pytest **155 passed**. Full pytest **1808 passed, 3 skipped, 23 failed**. The failures are Windows ACL checks in the existing encrypted credentials, legacy read-only migration, and SQLite credentials suites. A separate run with a fresh short temporary directory reproduced the same 23 failures. The SQLite store's DACL check rejected an unexpected trustee in the temporary test directory. No credential code, ACL checks or tests were changed to bypass them. Ruff passed, Strict MyPy passed for **83 source files**, `dba validate` passed for **4 assets / 119 formal SQL scripts**, and `git diff --check` passed.
+
+`WINDOWS_LOCAL_REAL_E2E` for this revision is `NOT_EXECUTED`. Use the direct `oraclefree` control with `--observe-v-session` on the authorized Windows PowerShell Desktop host, and inspect `session_observation.normal` for READY, sample boundaries, fingerprints, and the two verdicts. `SERVER_QUERY_STOP_CONFIRMED=false`. The verification task remains E2E_PENDING.
+
+## 107. Oracle independent observer full-text and phase-boundary fixes
+
+Historical `WINDOWS_LOCAL_REAL_E2E` evidence reviewed from `reports/oracle-timeout-observe-timing-20261116-200214-789`. READY and the normal 101-row control passed, but ACTIVE_VERIFIED and COMPLETED_BEFORE_SAMPLE were false. For the target cursor, the captured 85-byte SQL_FULLTEXT fingerprint matched driver_strip. The bounded SQL_TEXT differed at byte offset 28, where the LF of an internal CRLF appeared as a space. The pre-fix predicate rejected the PREV cursor. The first regular sample started 2.2049 ms before Execute and completed 21.7698 ms after Execute began. Execute itself returned after 0.8048 ms. A corrected text comparison cannot turn that sample into a verified execution.
+
+The reference observer snapshot and extended tests were compared with the checkout, together with the test patch and handoff. The named `oracle_observer_fix_and_todo.patch` was absent from the reference directory. The integration uses complete, exact SQL_FULLTEXT when available and verifies CLOB length and read completeness within the existing bound. Reads are attempted for the relevant candidate even if short SQL_TEXT already matches. A complete full-text mismatch vetoes the match. An incomplete, failed or over-limit read is UNVERIFIED and cannot authorize correlation. A non-truncated SQL_TEXT can be used when no CLOB value was supplied and no read failed. The SQL_ID, child, container, uniqueness and session/execution guards remain in force. Completion now rejects samples that cross or tie Execute start, Execute return or target completion. No existing assertion was removed or skipped.
+
+`ISOLATED_OFFLINE_TEST` commands, run in order from the project directory:
+
+~~~powershell
+.\.venv\Scripts\python.exe -m pytest -q --tb=short tests/test_oracle_session_observer.py tests/test_oracle_timeout_acceptance.py tests/test_oracle_tcp_delay_proxy.py tests/test_oracle.py tests/test_timeout_classification.py --basetemp .tmp\ora107-target
+$tmp=(Resolve-Path -LiteralPath '.tmp').Path
+$env:TEMP=$tmp
+$env:TMP=$tmp
+$env:DBA_TOOLKIT_SYSTEM_TESTS='0'
+.\.venv\Scripts\python.exe -m pytest -q -rs --tb=short --basetemp .tmp\ora107-full -o cache_dir=.tmp/ora107-cache
+.\.venv\Scripts\ruff.exe check dba tests scripts
+.\.venv\Scripts\mypy.exe --strict --explicit-package-bases dba scripts/acceptance/verify_oracle_timeout.py scripts/acceptance/oracle_tcp_delay_proxy.py scripts/acceptance/oracle_session_observer.py
+.\.venv\Scripts\dba.exe validate
+git diff --check
+~~~
+
+| Check | Exit | Actual result |
+|---|---:|---|
+| Oracle targeted pytest | 0 | 177 passed, 0 failed |
+| Full pytest | 1 | 1830 passed, 3 skipped, 23 failed |
+| Ruff | 0 | All checks passed |
+| Strict MyPy | 0 | 83 source files passed |
+| dba validate | 0 | 4 assets and 119 formal SQL scripts validated |
+| git diff --check | 0 | Passed, with existing LF/CRLF notices |
+
+The current isolated pytest cache has exactly the same 23 failing node IDs as the §106 credential rerun: SQLite credentials 18, encrypted credentials 3, legacy read-only migration 2. The failure path is `CredentialStoreUnsafe` at the Windows DACL trustee check. Read-only Get-Acl inspection of corresponding synthetic test directories in both runs found two inherited trustees outside the accepted current-user/SYSTEM set. The tests and ACL security check were kept intact. The full suite remains failing in this environment.
+
+Host validation of the corrected observer is `NOT_EXECUTED`. Repeat the direct normal `oraclefree` probe with `--observe-v-session` on the authorized Windows PowerShell Desktop host. Exact cursor text can verify while the short sample remains timing-ambiguous. `SERVER_QUERY_STOP_CONFIRMED=false`. The task remains E2E_PENDING.
+
+## 108. Oracle observer first-poll schedule and crossing samples
+
+Historical `WINDOWS_LOCAL_REAL_E2E` evidence comes from `reports/oracle-timeout-observe-fulltext-20261116-205137-866`. READY and the normal 101-row control passed. Relative to Execute start, READY occurred at −2.6356 ms, Execute returned at +0.9048 ms, and the target call finished at +2.3667 ms. Sample 2 ran from −2.6239 ms to +25.1781 ms and returned the unchanged PREV baseline without a current execution key. Samples 3–5 began at +189.3108, +374.1640 and +560.5551 ms and agreed on the new complete PREV key and exact, unique SQL_FULLTEXT match. The archived verdict remains UNKNOWN with `AMBIGUOUS_EXECUTION_WINDOW`. The original report was preserved.
+
+The worker acquires the baseline before READY, waits for Execute start, and polls after either the target call finishes or a 10 ms grace period expires. The ordinary 150 ms sampling interval is retained. The first-poll marker records which condition released it. ACTIVE_VERIFIED requires the full sample interval strictly inside Execute. Samples crossing or tying Execute start, Execute return or target completion remain UNKNOWN. They cannot establish a completed execution. Incompatible current or previous execution fields, cursor ambiguity or unverified target text, observer failures, and session identity changes still block completion attribution.
+
+COMPLETED_BEFORE_SAMPLE requires the successful target result, unchanged pinned session, fresh complete PREV key including the actual child number, and exact unique matching cursor. At least two strictly ordered, nonoverlapping post-call samples must independently agree. The supplied timeline replay keeps sample 2 UNKNOWN and supports completion from samples 3–5. This is offline attribution of a normally completed control. `SERVER_QUERY_STOP_CONFIRMED=false`.
+
+Commands for the `ISOLATED_OFFLINE_TEST` and local checks:
+
+~~~powershell
+$env:DBA_TOOLKIT_SYSTEM_TESTS='0'
+$env:TEMP=(Resolve-Path .tmp).Path
+$env:TMP=$env:TEMP
+.\.venv\Scripts\python.exe -m pytest -q tests/test_oracle_session_observer.py tests/test_oracle_timeout_acceptance.py tests/test_oracle_tcp_delay_proxy.py tests/test_oracle.py tests/test_timeout_classification.py --basetemp=.tmp/ora108-target -o cache_dir=.tmp/ora108-target-cache
+.\.venv\Scripts\python.exe -m pytest -q --tb=short --basetemp=.tmp/ora108-full -o cache_dir=.tmp/ora108-cache
+.\.venv\Scripts\ruff.exe check dba tests scripts
+.\.venv\Scripts\mypy.exe --strict --explicit-package-bases dba scripts/acceptance/verify_oracle_timeout.py scripts/acceptance/oracle_tcp_delay_proxy.py scripts/acceptance/oracle_session_observer.py
+.\.venv\Scripts\dba.exe validate
+git diff --check
+~~~
+
+Oracle targeted pytest exited 0 with **186 passed**. Full pytest exited 1 with **1839 passed, 3 skipped, 23 failed** in 109.52 seconds. The failing node IDs match §107 exactly. Windows DACL validation for the synthetic credential store returned `CredentialStoreUnsafe` in 18 SQLite, three encrypted credentials and two legacy read-only tests. The credential checks and test configuration were kept intact.
+
+Ruff, Strict MyPy (83 source files), `dba validate` (4 assets and 119 SQL scripts), and `git diff --check` each exited 0. The Git check emitted line-ending warnings.
+
+The authorized-host run of these changes is `NOT_EXECUTED`.
+
+## 109. Oracle Free SYS lab Execute and Fetch timeout
+
+The supplied normal-control report `reports/oracle-timeout-observe-scheduling-20261116-210922-045` verified the revised observer on Windows. Preflight, the 101-row control, and READY passed. Four post-call samples agreed on the complete PREV key and exact unique full text. `COMPLETED_BEFORE_SAMPLE=true`, `ACTIVE_VERIFIED=false`, and `SERVER_QUERY_STOP_CONFIRMED=false`. The control was reviewed from its archived report.
+
+`WINDOWS_LOCAL_REAL_E2E`: Windows PowerShell Desktop identified the `oraclefree` container publishing port 1521. The fixed test Inventory and static LoadTest profile matched the local FreePDB1 endpoint. Actual connections verified Oracle Free 23.26.3.0.0, python-oracledb 3.4.2 Thin, CDB with PDB FREEPDB1, service `freepdb1`, and SYS with `ISDBA=TRUE`. `SYS.DBMS_LOCK` was VALID and `SLEEP(0.01)` succeeded using existing SYS privileges. The preflight evidence is `reports/oracle-sys-timeout-preflight-20261116-212435-953`. The first Execute attempt (`reports/oracle-sys-timeout-execute-20261116-212508-791`) stopped at observer readiness because a bind name collided with the driver method's statement parameter. No long test SQL was sent in that attempt. The bind was renamed before rerunning.
+
+The independent lab script uses a six-second sleep and a 2,000 ms Thin call timeout. Execute uses a fixed anonymous PL/SQL block. Fetch uses a statement-local `WITH FUNCTION` on two rows with `arraysize=1` and `prefetchrows=0`. Only row 2 calls SLEEP. Both scenarios use an independent SYS observer and an exact SQL text and child match. The script gives the observer time to sample after the driver error before closing the local target handle. No database objects, grants or revocations were needed. No explicit cancel, kill, DDL or DML was sent. The production Registry, Adapter, permission model, and ordinary observer were outside this experiment.
+
+- Execute, `reports/oracle-sys-timeout-execute-20261116-212608-720`. The driver returned DPY-4011 at +4020.422 ms. SID 228 / serial 17339 / CON_ID 3 stayed ACTIVE with SQL_ID `4xnf0c78541y4`, child 0, execution ID 16777216 and unchanged execution start. Samples bracketed the configured 2 s threshold at +1975.770 and +2053.500 ms. The first complete post-error sample began at +4083.173 ms. The last exact ACTIVE sample began at +5954.573 ms. The independent observer first sampled the session absent at +6032.741 ms and continued to sample absence through roughly +7984 ms.
+- Fetch, `reports/oracle-sys-timeout-fetch-20261116-212617-410`. Execute succeeded in 233.695 ms and the first Fetch returned row 1 in 1.091 ms. The next Fetch returned DPY-4011 in 4007.391 ms. Relative to that Fetch start, samples bracketed the 2 s threshold at +1952.320 and +2031.840 ms. SID 228 / serial 36603 / CON_ID 3 remained ACTIVE with SQL_ID `arqvjg9zqxdn9`, child 0, execution ID 16777216 and unchanged execution start. The first complete post-error sample began at +4052.811 ms. The last exact ACTIVE sample began at +5923.503 ms. The first absent sample began at +6078.286 ms and samples continued through roughly +7949 ms.
+
+The exact ACTIVE matches were in `PL/SQL lock timer`, wait class `Idle`. A call can be ACTIVE while waiting on that event. In both runs the execution continued after the driver reported connection loss. Absence around the configured six-second sleep is consistent with natural completion and session cleanup. The observer did not capture the same live session transitioning to INACTIVE with a stable matching PREV key or any direct server cancellation result. Exact stop time and cause are unconfirmed. `SERVER_QUERY_STOP_CONFIRMED=false`. The old connections were closed and not probed with SELECT after DPY-4011. Both observer threads joined. Fresh connections had distinct SID/serial pairs, passed independent lab identity checks and returned 1 from `SELECT 1 FROM dual`. No residual target session was visible in the final samples. The task remains `E2E_PENDING`.
+
+To reproduce after review, inside the authorized Windows PowerShell Desktop host:
+
+~~~powershell
+Set-Location -LiteralPath 'D:\DBA\DBAToolKit'
+if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Use Windows PowerShell Desktop.' }
+foreach ($phase in 'preflight','execute','fetch') {
+    $out = "reports/oracle-sys-timeout-$phase-" + (Get-Date -Format yyyyMMdd-HHmmss-fff)
+    .\.venv\Scripts\python.exe -m scripts.acceptance.verify_oracle_sys_timeout --phase $phase --output $out
+    if ($LASTEXITCODE -ne 0) { throw "Oracle lab phase $phase failed. Review $out/summary.json." }
+}
+~~~
+
+Offline validation commands, with the real-database system tests disabled:
+
+~~~powershell
+$env:DBA_TOOLKIT_SYSTEM_TESTS='0'
+$env:TEMP=(Resolve-Path .tmp).Path
+$env:TMP=$env:TEMP
+.\.venv\Scripts\python.exe -m pytest -q tests/test_oracle_sys_timeout_acceptance.py tests/test_oracle_session_observer.py tests/test_oracle_timeout_acceptance.py tests/test_oracle_tcp_delay_proxy.py tests/test_oracle.py tests/test_timeout_classification.py --basetemp=.tmp/ora109-target2 -o cache_dir=.tmp/ora109-target2-cache
+.\.venv\Scripts\python.exe -m pytest -q --tb=short --basetemp=.tmp/ora109-final2 -o cache_dir=.tmp/ora109-final2-cache
+.\.venv\Scripts\ruff.exe check dba tests scripts
+.\.venv\Scripts\mypy.exe --strict --explicit-package-bases dba scripts/acceptance/verify_oracle_timeout.py scripts/acceptance/oracle_tcp_delay_proxy.py scripts/acceptance/oracle_session_observer.py scripts/acceptance/verify_oracle_sys_timeout.py
+.\.venv\Scripts\dba.exe validate
+git diff --check
+~~~
+
+`ISOLATED_OFFLINE_TEST`: targeted pytest exited 0 with **193 passed**. Full pytest exited 1 with **1846 passed, 3 skipped, 23 failed** in 109.53 seconds. The failing node IDs are unchanged from §108 and reproduce Windows DACL `CredentialStoreUnsafe`. Ruff, Strict MyPy (84 files), `dba validate` (4 assets and 119 SQL scripts), and `git diff --check` each exited 0. The Git check emitted LF/CRLF warnings.
+
+## 110. Oracle Thin PING recovery experiment, phase A
+
+The independent SYS harness now has a PING-only phase. The direct control uses no relay. The relay is restricted to one accepted loopback connection and uses the existing verified Inventory and static lab profile. Authentication is forwarded without gating. A bounded frame reader tracks the Oracle Net length transition at ACCEPT and distinguishes BREAK (1), RESET (2), and INTERRUPT (3). Only a complete client INTERRUPT, observed after the armed PING and a held response and successfully forwarded upstream, can trigger release. No wire payload is logged. The harness records configured `disable_oob`, the source-inferred OOB state and the actually observed Marker separately.
+
+The release branch requires DPY-4024 and successful response release after the forwarded INTERRUPT. A subsequent individually timed PING confirms connection usability only if it succeeds. The hold branch requires DPY-4011 with a recovery timeout reason, no response release, no proxy failure or earlier upstream EOF, and client transport termination observed before harness cleanup. A watchdog expiry, malformed frame or failed connection is inconclusive. The experiment always sets `SERVER_QUERY_STOP_CONFIRMED=false`. A1 and A2 real Oracle runs are `NOT_EXECUTED` for this implementation. The task remains `E2E_PENDING`.
+
+For authorized Windows PowerShell Desktop use after review. Run one scenario at a time and review its report before the next scenario.
+
+~~~powershell
+Set-Location -LiteralPath 'D:\DBA\DBAToolKit'
+if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Use Windows PowerShell Desktop.' }
+$scenario = 'direct' # A1, or after A2 approval: transparent, release, hold
+$out = "reports/oracle-ping-$scenario-" + (Get-Date -Format yyyyMMdd-HHmmss-fff)
+$arguments = @('--phase', 'ping', '--ping-scenario', $scenario, '--output', $out)
+if ($scenario -ne 'direct') { $arguments += '--approved-ping-relay' }
+.\.venv\Scripts\python.exe -m scripts.acceptance.verify_oracle_sys_timeout @arguments
+~~~
+
+The relay limits held bytes to 64 KiB, the gate to six seconds and the relay lifetime to 15 seconds. Closing the context joins the relay worker, closes the listener and both sockets, and drops the in-memory buffers. The run has no database objects or privileges to reverse. The original Execute and Fetch reports in §109 are preserved.
+
+`ISOLATED_OFFLINE_TEST`: Oracle-focused pytest **208 passed**. Full pytest **1861 passed, 3 skipped, 23 failed**. All 23 failing node IDs match §109's Windows DACL failures. Ruff, Strict MyPy (85 source files), `dba validate` (4 assets and 119 SQL scripts), and `git diff --check` passed. The CLI rejected an A2 request without the relay approval argument before it created an output directory or opened a connection.
+
+## 111. A2.2 post-release Oracle Net framing
+
+The archived Windows report `reports/oracle-ping-release-20261116-222701-785` remains `INCONCLUSIVE`. It recorded ACCEPT protocol 319, a 16-byte held response, a forwarded 11-byte client INTERRUPT (3), a 16-byte release, and DPY-4024 on the target PING. The relay then rejected upstream traffic with `unsupported_tns_frame`. The independent follow-up PING returned DPY-4011 after the relay shutdown. The report lacks the rejected frame's type, declared length, flags and read boundaries. Its exact form and TCP segmentation cannot be reconstructed from the original evidence.
+
+The old parser applied the fixed client writer's Marker length and zero header flag restrictions in both directions. The 3.4.2 Thin receive path reads the server packet type and flags separately, then reads the recovery Marker subtype at the third byte after the header. The relay now applies that distinction while keeping the client INTERRUPT trigger strict. Unknown types, invalid lengths and unsupported state transitions still stop the relay. Response release also waits for a validated server frame boundary. Relay failures log only safe framing metadata, including the direction, declared length, length field width, state and count of frames completed in the current read. Partial send failures cannot count as a successful forward. No application payload is retained in the report.
+
+`ISOLATED_OFFLINE_TEST`: **215 targeted pytest tests passed**. Synthetic coverage includes post-release server Marker and DATA sequences, fragmentation and coalescing, ACCEPT framing transition, unknown type and invalid length rejection, partial forwarding failure, and original byte ordering. Ruff, Strict MyPy (85 source files), `dba validate` (4 assets and 119 scripts), and `git diff --check` passed. The full suite was not rerun. The revised A2.2 Oracle run and A2.3 were not executed. `SERVER_QUERY_STOP_CONFIRMED=false`; the task remains `E2E_PENDING`. See §110 for the approved-host command using scenario `release` and a fresh output directory.
+
+## 112. V0.9.1 four-engine development closeout
+
+The current source audit reviewed Adapter connection settings, preflight and least-privilege checks, reviewed Registry entry points, driver error and deadline handling, cursor teardown, connection discard and output evidence. Public Incident, Finding, HTML workbench, report models, runtime and portable driver management remain in the existing product architecture. This checkpoint includes the previously uncommitted MySQL and PostgreSQL session-timeout budgeting and diagnostics, Oracle driver error classification, their regression coverage, and the three independent acceptance harnesses with reviewed fixtures. The SQL Server Adapter, Oracle Adapter, production SQL Registry and portable release machinery require no source changes for this checkpoint.
+
+- **Oracle.** Sections 98–103 record the standalone harness and scoped Oracle Free 23.26.3.0.0 / python-oracledb 3.4.2 Thin client-side Execute and later network Fetch timeout, failed-result discard, connection disposal, fresh Preflight and report agreement. The Adapter passes a bounded TCP connect timeout and reapplies the remaining budget before each controlled Execute or Fetch. It detaches failed connections and uses a fresh health/preflight path for recovery. Per-round-trip timeout and driver recovery can outlast the application deadline in a single call. §109 independently observed the same SQL still ACTIVE after both DPY-4011 errors. The archived direct PING and transparent A2.1 completed normally. Two later A2.2 reports recorded a forwarded INTERRUPT, a released 17-byte response, both RESET directions, target DPY-4024, and ORA-01013 on the subsequent PING. This establishes `RECOVERY_RECEIVE_COMPLETED_CONNECTION_UNVERIFIED`. The historical DPY-4011 source branch, A2.2 error attribution and same-connection usability, and A2.3 remain non-blocking research. `SERVER_QUERY_STOP_CONFIRMED=false`.
+- **MySQL.** Existing active/slow diagnostics, locks and waits, and SQL-source and resource evidence retain the documented capability gates. §§93–94 confirm native 3024 for the 8.4.11 SESSION, hint and streaming Fetch scenarios, discard, fresh Preflight and output agreement. The committed changes reserve setup and response time before attempting a reviewed SELECT. SHOW automatic cancellation remains BLOCKED, and independent execution lifecycle evidence still lacks END_EVENT_ID. No broader version or server stop claim follows.
+- **PostgreSQL.** Existing active sessions, blocking, transactions, waits and Top SQL retain their existing gates. §97 confirms native 57014 with explicit statement_timeout for the PostgreSQL 16.15 Execute control, discard and fresh Preflight. This commit retains the session setup and response reserve and classifies the timeout cause from the server's primary diagnostic. Network Fetch remains BLOCKED on the default buffered cursor. The product does not enable extensions or gather plans by replaying captured SQL; PLAN-PD-PG-001 is a feasibility assessment for pre-existing plan evidence.
+- **SQL Server.** Active SQL, blocking, lock-object resolution, Memory Grant, cached/current request plans and resource waits were reviewed in the existing source and offline suites. The Memory Grant nonempty live evidence remains subject to §26. SQL Server timeout/server-stop E2E in this task is NOT_EXECUTED. No standalone Ghost/Version Ghost diagnosis was found in the audited source. General SQL Server 2008 R2+ scope does not certify each feature or version.
+
+The three database acceptance harnesses and Oracle Net relay remain outside the regular CLI/Adapter runtime. No real database, permission, or production configuration was changed or exercised in this closeout. Local raw reports and prior review bundles are preserved outside this commit. The server-stop verification task retains its Backlog status, and the portable no-Python, disconnected-network and cross-version update gaps remain open.
+
+Quality gates for the 2026-11-17 checkpoint:
+
+- `ISOLATED_OFFLINE_TEST`: Oracle-focused pytest **272 passed**. The 34-module four-engine and shared-feature selection, covering report rendering, Incident, registry checks, timeout and connection safety, and portable update, passed **1183 tests**.
+- The isolated full suite reported **1869 passed, 3 skipped, 23 failed**. Its failing pytest node IDs exactly match the earlier DACL baseline and reproduced `CredentialStoreUnsafe` in Windows credential-store validation. Security checks and test selection were preserved.
+- The complete Windows host offline rerun reported **1892 passed, 3 skipped, 0 failed** with the real-database system-test switch disabled. This is offline regression evidence.
+- Repository Ruff and Strict MyPy (87 product and acceptance source files) passed. Local `dba validate` validated four configured assets and 119 formal SQL scripts. Working-tree and staged Git whitespace checks are part of the checkpoint.

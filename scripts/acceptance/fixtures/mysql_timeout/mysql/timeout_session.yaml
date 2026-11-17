@@ -1,0 +1,8 @@
+name: timeout_session
+database_type: mysql
+risk: READ_ONLY
+reviewed: true
+timeout_seconds: 1
+max_rows: 2
+max_result_bytes: 1024
+description: Bounded lab SELECT exercising the adapter session execution limit.

@@ -111,11 +111,12 @@
 - [x] SQL-TIMEOUT-CONFIG-002：用户验收，见 Acceptance §84。
 - [x] SQL-TIMEOUT-CLASSIFY-003：用户验收，见 Acceptance §85。
 - [x] SQL-TIMEOUT-DEADLINE-004：用户接受 PARTIAL 交付，见 Acceptance §86 与 §87 基线。
-- [ ] SQL-TIMEOUT-MYSQL-005：审阅 SELECT 会话超时交付和 SHOW 取消的身份竞态，见 Acceptance §87。
+- [ ] SQL-TIMEOUT-MYSQL-005：MySQL 8.4.11 SELECT SESSION、Hint、SSCursor Fetch 实机结果已记录于 Acceptance §93；SHOW 自动取消身份竞态仍 BLOCKED，没有执行 KILL QUERY。按 Backlog 状态保持 BLOCKED，不扩大权限。
 - [ ] SQL-TIMEOUT-ISOLATION-006：统一 TIMEOUT/依赖失败/未执行状态和「重连一次」规则，不改变分阶段采集结构。依赖 003。
 - [ ] SQL-TIMEOUT-REPORT-007：HTML/JSON/CLI 一致展示超时证据，增加查询超时文案。依赖 003、006。
 - [ ] SQL-TIMEOUT-TESTS-008：故障隔离与报告完整性离线测试（设计 §6 T-01～T-14），随 002～007 增量交付。
-- [ ] SQL-TIMEOUT-CANCEL-VERIFY-009：四种驱动取消能力的真实验证，证明数据库端确实停止执行（含 MySQL 负对照）。依赖 003～005，逐引擎授权，不执行 KILL。
+- [ ] SQL-TIMEOUT-CANCEL-VERIFY-009：四库超时证据与缺口见 Acceptance §112，任务状态见 Backlog。SQL Server 服务端停止未验证，MySQL SHOW 自动取消和 PostgreSQL 网络 Fetch 保留既有阻塞边界。Oracle 基础客户端超时与连接恢复已在指定实验环境验证，服务端停止仍为 NOT_CONFIRMED。
+- [ ] Oracle Net 非阻塞研究：历史 DPY-4011 的驱动分支、A2.2 的后续 PING 错误归因与连接复用、A2.3 恢复再次超时。仅维护 acceptance 实验，不影响 V0.9.1 主线。
 
 ## 基础兼容、运行时与实验室
 
