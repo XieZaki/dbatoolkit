@@ -598,6 +598,7 @@ def build_slow_report(
         redact(
             {
                 "version": version,
+                "sqlserver_long_transaction_seconds": settings.sqlserver_long_transaction_seconds,
                 "compatibility": "Only SQL Server 2022 tested; 2008 R2+ is a compatibility target.",
                 "concurrency": concurrency,
                 "top_requests": requests[: settings.slow_top_n],

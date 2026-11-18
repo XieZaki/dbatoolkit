@@ -2748,6 +2748,8 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
             raw_version_num = postgresql_server_version_num(raw_version)
         if raw_version_num is not None:
             metadata_items.append(("server_version_num (raw)", _human(raw_version_num)))
+    for parameter, evidence in details.get("diagnostic_configuration", {}).items():
+        metadata_items.append((parameter, f"{evidence['value']} ({evidence['source']})"))
     metadata: tuple[tuple[str, str], ...] = tuple(metadata_items)
     if report.scenario == "slow":
         # Keep the native counting unit when the shared incident contract aliases a metric.
@@ -2787,6 +2789,13 @@ def build_report_model(report: DiagnosticReport, incident: IncidentSummary,
     findings = _finding_section(report)
     if findings:
         sections.append(findings)
+    if report.scenario == "top-sql" and details.get("diagnostic_configuration"):
+        sections.append(ReportSection(
+            "diagnostic-configuration", "诊断配置",
+            fields=tuple(
+                (parameter, f"{evidence['value']} ({evidence['source']})")
+                for parameter, evidence in details["diagnostic_configuration"].items()),
+        ))
     sections.append(_quality_section(report, incident, details))
     timings = details.get("diagnostic_timings_ms")
     if isinstance(timings, Mapping):

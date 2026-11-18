@@ -3064,3 +3064,589 @@ Quality gates for the 2026-11-17 checkpoint:
 - The isolated full suite reported **1869 passed, 3 skipped, 23 failed**. Its failing pytest node IDs exactly match the earlier DACL baseline and reproduced `CredentialStoreUnsafe` in Windows credential-store validation. Security checks and test selection were preserved.
 - The complete Windows host offline rerun reported **1892 passed, 3 skipped, 0 failed** with the real-database system-test switch disabled. This is offline regression evidence.
 - Repository Ruff and Strict MyPy (87 product and acceptance source files) passed. Local `dba validate` validated four configured assets and 119 formal SQL scripts. Working-tree and staged Git whitespace checks are part of the checkpoint.
+
+## 113. SQL Server Baseline JSON file failure and offline correction
+
+`WINDOWS_LOCAL_REAL_E2E`: SQL Server 2022 Baseline at `af2d858` completed five collectors and produced HTML and JSON in the archived local run `slow-sqlserver-e2e-5ebd11dce6d04803aa7b7fd2cc0e8be7`. Python 3.12 decoded the JSON file as UTF-8 but rejected an unescaped newline at line 121, column 79 (character 3597 with newline normalization). The Baseline acceptance remains **failed** pending a new valid and verified live report pair. The original artifacts are preserved.
+
+The broken field is the fixed Chinese note in `report.details.lock_resources.note`. It originates in the lock-evidence builder, outside the raw DMV strings. The product renders HTML with the same collected report model and serializes JSON with the shared redaction/localization and `json.dumps` path. In a local offline PowerShell 5.1 reproduction, the UTF-8 serialized note was valid before the pipe. Decoding that native stdout stream as CP936 and writing it with `Set-Content -Encoding UTF8` reproduced the exact damaged note line, including private-use characters and the missing closing quote. The archived BOM is independent of the corruption.
+
+The common `diagnose --json-report` option writes the sanitized diagnostic payload without a native-shell text pipe. It serializes UTF-8 without a BOM, validates a temporary file in the destination directory, publishes it via atomic replacement, and reparses the published file. JSON write or verification errors return a failed diagnosis exit code. The Baseline verifier now uses this direct file path. The report uses the same capture as HTML.
+
+No database was connected and no load was started during this correction. The next authorized Windows host run must use a fresh Baseline directory and pass the Python and PowerShell JSON checks, same-capture HTML comparison, and `verification.json` gate before starting the later P5 scenarios.
+
+Offline regression: the four-engine and shared-report selection passed **1069 tests**, including native PowerShell 5.1 readback under CP936, Chinese and private-use characters, every U+0000–U+001F code point, quote and backslash escaping, multi-line SQL, and failed JSON publication evidence. Full Windows host offline pytest passed **1898 tests, 3 skipped** with real database tests disabled. Ruff, Strict MyPy (87 sources), `dba validate` (4 assets and 119 SQL scripts), PowerShell syntax validation and `git diff --check` passed. SHA-256 verified both archived artifacts were unchanged.
+
+## 114. SQL Server Baseline same-capture HTML comparator
+
+The archived live run `reports/slow-sqlserver-e2e-552ef663c4094fecb975eec507bf9e6d` contains parseable Baseline JSON and an HTML report with `aria-label` after the `current-requests` ID. The prior verifier assumed the ID was immediately followed by `>` and raised `IndexError`. The embedded Python now identifies real HTML elements by ID, requires exactly one of each region in the expected order, and accepts zero cards for the idle snapshot. The count for nonempty captures still follows the renderer's configured card limit. Request ordering, SQL text, copy text, truncation, and summary comparisons remain enforced.
+
+`ISOLATED_OFFLINE_TEST`: Replayed the exact embedded comparator on the archived JSON/HTML pair. Its exit code was **0** for **0 requests**. The older §113 JSON still fails parsing. SHA-256 checks confirmed that both pairs were unchanged. The newer archive has no `verification.json`. Full live Baseline verification is `NOT_EXECUTED` in this correction and remains pending before case B. No database connection or load run was started.
+
+Offline verification passed **13 comparator tests** and **1082 tests** in the four-engine and shared-report selection. Full Windows host offline pytest passed **1911 tests, 3 skipped** with real database tests disabled. Ruff, Strict MyPy (88 source files), `dba validate` (4 assets and 119 SQL scripts), PowerShell syntax validation, and `git diff --check` passed.
+
+## 115. CONFIG-003 diagnostic policies and instance overrides
+
+The user authorized all existing workspace changes at af2d858 as the development
+baseline. CONFIG-003 adds nested settings diagnostics, separate Inventory
+diagnostics with field-level defaults merging, and bounded resolution with
+provenance. Explicit CLI Top N overrides instance diagnostics, Inventory defaults,
+global diagnostics, legacy engine fields and program defaults. The four engine
+Slow settings retain their native filtering/counting rules. SQL Server long
+transactions remain independent of other engines' idle transactions. The original
+minimum-based SQL timeout resolver and absolute Execute/Fetch deadline are retained.
+
+JSON records applicable values, source, overridden values and hard-limit equality.
+HTML and CLI use the same effective values and sources. A direct CLI regression
+found that Top SQL's dedicated HTML summary suppresses generic metadata; the
+Presenter now includes a diagnostic configuration evidence section in that report.
+Manual plans retain their existing routes and protections.
+
+Automatic plan collection is **NOT_IMPLEMENTED**. Enabling it is rejected before
+credential resolution or connection. Its default is false. The reserved per-report
+plan count accepts 1..5 and explicitly carries AUTO_COLLECTION_NOT_IMPLEMENTED.
+Batch plan identity, deduplication and bounded automatic collection have no
+implementation or E2E claim. MySQL/PostgreSQL gain no plan route from this change.
+The complete mapping and range audit is in docs/DIAGNOSTIC_CONFIGURATION.md.
+
+All evidence in this section is offline. Real database verification of the new
+configuration is **NOT_EXECUTED**. Existing SQL Server Baseline and Oracle/MySQL/
+PostgreSQL evidence remains scoped to its original reports.
+
+The initial full regression found six disk-growth test doubles without settings;
+the call now preserves the prior default for those existing callers. A subsequent
+full run found a repository example-name constraint; the diagnostics example was
+merged into the existing disabled SQL Server example. Safety assertions were
+retained. No security checks were relaxed.
+
+Workspace preservation was checked against a local pre-change snapshot of all
+24 existing modified/untracked files. All files remain present. Unchanged files
+were verified by SHA-256. The CLI retains all 13 prior added lines; the original
+JSON publication module, Baseline verifier and its regression files are identical
+to their pre-CONFIG-003 contents. Historical Backlog table rows and the original
+Acceptance/Usage byte prefixes are retained. Branch main and HEAD af2d858 remain
+unchanged, with an empty staging area.
+
+The CONFIG-003 policy/CLI suite passed 125 tests. The four-engine, configuration,
+timeout, Inventory, credential, Incident and report selection passed 1455 tests
+with 1 skipped. These are offline regressions.
+
+Final full Windows host offline pytest completed with **2036 passed, 3 skipped,
+0 failed**, exit code 0, with DBA_TOOLKIT_SYSTEM_TESTS=0. No Windows DACL failures
+occurred in this approved-host run. Ruff passed. Strict MyPy passed across 88
+product/acceptance source files. dba validate passed for 4 existing assets and
+119 scripts; the disabled example Inventory/settings also validated. Git diff
+whitespace checks passed.
+
+The policy/CLI tests execute the real CLI with Fake Drivers and synthetic
+Inventory files, including Top N precedence and same JSON/HTML evidence. They
+verify that auto_collect=true never reaches credential resolution or driver
+connect. No live database or actual credential was accessed. Evidence category
+is offline regression; this does not extend any WINDOWS_LOCAL_REAL_E2E claim.
+
+## 116. CONFIG-003 human-review configuration and plan-scope audit
+
+This review supersedes section 115's automatic-plan placeholder contract.
+plans.auto_collect and plans.max_plans_per_report served no implemented runtime
+capability. They are removed from the formal schema, example and current usage
+guide. Both keys, including auto_collect=false, now fail as unknown settings
+before credential acquisition or connection. Historical section 115 is retained.
+
+SQL Server's independent Plan Analyzer still consumes plan_top_operators,
+plan_large_scan_rows and both cardinality ratios. plan_max_xml_size is bounded
+against the version-profile max_xml_bytes. The 50000 XML element and 10000
+operator protections remain. Main diagnosis performs no plan acquisition and
+embeds no complete XML. Its plan guidance and commands remain engine-specific.
+Disclosure of plans.sqlserver settings as configuration metadata does not invoke
+the independent analyzer. Deep plan analysis remains separate from realtime
+diagnosis; the review adds no EXPLAIN or other plan query.
+
+The six-policy priority matrix uses distinct synthetic values, in this order
+of increasing priority, and checks the effective field and recorded source.
+
+- SQL timeout uses default 30, global 19, Inventory defaults 17, instance 13.
+  Legacy engine placement of this global policy remains forbidden. Registry
+  script and connection caps continue to shorten the effective SQL deadline.
+- Slow uses default 10, legacy 11, global 21, Inventory defaults 31, instance 41.
+- Top N uses default 10, legacy 11, global 21, Inventory defaults 31, instance 41,
+  and explicit CLI 3. Separate CLI tests use instance 7 versus explicit CLI 3.
+- Concurrency uses default 50, legacy 11, global 21, Inventory defaults 31,
+  instance 41.
+- Idle transactions use default 60, legacy 11, global 21, Inventory defaults 31,
+  instance 41 for MySQL, PostgreSQL and Oracle.
+- SQL Server long transactions use default 3600, legacy 3611, global 3621,
+  Inventory defaults 3631, instance 3641.
+
+Only Top N has a corresponding explicit CLI option in the current product.
+CLI priority for the other policies is not applicable; no new flags were added.
+The matrix covers each applicable engine and each layer independently. It also
+checks hard-limit equality and rejects values above the maximum. SQL Server
+critical/warning ratios retain the additional ordering constraint.
+
+Four real Collector classes with Fake Drivers filter at an instance-derived
+17-second threshold, excluding 16.999 seconds (16 seconds for Oracle's native
+integer unit) and including 17 seconds. Source audit confirms SQL Server
+active_requests, MySQL active_statements, PostgreSQL active_queries and Oracle
+active SQL requests drive concurrency, rather than total connected sessions.
+Idle transaction state/identity checks remain engine-specific. SQL Server Slow
+and disk-growth both receive the effective independent long-transaction threshold.
+
+Top SQL and Active SQL CLI regressions verify bound query limits, console and
+JSON file evidence, and HTML values/sources for instance defaults and CLI overrides.
+HTML uses the diagnostic report's resolved evidence. No template reads settings.
+Existing legacy Inventory, timeout/deadline, readonly Registry, credential safety
+and report tests remain part of the offline regression selection.
+
+ISOLATED_OFFLINE_TEST / offline verification on 2026-11-18:
+
+- Configuration suite: 232 passed (previous delivery 125, net increase 107).
+- Same four-engine/shared selection: 1562 passed, 1 skipped (previous 1455,
+  1 skipped). The full suite completed 2143 passed, 3 skipped, 0 failed,
+  exit 0 (previous 2036 passed, 3 skipped). Real database tests were disabled
+  with DBA_TOOLKIT_SYSTEM_TESTS=0. No DACL failures occurred on the approved host.
+- Ruff passed. Strict MyPy passed across 88 product/acceptance files.
+  dba validate passed for 4 existing assets / 119 scripts and for the disabled
+  SQL Server example / shared settings. git diff --check passed.
+- The 36 pre-review working-tree files remain present. SHA-256 comparison
+  confirmed 27 were unchanged. The 9 amendments are diagnostic_config.py,
+  its test, the settings example, current configuration/usage/TODO documents,
+  and the three Backlog/Progress/Acceptance files. In particular CLI, atomic
+  JSON publication, Baseline comparator, Adapters, Registry and Deadline
+  implementations were unchanged in this review.
+
+Commands used project .venv executables. The configuration selection was
+pytest -q tests/test_diagnostic_config.py. The four-engine selection includes
+oracle/mysql/postgresql/sqlserver, incident/html_reports/slow, diagnostic_config,
+sql_timeout/inventory_scale/connection_credentials/disk_growth modules, excluding
+integration entrypoints. Full pytest used -q --tb=short with a unique local
+basetemp/cache and retained logs under .tmp/config003-human-*. No real database
+connection or actual credential was used. Current database E2E remains
+NOT_EXECUTED. CONFIG-003 remains CODE_COMPLETE awaiting human acceptance.
+
+## 117. CONFIG-003 four-engine live acceptance attempt
+
+On 2026-11-18 the user authorized read-only live configuration acceptance.
+The actual launcher was explicitly verified as Windows PowerShell Desktop
+5.1.26100.9818 at System32/WindowsPowerShell/v1.0/powershell.exe. Project Python
+was the Windows .venv executable, version 3.12.14, platform win32. The encrypted
+Credential Session was LOCKED, while the OS credential store was available and
+contained each selected test asset's credential. The existing CLI auto resolver
+was used; no credential values were printed or copied.
+
+Each exact single-asset Inventory was checked as enabled, environment=test,
+host=127.0.0.1 before connecting. Original database/service targets were preserved.
+WINDOWS_LOCAL_REAL_E2E evidence here covers connection attempts only:
+
+- mysql84, port 3306, original database mysql: test-connection exit 1,
+  native 2003 with WinError 10061 connection refused.
+- pg16, port 5432, original database postgres: test-connection exit 1,
+  psycopg connection timeout expired, no SQLSTATE returned.
+- oraclefree, port 1521, original service freepdb1: test-connection exit 1,
+  DPY-6005 with WinError 10061 connection refused.
+- sqlserver2022, port 1433, original database master: test-connection exit 1,
+  ODBC Driver 17 returned SQLSTATE 08001 / native 258 login/network timeout.
+  Existing TLS options were retained; no weaker retry was attempted.
+
+The readonly local listener enumeration succeeded and found no listeners on
+1433, 1521, 3306 or 5432. No Docker Desktop/backend processes were found.
+docker context was desktop-linux; docker ps exited 1 because the local
+dockerDesktopLinuxEngine named pipe did not exist. This establishes unavailable
+local test endpoints in the observed host context. It does not establish
+incorrect passwords, database grants or a CONFIG-003 policy failure.
+
+Evidence is preserved in
+reports/config003-fourdb-20261118-191510-403019. Each asset has preflight.json,
+preflight.cli.txt and preflight.stderr.txt. summary.json retains the run results;
+assessment.json adds host checks, sanitized native errors and limitations.
+comparison.csv covers all four assets and default/global/instance modes.
+Its policy values are explicitly intended test inputs; observed values are empty.
+Actual server versions and account classifications could not be verified.
+
+All three diagnostic modes, Collector behavior, Top N, transaction/concurrency
+effects and JSON/HTML/CLI parity are NOT_EXECUTED for this live attempt.
+Diagnostic JSON/HTML reports were not generated because preflight failed.
+No database diagnostic query, plan query, load, permission/configuration change,
+explicit cancellation, container/service startup or database modification was
+performed. Restore the existing local lab services before another preflight and
+use a new output directory. CONFIG-003 remains CODE_COMPLETE pending human review.
+The full offline gate from section 116 was not rerun or presented as live evidence.
+git diff --check passed for this documentation update.
+
+## 118. CONFIG-003 four-engine live retry after lab startup
+
+The user confirmed the containers had previously been stopped and authorized
+retry. All four existing containers were running at the recheck. The actual
+launcher was again Windows PowerShell Desktop 5.1 from System32, with Windows
+project .venv Python. Each exact Inventory remained enabled, loopback and test.
+The CLI auto resolver used the existing OS store; the encrypted session being
+LOCKED did not reject those available credentials.
+
+WINDOWS_LOCAL_REAL_E2E, retained separately from section 117:
+
+- mysql84 preflight passed, reported version 8.4.11, NON_PRIVILEGED.
+- pg16 preflight passed, reported server_version_num 160015 (16.15),
+  NON_PRIVILEGED.
+- oraclefree preflight passed, reported version 23.0.0.0.0, NON_PRIVILEGED.
+  This preflight did not return a full patch version, so no new 23.26 patch
+  verification is inferred from the older reports.
+- sqlserver2022 preflight passed, reported version 16.0.4305.5,
+  NON_PRIVILEGED.
+
+Thirty diagnostic invocations used the existing formal CLI: Slow and Top SQL
+for each engine, plus SQL Server Active SQL and disk-growth, each under default,
+global and instance policies. There were 27 exit-0 invocations and three exit-1
+Oracle Slow invocations. All 30 produced JSON and HTML and retained human CLI
+output. Effective policy values and sources were checked independently against
+the intended inputs, and all 30 JSON/HTML/CLI configuration comparisons passed.
+This is configuration evidence parity, not a claim that every diagnosis succeeded.
+
+The policies were SQL timeout 30/19/13 seconds, Slow 10/17/23 seconds, Top N
+10/4/2, concurrency 50/37/29, idle transactions 60/47/53 seconds, and independent
+SQL Server long transactions 3600/2700/1800 seconds (default/global/instance).
+Sources were DEFAULT / SETTINGS_GLOBAL / INVENTORY_INSTANCE. Original Inventory
+files were unchanged; instance overrides existed only in this run's local
+report directory.
+
+All four Top SQL sources actually returned 10, 4 and 2 items. SQL Server Active
+SQL reported top_n 10/4/2, but its empty rankings do not demonstrate real result
+truncation. Slow samples had no active request or transaction rows. They retained
+native concurrency units separately from total connections (MySQL 3 connections
+versus 0 active statements; the other engines 1 session/connection versus 0
+active requests). Slow/idle/long-transaction/high-concurrency threshold triggers
+were not observed and must not be marked verified from configuration display.
+SQL Server Slow and disk-growth carried identical effective long-transaction
+values and retain the audited common settings path; no old transaction existed
+to exercise the classification boundary.
+
+The retained native SQL audit observed the shorter MySQL/PostgreSQL 5-second
+limits, Oracle 10-second Slow script limits, and Oracle Top SQL at 15 or 13
+seconds. No SQL timeout was triggered. This confirms bounded values on the normal
+path; it does not provide a new live Execute/Fetch-expiry test. Audit timestamps
+have second precision and are retained as run-window evidence.
+
+Oracle Slow was incomplete in all three modes because blocking.sql received
+ORA-00942 naming SYS.V_$LOCK. The error and connection-discard evidence were
+retained in the generated reports. Object absence and insufficient visibility
+are not distinguishable from this error alone. The existing permissions guide
+already documents direct SELECT on SYS.V_$LOCK. Ask the DBA to confirm the
+view and current direct grant in the selected PDB; no new permission requirement,
+GRANT, role escalation or alternative account was introduced.
+
+Evidence directory:
+reports/config003-fourdb-20261118-192427-690967.
+Each asset retains preflight.json and the mode/scenario .json, .html, .cli.txt
+and .stderr.txt files. assessment.json records the PARTIAL result, limits and
+failed samples. comparison.csv contains the twelve observed asset/mode rows.
+sql_audit.jsonl retains the bounded run-window native audit; artifact_sha256.json
+records artifact hashes. Section 117's failed attempt remains untouched.
+
+No product code was changed. No workload, plan query, permission change,
+business-data change, explicit cancellation or KILL was executed. Offline suites
+were not rerun or relabeled as real evidence. git diff --check passed.
+CONFIG-003 remains CODE_COMPLETE awaiting human review of the partial live scope.
+
+## 119. CONFIG-003 Oracle retry after user-applied permission
+
+On 2026-11-18 the user reported completing Oracle authorization and requested
+another test plus a permissions-guide update. Only the original oraclefree
+loopback test asset in freepdb1 was selected. Desktop PowerShell 5.1, project
+Windows Python and the normal auto/OS CredentialResolver path were rechecked.
+No permission statement or database change was executed by Toolkit.
+
+WINDOWS_LOCAL_REAL_E2E: preflight passed with NON_PRIVILEGED and reported version
+23.0.0.0.0. Default, global and instance Slow/Top SQL cases generated six new
+JSON/HTML pairs and CLI captures. All six configuration value/source comparisons
+passed. Top SQL succeeded and returned 10, 4 and 2 items. All three Slow runs
+remained incomplete, with blocking.sql now returning ORA-00942 naming
+SYS.V_$LOCKED_OBJECT, replacing the prior SYS.V_$LOCK error.
+
+The existing reviewed oracle/preflight_object_grants.sql was executed through
+the formal OracleAdapter and Registry after normal Preflight. Its complete,
+untruncated user_tab_privs_recd result verified direct SELECT on SYS.V_$LOCK,
+GRANTABLE=NO. No direct grant on SYS.V_$LOCKED_OBJECT was present. This confirms
+the user's first permission is effective; it does not prove access to the second
+view. The DBA must confirm that second view exists in the selected PDB and apply
+only its missing object-level SELECT if appropriate.
+
+DATABASE_PERMISSIONS.md now explains that both views are dependencies of the
+current blocking collector, includes their separate verification/rollback SQL,
+and distinguishes user-applied authorization, verified access and pending access.
+It records no administrator execution timestamp or transcript that was not
+actually collected. The existing required grant examples were retained.
+
+New evidence is in reports/config003-oracle-regrant-20261118-194715-180952,
+including oracle_direct_grants.json, assessment.json, comparison.csv and artifact
+hashes. Original Inventory hashes are unchanged. Previous attempt directories
+are preserved. No product code or SQL was changed and no grant/revoke, workload,
+plan query, explicit cancel or KILL was executed. No full offline suite was
+rerun for this evidence/documentation-only update. git diff --check passed.
+CONFIG-003 remains CODE_COMPLETE; Oracle Slow and nonempty threshold-trigger
+acceptance remain incomplete pending the separately recorded conditions.
+
+## 120. Oracle lock-object permissions verified and Slow restored
+
+On 2026-11-18 the user confirmed granting the second Oracle object permission.
+The retry used only the original oraclefree loopback test Inventory, freepdb1,
+Windows PowerShell Desktop 5.1 and project Windows Python. Existing auto
+CredentialResolver and formal OracleAdapter/Registry paths were reused.
+
+WINDOWS_LOCAL_REAL_E2E: normal Preflight passed with NON_PRIVILEGED. The complete,
+untruncated reviewed preflight_object_grants result verified both direct SELECT
+permissions, SYS.V_$LOCK and SYS.V_$LOCKED_OBJECT, each with GRANTABLE=NO.
+User-issued authorization and Toolkit readonly verification are distinct.
+Toolkit issued no GRANT/REVOKE or other database change.
+
+All six diagnostic invocations passed (exit 0): default/global/instance Slow
+and Top SQL. Six configuration value/source JSON/HTML/CLI comparisons passed.
+Top SQL returned 10/4/2 rows. The prior blocking ORA-00942 no longer occurred.
+This resolves the object-visibility blocker for these Oracle normal-path runs.
+Empty activity/transaction samples still do not verify nonempty Slow,
+concurrency or transaction threshold-trigger boundaries.
+
+Evidence is retained separately in
+reports/config003-oracle-regrant2-20261118-195344-421055, including original
+report pairs, CLI captures, oracle_direct_grants.json, assessment.json,
+comparison.csv and artifact hashes. The original Inventory hash is unchanged.
+Prior failed reports are preserved. DATABASE_PERMISSIONS.md now records both
+verified permissions, their scope and the existing grant/verification/revoke SQL.
+
+Only documentation and local acceptance artifacts were updated. Product code
+was unchanged. Full offline tests were not rerun or relabeled as real evidence.
+git diff --check passed. CONFIG-003 remains CODE_COMPLETE pending human acceptance.
+
+## 121. CONFIG-003 nonempty threshold-trigger live acceptance
+
+The user authorized this final scoped lab test on 2026-11-18. No earlier
+thirty-mode configuration matrix or Oracle permission-remediation test was
+repeated. The launcher was Windows PowerShell Desktop 5.1, using project Windows
+Python and the same four enabled loopback test Inventories. Formal CLI Preflight
+reported NON_PRIVILEGED for each monitoring account. Versions reported were
+MySQL 8.4.11, PostgreSQL 160015 (16.15), Oracle 23.0.0.0.0 and SQL Server
+16.0.4305.5. Oracle's complete patch version is not inferred from that result.
+
+WINDOWS_LOCAL_REAL_E2E: one temporary shared settings file per experiment set
+specified Slow 3 seconds, active-request concurrency 2, idle transactions 5
+seconds, and independent SQL Server long transactions 5 seconds. The effective
+source is SETTINGS_GLOBAL. Original Inventories, runtime.yaml, credentials and
+monitor grants were unchanged. Monitoring always used the existing CLI,
+CredentialResolver, reviewed Registry, Adapter and report path. Existing lab
+connectors and the static dba.lab_config reader were used only for workload
+connections, isolated from the normal monitoring identity.
+
+### Slow and concurrency
+
+Safe bounded SELECTs produced the threshold observations. MySQL used
+SELECT 1 WHERE SLEEP(12)=0; PostgreSQL used SELECT 1, pg_catalog.pg_sleep(12).
+Oracle used a statement-local WITH FUNCTION calling DBMS_LOCK.SLEEP(12), with
+no permanent function or object. These are induced waits for threshold testing;
+they do not establish CPU/I/O bottlenecks. SQL Server used a readonly SELECT
+waiting on a dedicated global temporary table lock. It did not use ordinary
+WAITFOR as its slow-SQL test.
+
+- MySQL: observed SQL age 567 ms below / 4885 ms above the 3-second threshold.
+- PostgreSQL: 684 ms below / 4944 ms above.
+- Oracle: 1 second below / 4 seconds above, using its native integer duration.
+- SQL Server: 647 ms below / 4921 ms above.
+
+All four had no target long-running result below the threshold and the target
+request was in long_running with LONG_RUNNING_SQL above it. Request IDs/native
+sessions and displayed durations matched between JSON and the actual HTML
+request cards. MySQL/PostgreSQL/Oracle HTML problem sections also matched the
+Slow finding transition. SQL Server intentionally retained blocking as its
+primary human diagnosis for this blocked SELECT; it preserved the same request
+and runtime instead of promoting the raw Slow finding into a separate root cause.
+
+The low snapshots above are execution-age samples of a longer running request.
+A separate genuinely short query was therefore run once for each engine.
+Actual call durations were MySQL 2.0012 s, PostgreSQL 2.0036 s, Oracle 2.0066 s,
+SQL Server 2.0015 s. Each was sampled as an active sub-threshold request, excluded
+from long_running, and returned naturally. The SQL Server short SELECT waited
+on its own temporary-table lock until the holder rolled back after 2 seconds.
+
+At concurrency threshold 2, each one-active-request snapshot lacked
+HIGH_CONCURRENCY. With three independent active requests, each engine observed
+all three target identities and produced HIGH_CONCURRENCY, with matching HTML
+problem evidence. Total connections/sessions were tracked separately, including
+idle controls. SQL Server used bounded WAITFOR only for this concurrency control,
+where it retained its intentional-wait semantics; it was never the slow-SQL test.
+High concurrency is not treated as evidence of CPU saturation.
+
+### Idle and long transactions
+
+MySQL and PostgreSQL used the existing lab sample's single-row SELECT FOR UPDATE
+and owner ROLLBACK. Their idle transaction ages were 1 s below / 7 s above 5 s.
+The respective IDLE_TRANSACTION and IDLE_IN_TRANSACTION findings appeared only
+above the threshold. MySQL native transaction 19981 and PostgreSQL PID 105 /
+backend_xid 1137 / backend_start / xact_start remained stable across samples.
+
+The original Oracle SH.CUSTOMERS fixture had no row and that first idle attempt
+is preserved as incomplete. No row or permanent object was created to replace it.
+The existing SYS lab connection instead invoked
+DBMS_TRANSACTION.LOCAL_TRANSACTION_ID(TRUE), establishing a local transaction
+without row writes. Oracle then observed SID 210, SERIAL# 23395, XID 6:9:1644
+at 1 s / 8 s. IDLE_TRANSACTION appeared only at the high sample; JSON/HTML
+transaction identity/age and finding evidence matched. Owner ROLLBACK was
+followed by LOCAL_TRANSACTION_ID(FALSE)=NULL. Method reference:
+[Oracle DBMS_TRANSACTION documentation](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_TRANSACTION.html).
+This package call belongs solely to the already authorized SYS lab driver; the
+monitoring account gained no permission or new runtime path.
+
+Ordinary idle control connections for all three engines were absent from both
+the target transaction results and idle-transaction results. The monitor did not
+infer uncommitted transactions from an idle connection alone.
+
+SQL Server used a unique global temporary test table in tempdb, with its own
+fixture row and an UPDATE that the originating test connection rolled back.
+No sample business-table row was modified. A readonly blocked reader established
+a verified root/transaction relationship for the existing Slow triage rule.
+Native transaction 303469 was observed at 0 s / 7 s. Slow recorded
+TRIAGE-LONG-TX-01 NOT_TRIGGERED / CONFIRMED; HTML showed the same rule status,
+age and 5-second threshold. disk-growth excluded that exact transaction below
+the threshold and included it above. Other transactions were not mistaken for
+the target merely because a report had an old-transaction finding.
+
+A further isolated disk-growth pair bracketed collection with direct reads of
+the same test transaction 359005. Its age was 0–1 s in the low collection and
+6–7 s in the high collection. The matching transaction was absent/present in
+SQLSERVER_OLD_ACTIVE_TRANSACTION as expected; HTML finding state matched. Both
+Slow and disk-growth used the same effective 5-second configuration.
+
+### Cleanup and evidence
+
+All delayed SQL calls returned naturally. Workload connections issued their own
+ROLLBACK and closed. SQL Server's original ODBC pool still exposed sleeping
+physical connections and the global temporary table before the workload process
+exited; the original cleanup snapshot is preserved. After natural process exit,
+a separate readonly probe confirmed zero matching sessions/transactions and the
+temporary object absent. Supplementary SQL Server probes disabled pooling only
+inside the acceptance process, never in the formal Adapter, and confirmed zero
+remaining locks as well.
+
+Final independent probes for MySQL/PostgreSQL/Oracle found zero matching
+sessions, transactions and locks using exact run tags and the recorded MySQL
+transaction ID. Oracle's supplementary transaction cleanup also passed. Dedicated
+global temporary tables disappeared after their owner/reference connections
+closed. No KILL, explicit cancel, monitor grant change, business-data change,
+workload retry, plan acquisition or EXPLAIN ANALYZE was executed.
+
+Evidence roots, all preserved with artifact hashes:
+
+- reports/config003-threshold-20261118-201609-387969
+- reports/config003-threshold-supplement-20261118-202155-839398
+- reports/config003-threshold-disk-20261118-202629-259566
+- reports/config003-threshold-short-20261118-202925-953883
+
+There are 28 new threshold-only JSON/HTML report pairs with CLI captures.
+All 28 configuration value/source output comparisons passed. The first root
+contains assessment-final.json, threshold_matrix.csv, checks.csv,
+configuration_output_check.json, source_sha256.json and final_cleanup.json.
+The final saved-live-evidence evaluator passed 161 assertions, zero failed.
+These are assertions on real artifacts, not pytest/Fake Driver results.
+Original experiment errors and pool-lifetime snapshots remain in the raw reports.
+Earlier configuration/permission acceptance reports are unchanged by hash.
+
+No formal configuration, Collector, Adapter or Presenter was changed and no
+product regression fix was required. Offline suites were not rerun or relabeled
+as current live evidence. git diff --check passed. The tested threshold scope
+is suitable for formal human acceptance recommendation. CONFIG-003 remains
+CODE_COMPLETE until the user accepts it; no parent or P5 task is closed.
+
+
+## 122. CONFIG-003 formal human acceptance and project closeout — 2026-11-18
+
+The user explicitly accepted CONFIG-003, the four-engine configuration runs,
+the nonempty threshold-trigger tests and the Oracle V_$LOCK / V_$LOCKED_OBJECT
+permission recovery. Backlog now records DONE and Progress returns to
+V091-P5-WORKBENCH-001, whose IN_PROGRESS state is unchanged.
+
+This acceptance references section 121 and the configuration/permission evidence
+in sections 118–120: 28 threshold report pairs, 161 saved-real-evidence assertions
+with zero failures, and the documented final cleanup. Those assertions are
+WINDOWS_LOCAL_REAL_E2E artifact checks, not an additional pytest run. Earlier
+failed attempts and raw reports are retained. No database was contacted during
+this closeout.
+
+The accepted scope preserves engine semantics, shared SQL deadlines, the
+CLI / Inventory instance / Inventory defaults / global / legacy / default
+precedence, bounded Top N and the independent SQL Server long-transaction
+threshold. Main diagnosis does not automatically collect plans.
+
+P5 scenario acceptance remains open. SQL-TIMEOUT-CANCEL-VERIFY-009 remains
+E2E_PENDING; Oracle Net recovery research is nonblocking, A2.2 remains
+RECOVERY_RECEIVE_COMPLETED_CONNECTION_UNVERIFIED, A2.3 is NOT_EXECUTED and
+SERVER_QUERY_STOP_CONFIRMED remains false.
+
+Publication review distinguishes existing committed four-engine/acceptance/
+portable-runtime foundations at af2d858 from the newly staged configuration,
+report-writer, Baseline-comparator, regression and documentation changes.
+The old MySQL review bundle, ZIP and its identical README2.md are local input
+references, not additional completed implementations: six SQL/YAML files already
+match the formal tracked fixtures, while runner/test copies predate the accepted
+formal implementation. They remain untouched locally and are excluded from this
+commit, together with ignored credentials, Inventory, environments and raw
+reports. Their presence must be reported as retained untracked files, rather
+than hidden or removed to claim a clean workspace.
+
+### Closeout quality gates (executed in this turn)
+
+All following checks are ISOLATED_OFFLINE_TEST: project .venv on Windows,
+DBA_TOOLKIT_SYSTEM_TESTS=0 for pytest, with no real database connection.
+
+- Full: python -m pytest -q --tb=short --basetemp=.tmp/final-closeout-pytest
+  -o cache_dir=.tmp/final-closeout-cache. Exit 0; 2143 passed, 3 skipped,
+  0 failed in 130.25 s. Local log: .tmp/final-closeout-pytest.log.
+  The prior 23 Windows credential DACL failures did not recur on this authorized
+  host run; no credential/security implementation or assertion was relaxed.
+- Focused: python -m pytest tests/test_diagnostic_config.py
+  tests/test_sqlserver_slow_snapshot.py tests/test_slow_report_json_html_parity.py
+  tests/test_mysql.py tests/test_postgresql.py tests/test_oracle.py
+  tests/test_sqlserver.py tests/test_timeout_classification.py -q --tb=short
+  --basetemp=.tmp/final-closeout-focused
+  -o cache_dir=.tmp/final-closeout-focused-cache. Exit 0; 589 passed,
+  0 failed in 19.48 s. Local log: .tmp/final-closeout-focused.log.
+- ruff check dba tests scripts: exit 0, all checks passed.
+- mypy --strict --explicit-package-bases dba plus the MySQL/PostgreSQL/Oracle
+  timeout verifiers, Oracle TCP proxy, session observer, SYS verifier and PING
+  recovery proxy: exit 0, 88 source files, no issues.
+- dba validate: exit 0, 4 local asset definitions and 119 SQL scripts.
+  This validation does not connect to those assets.
+- dba --inventory examples/inventory/sqlserver.example.yaml
+  --settings examples/diagnostics.settings.yaml validate: exit 0,
+  1 disabled example asset and 119 SQL scripts.
+- Windows PowerShell Desktop 5.1 ParseFile over all 20 tracked .ps1 files:
+  exit 0, zero syntax errors; no script body or database test executed.
+- git diff --check: exit 0. Explicit candidate content scan found zero
+  likely credential literals; index-wide scanning is repeated before commit.
+
+Before documentation edits, all 37 dirty/untracked file hashes were saved
+locally. Only the five intended status/configuration documentation files changed
+in this closeout; every pre-existing source/test/example and local input remained
+byte-for-byte unchanged. No tracked deletion or rename was introduced.
+The initial explicit submission list contained 24 files. The index-wide scan
+then identified a pre-existing literal in the Fake Driver setup of
+tests/test_oracle_timeout_acceptance.py:438. Static tracing confirmed that the
+connect call only reaches the in-memory Driver/FakeConnection and never a
+credential store or real endpoint. Only that simulated password is normalized
+to the existing scanner-approved <test-only> placeholder; no scanner, DACL
+check or security assertion is changed. The final submission list contains
+25 files: 20 modifications and 5 new files.
+
+Final rerun after the Fake Driver placeholder correction:
+
+- Oracle timeout acceptance: python -m pytest
+  tests/test_oracle_timeout_acceptance.py -q --tb=short
+  --basetemp=.tmp/final-closeout-oracle
+  -o cache_dir=.tmp/final-closeout-oracle-cache: exit 0, 27 passed in 9.41 s.
+- Full pytest with the same disabled-system-test gate and options above, using
+  .tmp/final-closeout-final-pytest / .tmp/final-closeout-final-cache: exit 0,
+  2143 passed, 3 skipped, 0 failed in 122.77 s.
+  Log: .tmp/final-closeout-final-pytest.log. No DACL failure recurred.
+- Ruff, Strict MyPy (88 sources), both Registry/example validations, staged and
+  working-tree diff checks were repeated successfully, each exit 0.
+- python scripts/check_repository_secrets.py: exit 0, no tracked/indexed local
+  artifacts or likely literal secrets. The scanner itself is unchanged.
+
+All listed results are offline evidence, not a new real-database acceptance.
+The fetch before submission confirmed origin/main still at af2d858 with zero
+ahead/behind. Git publication outcome is reported in the final handoff rather
+than inferred from a prepared commit.

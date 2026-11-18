@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
+import os
+import subprocess
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -14,7 +18,7 @@ from dba.collectors import CollectorResult
 from dba.core import DatabaseInstance, DatabaseType
 from dba.incident import IncidentSummary, build_incident_summary
 from dba.logging import redact
-from dba.presentation import render_json
+from dba.presentation import render_json, write_json_report
 from dba.reporting import (
     DEFAULT_HUMAN_REPORT_POLICY,
     HtmlReportRenderer,
@@ -253,6 +257,66 @@ def _json_report(report: SlowReport | TopSQLDiagnosticReport, summary: IncidentS
         "incident_summary": asdict(summary),
     }
     return cast(dict[str, Any], json.loads(render_json(_redact_diagnostic_json(output))))
+
+
+_REPORT_FIELDS = {
+    "note": '锁对象：采集完成\r\n保留\n制表\t和 "引号"、反斜杠\\、私用区\ue123',
+    "action": "检查会话：" + "".join(map(chr, range(32))),
+    "sql": 'SELECT "请求"\r\nFROM fixture\nWHERE id = 1;\t-- \\',
+}
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
+def test_json_file_round_trips_four_engines(tmp_path: Path, engine: DatabaseType) -> None:
+    report = _slow_snapshot(engine)
+    report = replace(report, details={**report.details, "serialization_probe": _REPORT_FIELDS})
+    summary = build_incident_summary(report)
+    path = tmp_path / "slow.json"
+    payload = _redact_diagnostic_json({"report": asdict(report), "incident_summary": asdict(summary)})
+    write_json_report(path, payload)
+    raw = path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert "锁对象".encode() in raw
+    restored = json.loads(raw.decode("utf-8"))
+    assert restored == json.loads(render_json(payload))
+    assert restored["report"]["details"]["serialization_probe"] == _REPORT_FIELDS
+    assert restored["report"]["instance"]["credential_alias"] == "[REDACTED]"
+
+
+def test_json_report_is_consumed_by_windows_powershell_desktop(tmp_path: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows PowerShell Desktop is only available on Windows")
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    path = tmp_path / "slow.json"
+    write_json_report(path, _REPORT_FIELDS)
+    completed = subprocess.run(
+        [str(powershell), "-NoProfile", "-NonInteractive", "-Command",
+         "$ErrorActionPreference='Stop'; if ($PSVersionTable.PSEdition -ne 'Desktop' -or "
+         "$PSVersionTable.PSVersion.ToString() -notlike '5.1.*') { exit 2 }; "
+         "[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936); "
+         "$data=Get-Content -Raw -Encoding UTF8 -LiteralPath 'slow.json' | ConvertFrom-Json; "
+         "foreach ($field in 'note','action','sql') { "
+         "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($data.$field)) }"],
+        cwd=tmp_path, capture_output=True, check=True, timeout=15,
+    )
+    decoded = [base64.b64decode(line).decode("utf-8") for line in completed.stdout.splitlines()]
+    assert decoded == list(_REPORT_FIELDS.values())
+
+
+def test_json_report_keeps_existing_file_if_staged_validation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "slow.json"
+    path.write_bytes(b'{"previous":true}')
+
+    def reject(_: Any) -> Any:
+        raise json.JSONDecodeError("invalid staged report", "", 0)
+
+    monkeypatch.setattr("dba.presentation.json.load", reject)
+    with pytest.raises(json.JSONDecodeError):
+        write_json_report(path, _REPORT_FIELDS)
+    assert path.read_bytes() == b'{"previous":true}'
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def _top_sql_section(model: ReportModel) -> ReportSection:

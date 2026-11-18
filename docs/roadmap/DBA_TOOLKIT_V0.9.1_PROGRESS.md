@@ -3,20 +3,24 @@
 ## Current position
 
 ```text
-CURRENT_PHASE: Long-term / Safety — global diagnostic SQL timeout
-CURRENT_TASK: SQL-TIMEOUT-CANCEL-VERIFY-009
+CURRENT_PHASE: Phase 5 — Unified HTML Incident Workbench
+CURRENT_TASK: V091-P5-WORKBENCH-001
 CURRENT_TASK_STATUS_SOURCE: docs/roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md
 CURRENT_VERSION: 0.9.1
-BASE_HEAD_FOR_CURRENT_CHECKPOINT: e41fbb2b867d4cf08fd652b95cf3a91c19f8f86c
-CURRENT_TASK_DELIVERY: Acceptance §112 records the four-engine V0.9.1 source audit and scoped timeout evidence. Oracle client-side reliability is verified for the lab scenarios in §103. Oracle Net recovery research is non-blocking. Oracle server-side stop remains unconfirmed.
-LAST_COMPLETED_TASK: SQL-TIMEOUT-DEADLINE-004 — user accepted the PARTIAL delivery. CONFIG-002 and CLASSIFY-003 remain accepted.
-NEXT_READY_TASK: Review the four-engine closeout in Acceptance §112. Follow the Backlog dependency order when the next task is authorized.
-WAITING_FOR_USER_REVIEW: YES — V0.9.1 source and acceptance closeout.
-WAITING_FOR_USER_ACTION: Review the scoped evidence and remaining per-engine gaps.
-FOLLOWING_ORDER: Preserve all pre-existing Oracle, SQL Registry, Top SQL, P5, release artifacts, untracked files, and current worktree changes. SQL Server Top SQL integration remains DONE for the user-accepted scope in Acceptance §63; other task states remain as recorded in Backlog.
+BASE_HEAD_FOR_CURRENT_CHECKPOINT: af2d85802ad71eed1a27d32655fd5dbac4cc2fd3
+CURRENT_TASK_DELIVERY: CONFIG-003 was formally accepted by the user on 2026-11-18; see Acceptance sections 118–122. The current closeout publishes reviewed configuration, atomic JSON and Baseline verifier changes; P5 live scenario acceptance remains incomplete.
+LAST_COMPLETED_TASK: CONFIG-003 — user accepted configuration and nonempty threshold evidence; Backlog records DONE.
+NEXT_READY_TASK: Resume the retained P5 real-report runbook after this handoff is reviewed: SQL Server A/B/C/D and lock-object E2E, then scoped four-engine JSON/HTML parity.
+WAITING_FOR_USER_REVIEW: YES — review this full-project closeout and publication handoff; CONFIG-003 itself is accepted.
+WAITING_FOR_USER_ACTION: Execute the remaining authorized P5 scenarios only in a separately approved Windows-local real E2E run. No new database connection is part of this closeout.
+FOLLOWING_ORDER: Keep Backlog as the status authority. SQL-TIMEOUT-CANCEL-VERIFY-009 remains E2E_PENDING and does not block Phase 5. Oracle Net recovery remains optional research. OFFLINE-RUNTIME-001 and PORTABLE-UPDATE-001 retain their separate acceptance gaps.
 ```
 
-The independent Oracle verifier supports separate timeout case reports and outputs `CONNECTION_RECOVERY_VERIFIED`. Both supplied Windows reports were reviewed in Acceptance §103. The later PING experiments are acceptance-only research. No additional Oracle Net protocol work is needed for the V0.9.1 mainline.
+Acceptance §112 records the completed source closeout and Windows offline regression (1892 passed, 3 skipped). Earlier live results, including scoped SQL Server evidence in §63 and Oracle timeout/recovery in §§103 and 109, remain historical evidence for those runs. They do not complete the P5 scenarios at this GitHub baseline. The Oracle server-stop flag remains false.
+
+### Accepted configuration and publication checkpoint — 2026-11-18
+
+Acceptance §122 records human CONFIG-003 closure and the current offline gates: 2143 passed / 3 skipped full, 589 focused passed, Ruff, Strict MyPy (88 sources), Registry/example validation and all 20 PowerShell syntax checks. All prior source changes are retained. The explicit publication set is 25 files, including normalization of one pre-existing Fake Driver credential literal to a scanner-approved test placeholder; no security check is weakened. Local raw reports, Inventory, credentials, environments and old MySQL review-package inputs remain outside the commit. No new live acceptance was performed.
 
 ### Oracle observer scheduling and crossing-sample attribution
 

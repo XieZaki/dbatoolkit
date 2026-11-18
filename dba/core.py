@@ -43,6 +43,7 @@ class DatabaseInstance:
     tags: list[str] = field(default_factory=list)
     connection: dict[str, Any] = field(default_factory=dict)
     version_family: str | None = None
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

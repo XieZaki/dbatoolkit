@@ -435,7 +435,7 @@ def make_traced_cursor(
         Driver(connection), clock, script_names=scripts, proxy=fake_gate,
     )
     owner.gate_plan = harness.GatePlan(gate_phase)
-    traced = owner.connect(user="offline-only", password="offline-secret")
+    traced = owner.connect(user="offline-only", password="<test-only>")
     traced.record = True
     cursor = traced.cursor()
     cursor.arraysize = 100

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from dba.core import DiagnosticReport
@@ -53,10 +56,32 @@ class StatusResult:
     warnings: tuple[str, ...] = ()
 
 
-def render_json(value: Any) -> str:
+def render_json(value: Any, *, allow_nan: bool = True) -> str:
     payload = asdict(value) if hasattr(value, "__dataclass_fields__") else value
     safe_payload = redact(payload)
-    return json.dumps(_localize_json_messages(safe_payload), ensure_ascii=False, indent=2, default=str)
+    return json.dumps(_localize_json_messages(safe_payload), ensure_ascii=False, indent=2, default=str,
+                      allow_nan=allow_nan)
+
+
+def write_json_report(path: Path, value: Any) -> None:
+    """Publish a validated, BOM-free UTF-8 report without passing through stdout."""
+    text = render_json(value, allow_nan=False) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n",
+                                         dir=path.parent, prefix=".report-", suffix=".tmp",
+                                         delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+        with temporary.open(encoding="utf-8") as staged:
+            json.load(staged)
+        os.replace(temporary, path)
+        with path.open(encoding="utf-8") as published:
+            json.load(published)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _localize_json_messages(value: Any, *, vendor_evidence: bool = False) -> Any:

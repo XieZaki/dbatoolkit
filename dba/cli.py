@@ -32,6 +32,7 @@ from dba.credentials import (
     prompt_credential_for_storage,
     validate_alias,
 )
+from dba.diagnostic_config import resolve_diagnostics
 from dba.disk_growth import collect_disk_growth_phase
 from dba.disk_growth_profiles import validate_disk_profiles
 from dba.encrypted_credentials import (
@@ -82,6 +83,7 @@ from dba.presentation import (
     render_incident_summary,
     render_json,
     render_oracle_plan_human,
+    write_json_report,
 )
 from dba.registry import SqlScriptRegistry
 from dba.replication import diagnose_replication
@@ -267,9 +269,9 @@ def _runtime_defaults(database_type: DatabaseType, path: Path | None) -> object:
 
 
 def _effective_settings(instance: Any, path: Path | None) -> object:
-    return resolve_connection_settings(
-        instance.db_type, instance.connection, _runtime_defaults(instance.db_type, path)
-    )
+    settings = resolve_connection_settings(
+        instance.db_type, instance.connection, _runtime_defaults(instance.db_type, path))
+    return resolve_diagnostics(settings, instance, path)[0]
 
 
 def _diagnostic_report_path(database_id: str, scenario: str, requested: Path | None) -> Path:
@@ -489,6 +491,8 @@ def main(
                           help="活动 SQL 终端主排序方式（HTML 报告始终包含三种排序）")
     diagnose.add_argument("--include-top-sql", action="store_true", help=argparse.SUPPRESS)
     diagnose.add_argument("--report", type=Path, help="HTML 报告输出路径")
+    diagnose.add_argument("--json-report", type=Path, metavar="PATH.json",
+                          help="直接写入同次诊断的 UTF-8 JSON 报告")
     diagnose.add_argument("--format", choices=("console", "json"), default="console",
                           help=argparse.SUPPRESS)
     diagnose.add_argument("--verbose", action="store_true",
@@ -504,6 +508,8 @@ def main(
     args = parser.parse_args(argv)
     if args.command == "diagnose":
         argument_error = None
+        if args.json_report is not None and args.json_report.suffix.lower() != ".json":
+            parser.error("--json-report requires a .json path")
         if args.include_top_sql:
             argument_error = "--include-top-sql 已移除。"
         elif args.scenario == "slow" and (args.metric is not None or args.top is not None):
@@ -513,8 +519,7 @@ def main(
                                      "error_message": argument_error,
                                      "guidance": "累计统计请使用 dba diagnose <database_id> top-sql。"})
             return 1
-        if args.top is None:
-            args.top = 10
+        args.explicit_top = args.top
     if args.command == "driver":
         from dba.driver_manager import DriverManager
 
@@ -924,6 +929,9 @@ def main(
                 )
             )
             if args.command == "diagnose":
+                resolved_settings, configuration_evidence = resolve_diagnostics(
+                    _effective_settings(instance, args.settings), instance, args.settings, top=args.explicit_top)
+                args.top = resolved_settings.slow_top_n
                 oracle_plan_args = (args.sql_id, args.child_number, args.inst_id,
                                     args.con_id, args.plan_hash)
                 if args.scenario == "plan" and instance.db_type == DatabaseType.SQLSERVER:
@@ -1493,6 +1501,9 @@ def main(
                               else COLLECTORS[args.collector](adapter).collect(instance))
                     output = asdict(result)
             if args.command == "diagnose":
+                output["diagnostic_configuration"] = configuration_evidence
+                cast(Any, report).details["diagnostic_configuration"] = configuration_evidence
+                output["report"].setdefault("details", {})["diagnostic_configuration"] = configuration_evidence
                 report_path = _diagnostic_report_path(instance.id, args.scenario, args.report)
                 report_path.parent.mkdir(parents=True, exist_ok=True)
                 incident_summary = build_incident_summary(report, str(report_path))
@@ -1539,7 +1550,16 @@ def main(
                             plan_artifact_path.unlink(missing_ok=True)
                         report_path.unlink(missing_ok=True)
                         raise
+                json_output = (_redact_diagnostic_json(output)
+                               if args.json_report is not None or args.json or args.format == "json" else None)
+                if args.json_report is not None:
+                    try:
+                        write_json_report(args.json_report, json_output)
+                    except (OSError, ValueError):
+                        raise ToolkitError("JsonReportWriteFailed", "JSON report could not be written and verified.") from None
                 if args.format == "console" and not args.json:
+                    for parameter, evidence in configuration_evidence.items():
+                        print(f"{parameter} = {evidence['value']} ({evidence['source']})")
                     if args.scenario == "active-sql":
                         print(render_active_sql_human(output["active_sql"], str(report_path)))
                     elif args.scenario == "memory-grant":
@@ -1562,7 +1582,7 @@ def main(
                     else:
                         print(render_incident_summary(incident_summary, verbose=args.verbose))
                 else:
-                    _emit(args, "diagnose", _redact_diagnostic_json(output))
+                    _emit(args, "diagnose", json_output)
             else:
                 _emit(args, args.command, redact(output))
             if not output["success"]:

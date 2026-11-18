@@ -1338,7 +1338,8 @@ def test_timed_diagnostic_html_flush_failure_removes_incomplete_file(
 
 
 @pytest.mark.parametrize("active_wait", [False, True])
-def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str], active_wait: bool) -> None:
+def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str], active_wait: bool,
+                      monkeypatch: pytest.MonkeyPatch) -> None:
     driver = FakeDriver()
     driver.connection.results.update(transactions=[], connections=[])
     if active_wait:
@@ -1378,8 +1379,10 @@ def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str], active
         "--format",
         "json",
     ]
-    assert main(args, provider=MemoryCredentialProvider(), driver=driver) == 0
+    json_path = tmp_path / "slow.json"
+    assert main([*args, "--json-report", str(json_path)], provider=MemoryCredentialProvider(), driver=driver) == 0
     payload = json.loads(capsys.readouterr().out)
+    assert json.loads(json_path.read_text(encoding="utf-8")) == payload
     assert payload["success"] and output.exists() and driver.connection.closed
     assert payload["incident_summary"]["data_completeness"] == "COMPLETE"
     assert payload["incident_summary"]["report_path"] == str(output)
@@ -1428,6 +1431,17 @@ def test_cli_diagnose(tmp_path: Path, capsys: pytest.CaptureFixture[str], active
     human_output = capsys.readouterr().out
     assert "数据库性能应急诊断" in human_output and "详细中文报告已写入" in human_output
     assert "Current SQL" not in human_output and "Blocking Tree" not in human_output
+    if not active_wait:
+        monkeypatch.setattr(cli, "write_json_report", Mock(side_effect=ValueError("test validation failure")))
+        failed_json = tmp_path / "invalid.json"
+        failed_args = [*args, "--json-report", str(failed_json)]
+        failed_args[failed_args.index(str(output))] = str(tmp_path / "invalid.html")
+        failed_driver = FakeDriver()
+        failed_driver.connection.results.update(transactions=[], connections=[])
+        assert main(failed_args, provider=MemoryCredentialProvider(), driver=failed_driver) == 1
+        failure = json.loads(capsys.readouterr().out)
+        assert not failure["success"] and failure["error_type"] == "JsonReportWriteFailed"
+        assert not failed_json.exists()
     for option in ("--execute", "--force"):
         with pytest.raises(SystemExit) as exc:
             main([*args, option])

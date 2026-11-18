@@ -1,7 +1,7 @@
 # DBA Toolkit TODO
 ## 当前待办与行动入口
 
-> 更新日期：2026-11-12
+> 更新日期：2026-11-18
 >
 > **状态权威来源：** [V0.9.1 Backlog](roadmap/DBA_TOOLKIT_V0.9.1_BACKLOG.md)。本文件是面向日常工作的精简待办视图，不创建第二套任务状态。若本文件与 Backlog 不一致，以 Backlog 为准，并在下次维护时同步。
 >
@@ -12,7 +12,9 @@
 
 # 1. 当前优先事项
 
-## 当前重点 — 继续完成 Phase 5 HTML Incident Workbench
+CONFIG-003 已于 2026-11-18 经用户正式验收，关闭依据见 Acceptance §122（引用 §§118–121）。配置与阈值已完成事项不再作为待办；历史证据保留，主线恢复 P5。
+
+## 保留的 Phase 5 HTML Incident Workbench 实机待办
 
 **正式任务：** V091-P5-WORKBENCH-001
 **Backlog 状态：** IN_PROGRESS
@@ -20,17 +22,10 @@
 
 ### 待办
 
-- [ ] 依 Acceptance §75 在授权 Windows 宿主机执行 A 空闲基线、B 高并发、C 超过 10 秒的业务 SQL 与独立 WAITFOR、D 混合阻塞及回滚解除，并保留同次真实 JSON/HTML 和验证记录。Codex 管理进程在宿主机门禁处停止，实机场景仍为 `NOT_EXECUTED`。
-- [ ] B 场景核对三类 SQL 原始模板与采集文本、语句级分组、累计 CPU/逻辑读和 RUNNABLE 数。实际 DMV 偏移及长文本边界仍待稳定构造并核验，32 KiB 与多一个码元已通过离线回归。
-
-- [ ] 审阅七区块离线样例 `reports/slow_workbench_synthetic_sqlserver_20261110.html`，按 Acceptance §69 在获准 Windows 宿主机重采混合 WAITFOR 并复核 HTML 和 JSON。
-- [ ] 审阅用户提供的最新 SQL Server 2022 Slow HTML 报告：sqlserver2022_slow_20261109_211354.html。检查结论是否清晰、证据是否完整、字段是否容易理解；不要将真实报告或其中的 SQL/业务信息提交到仓库。
-- [ ] 对照 Acceptance §67，审阅 WAITFOR 分类离线证据，确认正常独立 WAITFOR、持有未提交事务、存在阻塞、混合异常和证据不足场景的结论边界。
-- [ ] 用户审阅并另行授权后，在获准的 Windows 宿主机和已确认的 SQL Server 2022 测试资产上，复测 standalone WAITFOR 与混合请求/阻塞场景。若 Windows 宿主机 preflight 不通过，停止连接并提供用户可执行的 PowerShell 命令。
-- [ ] 完成 SQL Server、PostgreSQL、MySQL、Oracle 四数据库真实报告生成。
-- [ ] 对真实生成的 JSON 与 HTML 报告逐项核对结论、身份、SQL、请求/会话、事务、等待、阻塞、资源指标、错误和完整性状态的一致性。
-- [ ] 将实际运行的数据库版本、资产、命令、结果、限制和清理情况写入 Acceptance；更新 Backlog 状态和 Progress 指针。
-- [ ] 用户审核后再决定是否关闭 P5 或进入下一阶段。
+- [ ] 按下方续跑计划执行 SQL Server A/B/C/D。独立 WAITFOR、同次报告比对、DMV 偏移及长文本边界都纳入对应场景。
+- [ ] 补齐 `V091-P5-LOCK-OBJECT-SQLSERVER-001` 的锁对象实机证据，覆盖同库解析、持有方与等待方，以及跨库或元数据不可见时的降级。
+- [ ] 分别生成 MySQL、PostgreSQL、Oracle 实机报告，再核对四库同次采集的 JSON/HTML。
+- [ ] 将实际运行的版本、命令、报告、限制和清理结果写入 Acceptance，交用户审阅后再决定是否关闭 P5。
 
 ### 已有证据与边界
 
@@ -38,9 +33,87 @@
 - Acceptance §56：本地 Chrome 窄视口视觉验收。
 - Acceptance §57：四数据库合成 JSON/HTML parity。
 - Acceptance §66：SQL Server Slow session query 与数据库原始错误传播离线证据。
-- Acceptance §67：SQL Server WAITFOR 分类离线证据；聚焦测试 200 passed，完整 pytest 1390 passed、3 skipped；Ruff、严格 MyPy、Registry validation、diff check 通过。
-- WAITFOR 新分类的 Windows 本地真实 E2E 仍为 NOT_EXECUTED。
-- 四数据库真实报告生成和真实报告 JSON/HTML parity 仍未完成。合成 fixture 不可替代真实报告证据。
+- Acceptance §§67、69、75、83：已完成 WAITFOR 分类、界面回归、SQL 文本边界和锁对象离线检查。§63 的旧 SQL Server 实机结果只适用于其记录的范围。
+- SQL Server A 的首份 Baseline 保留 JSON 解析失败记录，见 Acceptance §113。新一组实机归档的空闲 Baseline 已通过修复后的 JSON/HTML 离线比较，见 §114。该归档缺少 `verification.json`，完整 Baseline 验收、B/C/D、锁对象及四库真实报告一致性仍待执行。§112 的宿主机 1892 项通过属于离线回归。
+
+### P5 实机续跑计划
+
+以下命令供人工审核后在授权 Windows 宿主机执行。使用 PowerShell Desktop 和项目 `.venv`；核验实际 HEAD 后，逐次显式选择一个获批且启用的 `environment=test` 资产。先核对主机、端口、数据库或服务、实际版本、驱动和凭据可用性；监控与负载账号分离。检查失败时保留脱敏原因。报告和日志只存本地。
+
+```powershell
+Set-Location -LiteralPath 'D:\DBA\DBAToolKit'
+if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Use Windows PowerShell Desktop.' }
+$head = git rev-parse HEAD
+# Record and review $head against the accepted GitHub baseline before collecting evidence.
+$dba = (Resolve-Path -LiteralPath '.\.venv\Scripts\dba.exe').Path
+$python = (Resolve-Path -LiteralPath '.\.venv\Scripts\python.exe').Path
+& $python -E -c 'import sys; assert sys.platform == "win32"; print(sys.executable)'
+if ($LASTEXITCODE -ne 0) { throw 'Project Windows Python was not confirmed.' }
+```
+
+**1. SQL Server A/B/C/D。** 沿用 Acceptance §75 的 SQL Server 2022 实验室门禁。现有验收脚本要求 `sqlserver2022`、`127.0.0.1:1433`、`master`、构建 `16.0.4305.5` 及获批监控凭据。只在 `-PreflightOnly` 就绪后继续。计划场景名称与脚本参数的对应关系如下。
+
+```powershell
+$slowAcceptance = '.\scripts\acceptance\verify_sqlserver_slow_snapshot.ps1'
+$labArgs = @{ Inventory = (Resolve-Path -LiteralPath (Read-Host 'Approved SQL Server master test inventory')).Path }
+# 如需获批的现有运行时设置，先设置 $labArgs.Settings。
+& $slowAcceptance @labArgs -Scenario Baseline -PreflightOnly
+$idle = & $slowAcceptance @labArgs -Scenario Baseline
+# 在独立终端启动获批负载，稳定时采集 B。
+$busy = & $slowAcceptance @labArgs -Scenario A
+# C：仅使用获批普通测试会话的实际 SPID。
+$longSpid = [int](Read-Host 'Approved long SELECT SPID')
+$waitSpid = [int](Read-Host 'Independent WAITFOR SPID')
+$long = & $slowAcceptance @labArgs -Scenario B -WorkloadSessionId $longSpid -WaitforSessionId $waitSpid
+# D：在同一有界事务夹具仍持锁且等待方可见时采集。
+$rootSpid = [int](Read-Host 'Fixture root SPID')
+$victimSpid = [int](Read-Host 'Fixture victim SPID')
+$blocked = & $slowAcceptance @labArgs -Scenario C -RootSessionId $rootSpid -VictimSessionId $victimSpid
+# 负载终止并正常回滚、关闭会话后，复核两类解除证据。
+& $slowAcceptance @labArgs -Scenario D -BaselineJson $blocked.Json
+& $slowAcceptance @labArgs -Scenario D -BaselineJson $busy.Json
+```
+
+- **A（脚本 Baseline）**：未启动负载，保留 JSON、HTML 和 `verification.json`，确认没有残留签名会话或夹具请求。
+- **B（脚本 A）**：在另一终端按 §75 核验负载目标 `AdventureWorks2022` 和独立账号，再按批准的并发预算运行 `& $python .\DBAToolkit-LoadTest\run_sqlserver_load.py --sessions 100 --duration 45 --pause-ms 100 --connect-timeout 5 --query-timeout 20`。核对三类 SQL 模板、分组、累计 CPU/逻辑读与 RUNNABLE。DMV 偏移及实际长文本边界只有在原文和采集字段可核对时才记通过。
+- **C（脚本 B）**：使用已有获批的、预计超过 10 秒且有查询上限的只读 SELECT，以及另一普通会话的有界 WAITFOR。记录 SPID、采样时间和两类请求各自的 SQL 分类。没有适用 SQL 或未采到预期窗口时记录 `NOT_EXECUTED` 或证据不足。等待两条语句自然结束并关闭测试会话。
+- **D（脚本 C 后接 D）**：复用已审阅夹具 `& $python .\DBAToolkit-LoadTest\run_sqlserver_blocking.py --role mixed --sessions 2 --duration 45`。保留根事务、WAITFOR、等待方、原生锁等待和阻塞边；夹具回滚并关闭后，核对原事务、阻塞边及同身份测试会话均已消失。不要额外执行 KILL。
+
+**2. SQL Server 锁对象（Acceptance §83）。** 沿用 D 的已审查夹具。上述 A–D 脚本固定连接 `master`，适用于 `AdventureWorks2022` 锁资源的跨库降级对照。正向解析须使用用户单独核准、已有元数据可见性的 `AdventureWorks2022` 单资产 Inventory，用下方同次采集命令生成报告。检查 `report.details.lock_resources` 和根阻塞者的 `held_lock_resource_ids`，记录数据库、Schema、表、索引、原生模式及持有/等待角色，并核对 HTML 阻塞页。同库元数据不可见时保留原生资源和原因。没有合格资产或权限时保留缺口。清理按 D 执行，不更改资产或授权。
+
+**3–5. MySQL、PostgreSQL、Oracle 真实报告。** 在同一授权宿主机对三库逐个执行下方采集命令，每次只选择一个已批准资产。MySQL 核对 SQL 来源、线程/事件身份及 Performance Schema 可见性；PostgreSQL 核对 PID、事务、等待/阻塞和 PostgreSQL 视图的可见性；Oracle 核对 Thin、PDB、实例/容器、会话/SQL 身份和现有视图权限。§112 记录的 MySQL 8.4.11、PostgreSQL 16.15、Oracle Free 23.26.3.0.0 只是历史实验版本，实际版本以本次 Preflight 为准。Oracle 使用现有只读监控账号。默认采集自然负载，结束后关闭诊断连接；若另行批准受控夹具，应独立记录回滚与会话退出。空基线可证明输出生成，不能覆盖未出现的阻塞或资源场景。
+
+```powershell
+$inventory = (Resolve-Path -LiteralPath (Read-Host 'Approved single-asset test Inventory YAML')).Path
+$asset = Read-Host 'Approved asset ID from this Inventory'
+$opts = @('--inventory', $inventory, '--sql-root', (Resolve-Path -LiteralPath '.\sql').Path)
+# 如需获批的现有运行时设置，追加 --settings 和对应路径。
+$metaRaw = & $dba @opts show $asset --json
+if ($LASTEXITCODE -ne 0) { throw 'Inventory inspection failed.' }
+$meta = $metaRaw | ConvertFrom-Json
+if (-not $meta.enabled -or $meta.environment -ne 'test') { throw 'Select an enabled test asset.' }
+# 此处人工核对 $meta 的引擎、host、port 和连接目标，再运行下面的连接预检。不输出凭据别名。
+# 另核对所选现有凭据来源可用。使用加密会话时先用 dba credentials status --json 确认状态。
+$probeRaw = & $dba @opts test-connection $asset --json
+if ($LASTEXITCODE -ne 0) { throw 'Connection preflight failed.' }
+$probe = $probeRaw | ConvertFrom-Json
+if (-not $probe.success) { throw 'Connection preflight did not succeed.' }
+# 核对实际版本、驱动和账号安全分类；保存必要且脱敏的出站证据。
+& $dba @opts check $asset --json
+# 核对 Slow 权限及适用版本；如有受限或失败，先记录并确认可验收范围。
+$out = Join-Path (Resolve-Path -LiteralPath '.\reports').Path ('p5-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $out | Out-Null
+$jsonPath = Join-Path $out 'slow.json'
+$htmlPath = Join-Path $out 'slow.html'
+& $dba @opts diagnose $asset slow --quiet --report $htmlPath --json-report $jsonPath
+$captureExit = $LASTEXITCODE
+if ($captureExit -ne 0) { throw "Preserve the collection evidence at $out." }
+if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) { throw "JSON report missing at $out." }
+if (-not (Test-Path -LiteralPath $htmlPath -PathType Leaf)) { throw "HTML report missing at $out." }
+$null = Get-Content -Raw -Encoding UTF8 -LiteralPath $jsonPath | ConvertFrom-Json -ErrorAction Stop
+```
+
+**6. 四库 JSON/HTML 一致性。** 使用 A–D 验收脚本或上面单次 `diagnose slow --json-report ... --report ...` 生成的配对文件。逐对执行 `Get-FileHash -Algorithm SHA256 -LiteralPath $jsonPath,$htmlPath`，保留摘要并用本地浏览器打开 HTML。核对同一采样的资产、版本、结论和完整性，以及可见的 SQL、请求/会话、事务、阻塞链、等待、资源指标、错误码和脱敏。确认报告按预算隐藏的行有对应省略说明，缺失权限和未知原因准确展示。为每对记录 HEAD、资产、版本、采样时间、命令、哈希、差异及清理结果。比较阶段仅访问本地证据文件。
 
 ---
 
@@ -53,7 +126,6 @@
 | V091-P2-TOPSQL-INTEGRATION-001 | DONE | 用户接受的范围见 Acceptance §63；不代表其他数据库/版本全部验证 |
 | SQL-REGISTRY-SAFETY-001 | VERIFIED | 静态安全审计及自动化证据见 Acceptance §58；不等于真实数据库 E2E |
 | BUG-WINDOWS-CI-FAILURES-001 | VERIFIED | Windows Actions 修复证据见 Acceptance §47、§60 |
-| V091-P5-WORKBENCH-001 的离线 WAITFOR 分类 | 进行中任务中的离线检查点 | 不等于 P5 整体完成或真实 E2E 通过 |
 
 ---
 
@@ -92,10 +164,9 @@
 
 2026-11-12 Slow HTML 按 V1 Demo 回归后，以下内容在报告对应位置显示为「待开发」；高并发诊断例外，报告目前只在数据库侧证据充分时给出简短提示。这些内容尚未建立 Backlog 任务 ID，也未获授权；如需实施，先在 Backlog 登记并取得用户授权。已有任务覆盖的内容只引用，不重复登记。
 
-- [ ] 连续采样与 CPU/逻辑读/物理读区间增量：由 V091-P2-TOPSQL-DELTA-001 覆盖，不另起任务。
 - [ ] 高并发无主导慢 SQL 的资源诊断：目标是在没有单一慢 SQL 时，依据数据库内部的并发与等待分布给出结论；依赖 V091-P2-RESOURCE-CONTEXT-CONTRACT-001 及区间增量，不在 HTML 内实现根因逻辑。
 - [ ] Sleeping/非根会话的上一条 SQL：目标是让 SQL Server 非根会话（most_recent_sql_handle）、Oracle 非根会话（PREV_SQL_ID）和 MySQL（events_statements_history）提供可靠的上一条 SQL；依赖新增只读 Registry SQL 与字段契约。当前仅 SQL Server/Oracle 根阻塞者和 PostgreSQL 非 active 会话有可靠来源。
-- [ ] 锁资源解析到库/表/索引，以及锁模式：SQL Server 部分由 V091-P5-LOCK-OBJECT-SQLSERVER-001 实现，状态以 Backlog 为准，真实 E2E 待执行。PostgreSQL（pg_locks）、MySQL（performance_schema.data_locks）、Oracle（V$LOCK）仍显示「待开发」，尚未登记任务，也未获授权。
+- [ ] PostgreSQL（pg_locks）、MySQL（performance_schema.data_locks）、Oracle（V$LOCK）的锁对象与锁模式展示仍待开发。SQL Server 已实现部分的实机缺口见 §1。
 - [ ] Slow 报告内嵌 TOP 5 当前 SQL 的真实执行计划：目标是在报告中展示与当前请求按原生标识关联的计划树；依赖现有独立 `plan` 命令的结果契约，不重新执行 SQL，不使用模拟计划。PostgreSQL/MySQL 当前无可关联的计划标识，标记为不支持。
 - [ ] 执行计划运行时统计：目标是展示实际行数、执行次数等算子运行统计（如 SQL Server 实际计划/查询分析、Oracle ALLSTATS LAST）；依赖内嵌计划能力及额外只读权限评估。
 - [ ] SQL Server 与 Oracle 客户端源端口：目标是采集 client_tcp_port / V$SESSION 端口信息；依赖 Slow Registry SQL 字段变更（当前约定不修改 Registry，需单独授权）。
@@ -107,10 +178,7 @@
 
 2026-11-12 完成规则落地与架构审查（只读代码审查，未连接数据库，未改 Collector/驱动）。规则见 AGENTS.md 与 PROJECT_RULES「全局诊断 SQL 执行超时与故障隔离原则」，设计与测试方案见 `docs/design/diagnostic-sql-timeout-and-fault-isolation-v0.9.1.md`。任务状态以 Backlog 为准；每项需单独授权，不随 P5 自动启动。
 
-- [x] 用户已于 2026-11-13 批准 `C-11`～`C-13`（决定见 Backlog §6 与设计 §7）。
-- [x] SQL-TIMEOUT-CONFIG-002：用户验收，见 Acceptance §84。
-- [x] SQL-TIMEOUT-CLASSIFY-003：用户验收，见 Acceptance §85。
-- [x] SQL-TIMEOUT-DEADLINE-004：用户接受 PARTIAL 交付，见 Acceptance §86 与 §87 基线。
+已验收的 CONFIG-002、CLASSIFY-003 和已接受的 DEADLINE-004 部分交付见 Acceptance §§84–87。已批准的 C-11～C-13 见 Backlog §6。
 - [ ] SQL-TIMEOUT-MYSQL-005：MySQL 8.4.11 SELECT SESSION、Hint、SSCursor Fetch 实机结果已记录于 Acceptance §93；SHOW 自动取消身份竞态仍 BLOCKED，没有执行 KILL QUERY。按 Backlog 状态保持 BLOCKED，不扩大权限。
 - [ ] SQL-TIMEOUT-ISOLATION-006：统一 TIMEOUT/依赖失败/未执行状态和「重连一次」规则，不改变分阶段采集结构。依赖 003。
 - [ ] SQL-TIMEOUT-REPORT-007：HTML/JSON/CLI 一致展示超时证据，增加查询超时文案。依赖 003、006。

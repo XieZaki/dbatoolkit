@@ -120,6 +120,11 @@ class Inventory:
                     if _contains_credential(tag):
                         raise ValidationError(f"{source}: {where}: Embedded credentials are prohibited")
                 result[key] = tags
+            elif key == "diagnostics":
+                from dba.diagnostic_config import flatten_diagnostics
+
+                flatten_diagnostics(value)
+                result[key] = dict(value)
             elif key == "connection":
                 if not isinstance(value, dict):
                     raise ValidationError(f"{source}: {where}: connection must be a mapping")
@@ -188,6 +193,10 @@ class Inventory:
                     entry["connection"] = {
                         **defaults.get("connection", {}), **checked_entry.get("connection", {})
                     }
+                from dba.diagnostic_config import flatten_diagnostics, merge_diagnostics
+
+                entry["diagnostics"] = merge_diagnostics(
+                    defaults.get("diagnostics", {}), checked_entry.get("diagnostics", {}))
                 if not required <= set(entry):
                     raise ValidationError(f"{source}: {where}: Missing required inventory field")
                 database_id = entry["id"]
@@ -211,6 +220,15 @@ class Inventory:
                     if "tags" in materialized:
                         materialized["tags"] = list(materialized["tags"])
                     instance = DatabaseInstance(**materialized)
+                    diagnostic_sources = {
+                        key: "INVENTORY_DEFAULTS"
+                        for key in flatten_diagnostics(defaults.get("diagnostics", {}))}
+                    diagnostic_sources.update({
+                        key: "INVENTORY_INSTANCE"
+                        for key in flatten_diagnostics(checked_entry.get("diagnostics", {}))})
+                    object.__setattr__(instance, "_diagnostic_sources", diagnostic_sources)
+                    object.__setattr__(instance, "_diagnostic_defaults",
+                                       flatten_diagnostics(defaults.get("diagnostics", {})))
                 except ConnectionConfigError as exc:
                     raise ValidationError(f"{source}: {where}: {exc}") from None
                 except ValidationError:

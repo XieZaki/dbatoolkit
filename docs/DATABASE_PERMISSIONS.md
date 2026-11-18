@@ -61,12 +61,80 @@ GRANT SELECT ON SYS.DBA_DATA_FILES TO dba_monitor;
 GRANT SELECT ON SYS.DBA_TEMP_FREE_SPACE TO dba_monitor;
 ```
 
-Optional slow/blocking evidence:
+Slow/blocking lock evidence requires both direct object grants when the current
+reviewed `oracle/blocking.sql` collector runs. That SQL references both views even
+when no blocking rows are returned. A Slow profile requiring this collector
+reports an incomplete snapshot if either object is inaccessible:
 
 ```sql
 GRANT SELECT ON SYS.V_$LOCK TO dba_monitor;
 GRANT SELECT ON SYS.V_$LOCKED_OBJECT TO dba_monitor;
 ```
+
+Apply only the missing grant in the Inventory-selected PDB, using the actual
+monitoring principal in place of the example name. These are object-level SELECT
+permissions; they add no write, session-cancellation or administrative capability.
+They are separate grants, so SELECT on `SYS.V_$LOCK` does not authorize
+`SYS.V_$LOCKED_OBJECT`.
+
+Validate as the monitoring account in that same PDB:
+
+```sql
+SELECT SYS_CONTEXT('USERENV', 'CON_NAME') AS con_name FROM dual;
+SELECT owner, table_name, privilege, grantable
+FROM user_tab_privs_recd
+WHERE owner = 'SYS'
+  AND table_name IN ('V_$LOCK', 'V_$LOCKED_OBJECT')
+ORDER BY table_name, privilege;
+SELECT COUNT(*) AS visible_rows FROM SYS.V_$LOCK WHERE ROWNUM <= 1;
+SELECT COUNT(*) AS visible_rows FROM SYS.V_$LOCKED_OBJECT WHERE ROWNUM <= 1;
+```
+
+Corresponding DBA rollback statements, only if the respective grant is being
+withdrawn under the approved change:
+
+```sql
+REVOKE SELECT ON SYS.V_$LOCK FROM dba_monitor;
+REVOKE SELECT ON SYS.V_$LOCKED_OBJECT FROM dba_monitor;
+```
+
+Revocation removes the corresponding blocking evidence capability. Toolkit does
+not execute these grant, rollback or deployment-validation examples.
+
+On 2026-11-18 the user reported applying the missing Oracle lab permission.
+The `oraclefree` / `freepdb1` retry verified a direct `SELECT` grant on
+`SYS.V_$LOCK` with `GRANTABLE=NO` through the existing reviewed
+`preflight_object_grants` Registry query. That complete, untruncated grant snapshot
+contained no direct grant for `SYS.V_$LOCKED_OBJECT`. The three Slow retries
+returned ORA-00942 naming `SYS.V_$LOCKED_OBJECT`; their prior error had named
+`SYS.V_$LOCK`. At that checkpoint the remaining minimum permission was the existing
+`GRANT SELECT ON SYS.V_$LOCKED_OBJECT TO dba_monitor` example above, subject to DBA
+confirmation that the view exists in the selected PDB and that the principal is
+correct. That snapshot did not verify the second grant; the subsequent retry is
+recorded below.
+No exact administrator grant execution time or command transcript was collected.
+Evidence is retained in
+`reports/config003-oracle-regrant-20261118-194715-180952/oracle_direct_grants.json`
+and Acceptance section 119. This is scoped Oracle lab evidence; it does not
+certify every Oracle release or production deployment.
+
+The user then confirmed applying the second grant. A new Windows-local retry on
+2026-11-18 verified both direct object permissions in `freepdb1` through the same
+reviewed `user_tab_privs_recd` query, with an untruncated result:
+
+- `SYS.V_$LOCK`: `SELECT`, `GRANTABLE=NO`.
+- `SYS.V_$LOCKED_OBJECT`: `SELECT`, `GRANTABLE=NO`.
+
+The monitoring account remained `NON_PRIVILEGED`. All three CONFIG-003 Slow
+diagnoses and all three Top SQL diagnoses succeeded; the former blocking-query
+ORA-00942 was resolved in this lab. Six JSON/HTML/CLI configuration comparisons
+passed. Actual Top SQL counts remained 10/4/2 for default/global/instance policy.
+The grants were applied by the user, and Toolkit performed readonly verification
+only. The grant and revoke examples above remain deployment guidance; none was
+executed by Toolkit. Evidence is retained in
+`reports/config003-oracle-regrant2-20261118-195344-421055/oracle_direct_grants.json`
+and Acceptance section 120. Nonempty threshold-trigger tests remain a separate
+acceptance boundary.
 
 Optional FRA/archive/redo evidence:
 

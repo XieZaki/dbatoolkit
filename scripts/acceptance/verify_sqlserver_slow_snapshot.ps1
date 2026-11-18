@@ -77,9 +77,8 @@ try {
     New-Item -ItemType Directory -Path $output | Out-Null
     $htmlPath = Join-Path $output "$Scenario.html"
     $jsonPath = Join-Path $output "$Scenario.json"
-    & $dba @dbaOptions diagnose sqlserver2022 slow --json --report $htmlPath |
-        Set-Content -Encoding UTF8 -LiteralPath $jsonPath
-    if ($LASTEXITCODE -ne 0) { throw "Collection failed. Inspect the sanitized JSON at $jsonPath." }
+    & $dba @dbaOptions diagnose sqlserver2022 slow --quiet --report $htmlPath --json-report $jsonPath | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Collection or JSON report verification failed. Preserve outputs at $output." }
     $snapshot = Get-Content -Raw -Encoding UTF8 -LiteralPath $jsonPath | ConvertFrom-Json
     $page = Get-Content -Raw -Encoding UTF8 -LiteralPath $htmlPath
     $details = $snapshot.report.details
@@ -107,6 +106,7 @@ try {
 
     $pairVerifier = @'
 from html import unescape
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
@@ -135,10 +135,39 @@ assert description and [
     field.partition("\uff1a")[2] for field in unescape(description[1]).split(" \u00b7 ")
 ] == expected, "HTML diagnosis, completeness or snapshot consistency differs"
 
-section = page.split('id="current-requests">', 1)[1].split('id="blocking-chain"', 1)[0]
-cards = re.split(r'\bid="current-request-(\d+)"', section)[1:]
-assert len(cards) // 2 == min(len(requests), DEFAULT_HUMAN_REPORT_POLICY.max_related_sessions)
-for position, (key, card) in enumerate(zip(cards[::2], cards[1::2], strict=True)):
+class RequestMarkup(HTMLParser):
+    def __init__(self, markup):
+        super().__init__()
+        self.line_starts = [0, *(match.end() for match in re.finditer("\n", markup))]
+        self.regions = {"current-requests": [], "blocking-chain": []}
+        self.cards = []
+        self.feed(markup)
+        self.close()
+
+    def handle_starttag(self, tag, attrs):
+        element_id = dict(attrs).get("id")
+        if element_id is None:
+            return
+        line, column = self.getpos()
+        offset = self.line_starts[line - 1] + column
+        if element_id in self.regions:
+            self.regions[element_id].append(offset)
+        elif match := re.fullmatch(r"current-request-(\d+)", element_id):
+            self.cards.append((match[1], offset))
+
+
+markup = RequestMarkup(page)
+for region, offsets in markup.regions.items():
+    assert len(offsets) == 1, f"Expected exactly one HTML region with id {region}"
+start = markup.regions["current-requests"][0]
+end = markup.regions["blocking-chain"][0]
+assert start < end, "HTML current-requests region must precede blocking-chain"
+cards = [(key, offset) for key, offset in markup.cards if start < offset < end]
+expected_cards = min(len(requests), DEFAULT_HUMAN_REPORT_POLICY.max_related_sessions)
+assert len(cards) == expected_cards, f"HTML request card count differs: expected {expected_cards}, got {len(cards)}"
+for position, (key, offset) in enumerate(cards):
+    card_end = cards[position + 1][1] if position + 1 < len(cards) else end
+    card = page[offset:card_end]
     assert int(key) == position + 1, "HTML request order differs"
     row = requests[position]
     statement = (row.get("statement_sql_text") or "").replace("\r\n", "\n").replace("\r", "\n")

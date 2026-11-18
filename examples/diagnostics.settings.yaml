@@ -1,0 +1,18 @@
+diagnostics:
+  diagnostic_sql_timeout_seconds: 30
+  slow:
+    threshold_seconds: 10
+  limits:
+    top_n: 10
+  concurrency:
+    active_requests_threshold: 50
+  transactions:
+    idle_threshold_seconds: 60
+    sqlserver_long_transaction_seconds: 3600
+  plans:
+    sqlserver:
+      max_xml_bytes: 1048576
+      top_operators: 10
+      large_scan_rows: 100000
+      cardinality_ratio_warning: 10
+      cardinality_ratio_critical: 100

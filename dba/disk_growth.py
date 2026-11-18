@@ -69,7 +69,8 @@ def _sqlserver_file_growth(row: dict[str, Any]) -> dict[str, Any]:
 def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResult, ...],
                       version: str, *, required_collectors: tuple[str, ...],
                       optional_collectors: tuple[str, ...], profile_id: str,
-                      emergency_collectors: tuple[str, ...] = (), emergency: bool = False) -> DiskGrowthReport:
+                      emergency_collectors: tuple[str, ...] = (), emergency: bool = False,
+                      long_transaction_seconds: int = SQLSERVER_LONG_TRANSACTION_SECONDS) -> DiskGrowthReport:
     """Analyze only observed values; a failed/truncated source cannot prove absence."""
     results = {result.collector_name: result for result in collected}
     findings: list[Finding] = []
@@ -125,9 +126,10 @@ def build_disk_report(instance: DatabaseInstance, collected: tuple[CollectorResu
             log["last_log_backup_time"] = backups[0].get("last_log_backup_time")
         for row in (_rows(results, "disk_transactions") or _rows(results, "transactions")):
             age = _number(row.get("transaction_age_seconds"))
-            if age is not None and age >= SQLSERVER_LONG_TRANSACTION_SECONDS:
+            if age is not None and age >= long_transaction_seconds:
                 add("SQLSERVER_OLD_ACTIVE_TRANSACTION", Severity.WARNING, "transactions",
-                    {"transaction_id": row.get("transaction_id"), "age_seconds": age},
+                    {"transaction_id": row.get("transaction_id"), "age_seconds": age,
+                     "threshold_seconds": long_transaction_seconds},
                     "Review the owning transaction and log reuse evidence.")
         other["availability_groups"] = _rows(results, "disk_ag")
 
@@ -486,7 +488,9 @@ def _collect_disk_growth(adapter: DiskAdapter, *, emergency: bool = False,
                                required_collectors=sql_profile.required,
                                optional_collectors=optional,
                                profile_id=profile.sql_profile_id,
-                               emergency_collectors=sql_profile.emergency, emergency=emergency)
+                               emergency_collectors=sql_profile.emergency, emergency=emergency,
+                               long_transaction_seconds=getattr(getattr(adapter, "settings", None),
+                                   "sqlserver_long_transaction_seconds", SQLSERVER_LONG_TRANSACTION_SECONDS))
     if emergency:
         report.details["full_profile_evidence_complete"] = False
         report.details["full_profile_evidence_status"] = "PENDING"

@@ -858,7 +858,7 @@ def build_priority_candidates(report: DiagnosticReport, *, include_blocking_vict
             verified = (row.get("transaction_observed") is True and row.get("transaction_identity_verified") is True
                         and row.get("unfinished_transaction_confirmed") is True)
             age_seconds = _int(age)
-            transaction_threshold = SQLSERVER_LONG_TRANSACTION_SECONDS
+            transaction_threshold = details.get("sqlserver_long_transaction_seconds", SQLSERVER_LONG_TRANSACTION_SECONDS)
             tx_ref = _slow_sample_reference(details, "transactions", "details.roots[session].transaction_age_seconds", {
                 "transaction_id": row.get("transaction_id"), "transaction_age_seconds": age_seconds,
                 "transaction_identity_verified": row.get("transaction_identity_verified"),

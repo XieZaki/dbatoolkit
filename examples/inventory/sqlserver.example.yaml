@@ -1,3 +1,9 @@
+defaults:
+  diagnostics:
+    slow:
+      threshold_seconds: 15
+    limits:
+      top_n: 8
 databases:
   - id: example-sqlserver
     name: Example SQL Server
@@ -9,6 +15,9 @@ databases:
     credential_alias: example-only-sqlserver-monitor
     enabled: false
     environment: example
+    diagnostics:
+      slow:
+        threshold_seconds: 20
     connection:
       encrypt: true
       trust_server_certificate: false

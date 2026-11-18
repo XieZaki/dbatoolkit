@@ -37,6 +37,8 @@ Slow and Disk-Growth now print a Simplified Chinese emergency summary after thei
 
 The default report name is `<database_id>_<scenario>_<YYYYMMDD_HHMMSS>.html` in `reports/`; a same-second collision adds `_02`, `_03`, and so on. Human report times use the machine's local timezone. Pass `--report path/to/report.html` to choose an output file; a non-HTML suffix is replaced with `.html`. Reports contain no external assets and do not open a browser automatically. SQL Server plan diagnosis writes a paired `.sqlplan` only when ShowPlan XML is available; treat both files as sensitive report artifacts. Human report budgets default to 2 MiB soft / 8 MiB hard. At limits the report reduces low-priority evidence, names displayed/omitted counts, and preserves Summary, Recovery, Root Cause, critical blocking evidence and Collection Quality. `--json` is the structured output; it is not described as a complete raw snapshot beyond the collectors' own row limits.
 
+To save JSON and HTML from one diagnostic run, pass `--json-report path/to/report.json --report path/to/report.html`. The CLI validates and atomically publishes the JSON as UTF-8 without a BOM. Use a new output directory for each capture. This avoids native stdout decoding when saving reports in Windows PowerShell 5.1.
+
 Advanced maintenance commands remain available: `show`, `validate`, `driver-info`, `runtime-info`, `credentials`, `test-connection`, and `collect`. Running `dba` or `dba help` shows common tasks.
 
 `doctor` and `runtime-info` are local-only: they never request passwords or connect to a database. Connection, permission inspection, collection, and diagnosis commands verify their database driver before invoking the Credential Provider. Structured SQL audit events are written to `logs/dba.jsonl` with bounded rotation (5 MB, three backups), not mixed into interactive output; logs are excluded from version control. See [DEPLOYMENT.md](DEPLOYMENT.md) for Windows/Linux bootstrap, offline wheelhouse, ODBC fallback, and upgrades.
@@ -119,3 +121,12 @@ For repeated encrypted-store use, `dba credentials unlock` prompts once and open
 ## Opt-in encrypted SQLite credentials (Windows)
 
 The existing credential commands accept `--backend sqlite` and optional `--store-path <private-directory>/credentials.db`. SQLite is never selected by `auto`. Database commands select it explicitly with `--credential-backend sqlite` and optional `--credential-store-path <path>`. Explicit migration uses `dba credentials migrate --source <old-file> --destination <new-private-directory>/credentials.db`; it verifies a copy and never switches Providers or changes the source. Do not run this against real credentials without separate operational approval. See [SQLite Provider and migration](design/credential-sqlite-provider.md) for commands, quarantine/recovery, rollback after new writes, Windows-only support and security limits. Legacy JSON writes are rejected in this release.
+
+## Unified diagnostic policies
+
+See [Diagnostic configuration](DIAGNOSTIC_CONFIGURATION.md) for CONFIG-003
+defaults, bounds, legacy field mappings and source evidence. Use
+examples/diagnostics.settings.yaml as a settings template. Inventory diagnostics
+belong beside connection, with per-field defaults and instance overrides.
+Main diagnosis does not acquire plans. Automatic collection/count options are excluded
+from the formal configuration. SQL Server independent Plan Analyzer settings remain supported.
